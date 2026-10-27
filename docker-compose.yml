@@ -4,7 +4,9 @@ services:
     environment:
       POSTGRES_DB: paysilo
       POSTGRES_USER: paysilo
-      POSTGRES_PASSWORD: paysilo
+      # Local dev only. Set POSTGRES_PASSWORD in your .env (see .env.example);
+      # compose refuses to start without it. Never commit a real password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
     ports:
       - "5432:5432"
     volumes:
@@ -19,7 +21,7 @@ services:
       AIRWALLEX_API_KEY: ${AIRWALLEX_API_KEY:-}
       AIRWALLEX_BASE_URL: ${AIRWALLEX_BASE_URL:-https://api-demo.airwallex.com/api/v1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      DATABASE_URL: postgresql://paysilo:paysilo@postgres:5432/paysilo
+      DATABASE_URL: postgresql://paysilo:${POSTGRES_PASSWORD}@postgres:5432/paysilo
       METAL_RPC_URL: ${METAL_RPC_URL:-}
       METAL_PRIVATE_KEY: ${METAL_PRIVATE_KEY:-}
       METAL_REGISTRY_ADDRESS: ${METAL_REGISTRY_ADDRESS:-}
