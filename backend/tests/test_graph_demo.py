@@ -13,13 +13,13 @@ def test_full_demo_scenario():
 
     borealis = report["employers"]["borealis"]
     assert borealis["status"] == "HELD_SHORTFALL"
-    assert borealis["assessment"]["shortfall_usd"] == "1493.88"
+    assert borealis["assessment"]["shortfall_usd"] == "2642.88"  # payroll + $149 fee + $1,000 reserve vs $5,000
     assert borealis["fee_charged_usd"] == "0.00"  # no fee for a payroll that never ran
 
     # Cobalt's mid-run deposit did not unblock Borealis.
     assert report["cobalt"]["deposit_usd"] == "10000.00"
     assert report["borealis_recheck"]["can_run"] is False
-    assert report["borealis_recheck"]["shortfall_usd"] == "1493.88"
+    assert report["borealis_recheck"]["shortfall_usd"] == "2642.88"
     assert "tenant-scoped" in report["cross_tenant_guard"]
     assert any("tenant-scoped" in line for line in report["audit"])
 

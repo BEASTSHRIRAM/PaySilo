@@ -10,8 +10,9 @@
 Vertex Payroll Services runs payroll for other small companies. Acme
 Manufacturing GmbH loads USD 20,000 and must pay Lena Fischer EUR 3,400 and
 Tomas Rivera EUR 2,600. Borealis Labs AB loads only USD 5,000 but owes
-Ingrid Solberg EUR 6,000 — plus SWIFT fees, priced *before* conversion, it
-needs about USD 6,493.88. Borealis is **short by USD 1,493.88**.
+Ingrid Solberg EUR 6,000 — plus SWIFT fees, priced *before* conversion, the
+USD 149 run fee, and a USD 1,000 reserve floor, it needs about USD 7,642.88.
+Borealis is **short by USD 2,642.88**.
 
 The platform total looks rich — and mid-run, Cobalt Retail LLC receives a
 fresh USD 10,000 deposit. A tired accountant, or a badly built AI, quietly
@@ -76,34 +77,33 @@ shortfall and the employer's options).
 
 ## Run it — demo mode, NO API keys
 
-### Backend + tests
+Needs Python 3.12 with [uv](https://docs.astral.sh/uv/) and Node 20+. The
+commands below work in PowerShell and bash.
 
-```bash
+### Backend (Python 3.12 via uv)
+
+```
 cd backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pytest                      # policy, tenant guard, idempotency, ledger, TAP, full demo
-uvicorn app.main:app --port 8000
+uv sync
+uv run pytest
+uv run uvicorn app.main:app --reload --port 8000
 ```
 
-Then:
+API docs at http://localhost:8000/docs.
 
-```bash
-curl -X POST localhost:8000/runs/demo   # full Kit 6 scenario via the simulator
-curl localhost:8000/employers
-curl localhost:8000/audit
-```
+Config is read from `.env` (repo root or `backend/`, see `.env.example`).
+With no `DATABASE_URL` a local SQLite file `backend/paysilo.db` is used. For
+Supabase, put the Postgres connection string in `DATABASE_URL` (special
+characters in the password must be percent-encoded).
 
-Or just the scenario in Python:
-
-```bash
-python -c "from app.agents.demo import run_demo; import json; print(json.dumps(run_demo(), indent=2))"
-```
+A demo organization is seeded automatically outside live mode: log in with
+`demo@paysilo.test` / `SiloDemo2026`, or use the "Use demo account" button on
+the login page.
 
 Expected demo outcome (FX 1 EUR = 1.08 USD):
 
 - **Acme** — required EUR 6,025.70 (6,000 + 2 × 12.85 SWIFT fees) → **SETTLED**, fee USD 149 charged.
-- **Borealis** — required ≈ USD 6,493.88 vs USD 5,000 → **HELD_SHORTFALL** by ≈ USD 1,493.88, escalated; **no fee**.
+- **Borealis** — needs ≈ USD 7,642.88 (SWIFT fees, USD 149 run fee, USD 1,000 reserve floor) vs USD 5,000 → **HELD_SHORTFALL** by USD 2,642.88, escalated; **no fee**.
 - **Cobalt** — USD 10,000 deposit lands mid-run; Borealis re-check is unchanged; the cross-tenant guard refusal is written to the audit log.
 - **Platform** — ends with exactly **USD 149** in fees. No tenant money touched.
 
@@ -111,18 +111,28 @@ Interactive runs: `POST /runs` (stops at the approval/escalation interrupt),
 `POST /runs/{run_id}/approve` with `{"decision": "approve" | "hold"}`,
 `GET /runs/{run_id}`.
 
-### Frontend
+### Frontend (Node 20+)
 
-```bash
+```
 cd frontend
 npm install
-npm run dev        # http://localhost:3000 — "Run demo payroll" drives the backend
+npm run dev
 ```
 
-### Everything at once
+Open http://localhost:3000. The frontend calls `/api/*`, which Next.js proxies
+to the backend at `BACKEND_URL` (default http://localhost:8000), so the session
+cookie stays first-party. Regenerate the mascot animations with
+`node scripts/lottie/build.mjs`.
 
-```bash
-cp .env.example .env
+### Docker (optional)
+
+```
+copy .env.example .env      # PowerShell / cmd (bash: cp .env.example .env)
+```
+
+Set `POSTGRES_PASSWORD` in `.env`, then:
+
+```
 docker compose up --build   # postgres + backend :8000 + frontend :3000
 ```
 

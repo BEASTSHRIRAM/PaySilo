@@ -11,31 +11,32 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backend/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paysilo -d paysilo"]
+      interval: 3s
+      retries: 20
 
   backend:
     build: ./backend
+    env_file:
+      - path: .env
+        required: false
     environment:
-      APP_ENV: ${APP_ENV:-demo}
-      AIRWALLEX_CLIENT_ID: ${AIRWALLEX_CLIENT_ID:-}
-      AIRWALLEX_API_KEY: ${AIRWALLEX_API_KEY:-}
-      AIRWALLEX_BASE_URL: ${AIRWALLEX_BASE_URL:-https://api-demo.airwallex.com/api/v1}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # The bundled Postgres; remove this line to use DATABASE_URL from .env (e.g. Supabase).
       DATABASE_URL: postgresql://paysilo:${POSTGRES_PASSWORD}@postgres:5432/paysilo
-      METAL_RPC_URL: ${METAL_RPC_URL:-}
-      METAL_PRIVATE_KEY: ${METAL_PRIVATE_KEY:-}
-      METAL_REGISTRY_ADDRESS: ${METAL_REGISTRY_ADDRESS:-}
+      CORS_ORIGINS: '["http://localhost:3000"]'
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      args:
+        # The Next.js server proxies /api/* to the backend (resolved at build time).
+        BACKEND_URL: http://backend:8000
     ports:
       - "3000:3000"
     depends_on:

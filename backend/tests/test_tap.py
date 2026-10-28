@@ -70,3 +70,12 @@ def test_unregistered_agent_rejected():
                             registry=TapAgentRegistry(), body=BODY)
     assert result.valid is False
     assert result.code == "unregistered_agent"
+
+
+def test_covered_digest_without_body_fails_closed():
+    key, registry = _setup()
+    headers = sign_request(key, method="POST", authority=AUTHORITY, path=PATH, body=BODY)
+    result = verify_request(method="POST", authority=AUTHORITY, path=PATH, headers=headers,
+                            registry=registry, body=None)
+    assert result.valid is False
+    assert result.code == "missing_body"

@@ -7,9 +7,9 @@ Kit 6 scenario depends on:
 - connected accounts with strictly separate wallets,
 - simulation deposits,
 - FX quotes/conversions at the demo rate (1 EUR = 1.08 USD),
-- beneficiaries and SWIFT transfers (a EUR SWIFT transfer debits the salary
-  plus the EUR 12.85 SWIFT fee — which is exactly why policy prices the fee
-  BEFORE converting),
+- beneficiaries and transfers (a transfer debits the salary plus the payout
+  fee from the policy schedule — e.g. EUR 12.85 per EUR SWIFT payout — which
+  is exactly why policy prices the fee BEFORE converting),
 - platform charges (debit an employer, credit the platform wallet),
 - **idempotency**: every mutating call takes a ``request_id``; a repeated
   ``request_id`` returns the original result and never moves money twice.
@@ -25,8 +25,9 @@ from decimal import Decimal
 from ..money import round_money, to_decimal
 from ..policy import PAYROLL_POLICY
 
-# Demo FX: USD value of one unit of each currency. 1 EUR = 1.08 USD.
-USD_VALUE: dict[str, Decimal] = {"USD": Decimal("1"), "EUR": Decimal("1.08")}
+# Demo FX: USD value of one unit of each currency. 1 EUR = 1.08 USD is the
+# Starter Kit 6 rate; GBP is included so multi-currency payroll can be demoed.
+USD_VALUE: dict[str, Decimal] = {"USD": Decimal("1"), "EUR": Decimal("1.08"), "GBP": Decimal("1.27")}
 
 PLATFORM_ACCOUNT_ID = "platform"
 
@@ -93,6 +94,14 @@ class AirwallexSimulator:
 
         return self._once(request_id, _create)
 
+    def restore_account(self, account_id: str, *, business_name: str,
+                        balances: dict[str, Decimal] | None = None) -> None:
+        """Rehydrate an account (e.g. from the persisted ledger after a restart)."""
+        self._accounts[account_id] = {
+            "name": business_name, "contact": "", "status": "ACTIVE",
+            "balances": {c: round_money(to_decimal(v)) for c, v in (balances or {}).items()},
+        }
+
     def get_balances(self, *, account_id: str | None = None) -> dict[str, Decimal]:
         acct = self._account(account_id or PLATFORM_ACCOUNT_ID)
         return {c: round_money(v) for c, v in acct["balances"].items() if v != 0}
@@ -153,10 +162,17 @@ class AirwallexSimulator:
 
     # -- beneficiaries & transfers ------------------------------------------
     def create_beneficiary(self, *, request_id: str, on_behalf_of: str, name: str,
-                           iban: str = "", swift_code: str = "") -> dict:
+                           currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
+                           iban: str = "", swift_code: str = "", account_number: str = "",
+                           routing_code: str = "") -> dict:
         def _create() -> dict:
+            self._account(on_behalf_of)
+            if not (iban or account_number):
+                raise SimulatorError(f"Beneficiary {name} has no IBAN or account number")
             bene = {"id": f"bene_{next(self._seq):04d}", "on_behalf_of": on_behalf_of,
-                    "name": name, "iban": iban, "swift_code": swift_code, "status": "APPROVED"}
+                    "name": name, "currency": currency, "country_code": country_code,
+                    "method": method, "iban": iban, "swift_code": swift_code,
+                    "account_number": account_number, "status": "APPROVED"}
             self._beneficiaries[bene["id"]] = bene
             return bene
 
@@ -167,9 +183,12 @@ class AirwallexSimulator:
         amount = round_money(to_decimal(amount))
 
         def _transfer() -> dict:
-            if beneficiary_id not in self._beneficiaries:
+            bene = self._beneficiaries.get(beneficiary_id)
+            if bene is None:
                 raise SimulatorError(f"Unknown beneficiary {beneficiary_id}")
-            fee = PAYROLL_POLICY.swift_fee_eur if (method == "SWIFT" and currency == "EUR") else Decimal("0")
+            if bene["on_behalf_of"] != on_behalf_of:
+                raise SimulatorError("Beneficiary belongs to a different connected account")
+            fee = PAYROLL_POLICY.payout_fee(currency, method)
             self._debit(on_behalf_of, currency, round_money(amount + fee))
             transfer = {"id": f"trf_{next(self._seq):04d}", "on_behalf_of": on_behalf_of,
                         "beneficiary_id": beneficiary_id, "amount": amount, "currency": currency,

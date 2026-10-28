@@ -6,7 +6,9 @@ checkpointer never has to serialize Decimals. Nodes convert with
 
 Status lifecycle: RECEIVED -> PRICED -> RESERVED -> APPROVED -> SENT ->
 SETTLED, or -> HELD_SHORTFALL (escalated, awaiting the employer's own
-funds) / HELD_BY_HUMAN (approval refused) / REFUSED (policy refusal).
+funds) / HELD_BY_HUMAN (human chose hold) / APPROVAL_REJECTED (approval
+failed Visa TAP verification) / REFUSED (policy refusal) / FAILED (payout
+step errored; safe to retry, every call is idempotent).
 """
 
 from __future__ import annotations
@@ -14,10 +16,17 @@ from __future__ import annotations
 from typing import Optional, TypedDict
 
 
-class PayLineDict(TypedDict):
+class PayLineDict(TypedDict, total=False):
     name: str
     amount: str  # Decimal text, e.g. "3400.00"
     currency: str
+    method: str  # "SWIFT" | "LOCAL"
+    iban: str
+    swift_code: str
+    account_number: str
+    routing_code: str
+    country_code: str
+    contractor_id: str
 
 
 class PayrollRunState(TypedDict, total=False):
@@ -29,12 +38,16 @@ class PayrollRunState(TypedDict, total=False):
     funding_usd: str
     pay_lines: list[PayLineDict]
     raw_input: Optional[str]
+    directory: list[PayLineDict]  # this employer's contractors (bank details), for intake matching
     # policy output (all Decimal text)
     assessment: Optional[dict]
     route: Optional[str]  # "approval" | "escalate" | "refused"
     decision: Optional[str]  # human decision from an interrupt
+    decided_by: Optional[str]
     status: str
     audit: list[str]
+    events: list[dict]  # {agent, agent_name, level, message} — structured audit for the UI
+    signatures: list[dict]  # Visa TAP signatures over approvals and payout instructions
     fee_charged_usd: str
     metal_receipt: Optional[dict]
     explanation: Optional[str]
