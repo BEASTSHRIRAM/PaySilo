@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+httpx
+langgraph
+langchain-core
+langchain-anthropic
+cryptography
+pytest
