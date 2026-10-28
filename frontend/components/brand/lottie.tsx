@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 
 import { cn } from "@/lib/utils";
 
-const Lottie = dynamic(() => import("lottie-react"), { ssr: false });
+const Lottie = dynamic(() => import("lottie-react").then((m) => m.Lottie), { ssr: false });
 
 const loaders = {
   "silo-idle": () => import("@/lib/lottie/silo-idle.json"),
@@ -64,7 +64,7 @@ export function LottieAnimation({ name, className, loop = true, label }: Props) 
 
   return (
     <div className={cn("relative", className)} role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}>
-      {data && <Lottie key={name} animationData={data} loop={loop && !reduced} autoplay={!reduced} className="size-full" />}
+      {data && <Lottie key={name} src={data} loop={loop && !reduced} autoplay={!reduced} className="size-full" />}
     </div>
   );
 }

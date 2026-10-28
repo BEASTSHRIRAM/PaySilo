@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  anim, composition, cycle, ellipse, fill, group, path, rect, shapeLayer, smooth, star, stroke, trim,
+  anim, composition, cycle, ellipse, fill, group, path, rect, shapeLayer, smooth, stroke, trim,
 } from "./lib.mjs";
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "lib", "lottie");
@@ -180,11 +180,6 @@ function siloCheer() {
   const op = 90;
   const jump = anim([[0, [256, 470]], [10, [256, 474]], [36, [256, 420]], [60, [256, 470]], [70, [256, 474]], [90, [256, 470]]]);
   const squash = anim([[0, [100, 100]], [10, [108, 92]], [22, [94, 106]], [48, [100, 100]], [62, [108, 92]], [76, [100, 100]], [90, [100, 100]]]);
-  const sparkles = [[150, 150, 18, 30], [372, 120, 14, 40], [120, 300, 12, 50], [400, 300, 16, 20]].map(([x, y, r, t0]) =>
-    group(`sparkle-${x}`, [star(x, y, r), fill(C.gold)], {
-      pivot: [x, y], scale: anim([[0, [0, 0]], [t0, [0, 0]], [t0 + 12, [110, 110]], [t0 + 26, [0, 0]], [op, [0, 0]]]),
-      rotation: anim([[0, 0], [op, 90]]),
-    }));
   const silo = shapeLayer("silo", [
     arm("arm-r", [300, 350], 92, cycle(op, [28, 40])),
     arm("arm-l", [212, 350], 92, cycle(op, [-28, -40])),
@@ -197,9 +192,8 @@ function siloCheer() {
     pivot: [256, 120],
     position: anim([[0, [256, 92]], [36, [256, 26]], [60, [256, 92]], [90, [256, 92]]]),
   });
-  const fx = shapeLayer("sparkles", sparkles, op);
   const shadow = shadowLayer(op, anim([[0, [100, 100]], [36, [70, 70]], [60, [100, 100]], [90, [100, 100]]]));
-  return composition("silo-cheer", { w: 512, h: 512, op, layers: [shadow, silo, toss, fx] });
+  return composition("silo-cheer", { w: 512, h: 512, op, layers: [shadow, silo, toss] });
 }
 
 function siloShy() {

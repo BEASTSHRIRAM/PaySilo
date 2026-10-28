@@ -23,3 +23,6 @@ out/
 *.db
 *.db-journal
 .pytest_tmp/
+
+# Next.js verification builds
+.next-*/
