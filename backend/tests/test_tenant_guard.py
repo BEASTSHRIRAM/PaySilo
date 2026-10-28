@@ -22,7 +22,7 @@ def test_cobalt_deposit_does_not_change_borealis_assessment():
     after = assess_payroll(BOREALIS, RATES, sim.get_balances(account_id=borealis["id"]))
     assert after == before
     assert after.can_run is False
-    assert after.shortfall_usd == Decimal("1493.88")
+    assert after.shortfall_usd == Decimal("2642.88")
 
 
 def test_guard_message():

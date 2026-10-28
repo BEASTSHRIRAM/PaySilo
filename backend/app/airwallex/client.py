@@ -121,11 +121,23 @@ class AirwallexClient:
 
     # -- beneficiaries & transfers ----------------------------------------------
     def create_beneficiary(self, *, request_id: str, on_behalf_of: str, name: str,
-                           iban: str = "", swift_code: str = "") -> dict:
+                           currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
+                           iban: str = "", swift_code: str = "", account_number: str = "",
+                           routing_code: str = "") -> dict:
+        bank_account: dict = {"account_name": name, "account_currency": currency,
+                              "bank_country_code": country_code}
+        if iban:
+            bank_account["iban"] = iban
+        if swift_code:
+            bank_account["swift_code"] = swift_code
+        if account_number:
+            bank_account["account_number"] = account_number
+        if routing_code:
+            bank_account["account_routing_type1"] = "aba" if currency == "USD" else "sort_code"
+            bank_account["account_routing_value1"] = routing_code
         payload = {"request_id": request_id,
-                   "beneficiary": {"first_name": name, "bank_account": {
-                       "iban": iban, "swift_code": swift_code, "currency": "EUR",
-                       "country_code": "DE", "account_currency": "EUR"}}}
+                   "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account},
+                   "transfer_methods": [method]}
         self._request("POST", "/beneficiaries/validate", on_behalf_of=on_behalf_of, json=payload)
         return self._request("POST", "/beneficiaries/create", on_behalf_of=on_behalf_of, json=payload)
 

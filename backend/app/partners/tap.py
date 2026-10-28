@@ -216,7 +216,11 @@ def verify_request(*, method: str, authority: str, path: str, headers: dict[str,
             return TapVerifyResult(False, "missing_headers",
                                    detail=f'Covered component "{component}" has no header.')
         header_values[component] = value
-    if "content-digest" in components and body is not None:
+    if "content-digest" in components:
+        if body is None:
+            # Fail closed: a covered digest we cannot check is not a verified body.
+            return TapVerifyResult(False, "missing_body",
+                                   detail="Signature covers content-digest but no body was supplied to verify.")
         if header_values["content-digest"] != content_digest(body):
             return TapVerifyResult(False, "digest_mismatch",
                                    detail="The request body does not match the covered Content-Digest.")

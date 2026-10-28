@@ -14,7 +14,8 @@ def test_transfer_idempotent_on_eur_wallet():
     sim = AirwallexSimulator()
     acct = sim.create_connected_account(request_id="acct-1", business_name="Acme Manufacturing GmbH")
     sim.deposit(request_id="fund-eur", account_id=acct["id"], amount=Decimal("6025.70"), currency="EUR")
-    bene = sim.create_beneficiary(request_id="bene-1", on_behalf_of=acct["id"], name="Lena Fischer")
+    bene = sim.create_beneficiary(request_id="bene-1", on_behalf_of=acct["id"], name="Lena Fischer",
+                                  iban="DE89370400440532013000")
     rid = request_id_for("run-1", "pay-0")
     first = sim.create_transfer(request_id=rid, on_behalf_of=acct["id"],
                                 beneficiary_id=bene["id"], amount=Decimal("3400"))
