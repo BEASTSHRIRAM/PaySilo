@@ -56,6 +56,9 @@ class Ledger:
     def post(self, entries: list[tuple[str, object]], memo: str = "") -> LedgerTransaction:
         """Append a balanced transaction or raise :class:`LedgerError`."""
         built = [LedgerEntry(account=a, amount=round_money(to_decimal(v))) for a, v in entries]
+        built = [e for e in built if e.amount != 0]  # a zero leg (e.g. a free LOCAL payout fee) carries no value
+        if not built:
+            raise LedgerError("Transaction has no non-zero entries")
 
         employer_namespaces = {
             _namespace(e.account) for e in built if _namespace(e.account) not in SHARED_NAMESPACES

@@ -1,0 +1,393 @@
+"""PaySilo data model (SQLAlchemy 2, Postgres/Supabase-first, SQLite-compatible).
+
+Tenancy has two levels and both are explicit on every row that matters:
+
+    Organization (the payroll agency, e.g. Vertex Payroll Services)
+      └── Employer (a client company = one Airwallex connected account = one silo)
+            ├── Contractor (a person the employer pays = one beneficiary)
+            └── PayrollRun ─┬─ PayLine (one payout)
+                            ├─ Approval (Visa TAP-signed human decision)
+                            ├─ AgentEvent (what each agent did, in order)
+                            ├─ AirwallexRequest (every API call, keyed by request_id)
+                            └─ SettlementReceipt (Metal anchor of the reconciliation)
+    LedgerTransaction ─ LedgerEntry (double-entry, one employer per transaction)
+
+Money is ``NUMERIC(19, 2)``; balances are never stored, only derived from
+ledger entries. ``organization_id`` is denormalised onto child rows so every
+query can (and does) filter by tenant without a join.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, date, datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+Money = Numeric(19, 2)
+JsonType = JSON().with_variant(JSONB(), "postgresql")
+# SQLite only auto-increments INTEGER PRIMARY KEY, so BigInteger ids fall back to Integer there.
+BigId = BigInteger().with_variant(Integer(), "sqlite")
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _in(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+ROLES = ("owner", "admin", "approver", "viewer")
+EMPLOYER_STATUSES = ("PENDING", "ACTIVE", "SUSPENDED")
+PAYOUT_METHODS = ("SWIFT", "LOCAL")
+RUN_STATUSES = ("RECEIVED", "PRICED", "RESERVED", "APPROVED", "SENT", "SETTLED", "HELD_SHORTFALL",
+                "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED")
+PAY_LINE_STATUSES = ("PENDING", "PAID", "HELD", "FAILED")
+APPROVAL_KINDS = ("approval", "escalation")
+DECISIONS = ("approve", "hold")
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Identity & tenancy
+# ---------------------------------------------------------------------------
+
+class Organization(TimestampMixin, Base):
+    """The platform customer: a payroll agency running payroll for many employers."""
+
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    legal_name: Mapped[str | None] = mapped_column(String(200))
+    country: Mapped[str] = mapped_column(String(2), nullable=False)  # ISO 3166-1 alpha-2
+    base_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    industry: Mapped[str | None] = mapped_column(String(80))
+    size_band: Mapped[str | None] = mapped_column(String(20))  # "1-10", "11-50", ...
+    website: Mapped[str | None] = mapped_column(String(200))
+    airwallex_platform_account_id: Mapped[str | None] = mapped_column(String(64))
+    is_demo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    memberships: Mapped[list[Membership]] = relationship(back_populates="organization", cascade="all, delete-orphan")
+    employers: Mapped[list[Employer]] = relationship(back_populates="organization", cascade="all, delete-orphan")
+
+
+class User(TimestampMixin, Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(254), nullable=False, unique=True)  # stored lower-case
+    full_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(100), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    memberships: Mapped[list[Membership]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class Membership(TimestampMixin, Base):
+    __tablename__ = "memberships"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id", name="uq_membership_org_user"),
+        CheckConstraint(_in("role", ROLES), name="ck_membership_role"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="owner")
+
+    organization: Mapped[Organization] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="memberships")
+
+
+# ---------------------------------------------------------------------------
+# Employers (silos) & contractors
+# ---------------------------------------------------------------------------
+
+class Employer(TimestampMixin, Base):
+    """One client company. One Airwallex connected account. One silo."""
+
+    __tablename__ = "employers"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_employer_org_name"),
+        CheckConstraint(_in("status", EMPLOYER_STATUSES), name="ck_employer_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    legal_name: Mapped[str | None] = mapped_column(String(200))
+    country: Mapped[str] = mapped_column(String(2), nullable=False)
+    contact_name: Mapped[str | None] = mapped_column(String(120))
+    contact_email: Mapped[str | None] = mapped_column(String(254))
+    funding_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    airwallex_account_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+
+    organization: Mapped[Organization] = relationship(back_populates="employers")
+    contractors: Mapped[list[Contractor]] = relationship(back_populates="employer", cascade="all, delete-orphan",
+                                                         order_by="Contractor.created_at")
+
+    @property
+    def ledger_key(self) -> str:
+        """The employer's ledger namespace — globally unique, never a display name."""
+        return f"emp_{self.id.hex}"
+
+
+class Contractor(TimestampMixin, Base):
+    """A person an employer pays. Maps 1:1 to an Airwallex beneficiary."""
+
+    __tablename__ = "contractors"
+    __table_args__ = (
+        CheckConstraint(_in("payout_method", PAYOUT_METHODS), name="ck_contractor_method"),
+        CheckConstraint("iban IS NOT NULL OR account_number IS NOT NULL", name="ck_contractor_bank_details"),
+        CheckConstraint("default_amount IS NULL OR default_amount > 0", name="ck_contractor_amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    full_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(254))
+    country: Mapped[str] = mapped_column(String(2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    payout_method: Mapped[str] = mapped_column(String(8), nullable=False, default="SWIFT")
+    iban: Mapped[str | None] = mapped_column(String(34))
+    swift_code: Mapped[str | None] = mapped_column(String(11))
+    account_number: Mapped[str | None] = mapped_column(String(34))
+    routing_code: Mapped[str | None] = mapped_column(String(20))
+    default_amount: Mapped[Decimal | None] = mapped_column(Money)
+    airwallex_beneficiary_id: Mapped[str | None] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    employer: Mapped[Employer] = relationship(back_populates="contractors")
+
+
+# ---------------------------------------------------------------------------
+# Payroll runs
+# ---------------------------------------------------------------------------
+
+class PayrollRun(TimestampMixin, Base):
+    """One employer's payroll run. ``id`` is also the LangGraph thread id."""
+
+    __tablename__ = "payroll_runs"
+    __table_args__ = (
+        CheckConstraint(_in("status", RUN_STATUSES), name="ck_run_status"),
+        Index("ix_runs_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="RECEIVED")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")  # manual|text|demo
+    period_label: Mapped[str | None] = mapped_column(String(60))
+    pay_date: Mapped[date | None] = mapped_column(Date)
+    raw_input: Mapped[str | None] = mapped_column(Text)
+    payroll_currency: Mapped[str | None] = mapped_column(String(5))  # ISO code or "MIXED"
+    required_usd: Mapped[Decimal | None] = mapped_column(Money)
+    shortfall_usd: Mapped[Decimal | None] = mapped_column(Money)
+    fee_charged_usd: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    assessment: Mapped[dict | None] = mapped_column(JsonType)
+    pending_interrupt: Mapped[dict | None] = mapped_column(JsonType)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    employer: Mapped[Employer] = relationship()
+    pay_lines: Mapped[list[PayLine]] = relationship(back_populates="run", cascade="all, delete-orphan",
+                                                    order_by="PayLine.position")
+    events: Mapped[list[AgentEvent]] = relationship(back_populates="run", cascade="all, delete-orphan",
+                                                    order_by="AgentEvent.seq")
+    approvals: Mapped[list[Approval]] = relationship(back_populates="run", cascade="all, delete-orphan",
+                                                     order_by="Approval.created_at")
+
+
+class PayLine(Base):
+    __tablename__ = "pay_lines"
+    __table_args__ = (
+        UniqueConstraint("run_id", "position", name="uq_pay_line_position"),
+        CheckConstraint("amount > 0", name="ck_pay_line_amount_positive"),
+        CheckConstraint(_in("method", PAYOUT_METHODS), name="ck_pay_line_method"),
+        CheckConstraint(_in("status", PAY_LINE_STATUSES), name="ck_pay_line_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), nullable=False)
+    contractor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contractors.id", ondelete="SET NULL"))
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    beneficiary_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    method: Mapped[str] = mapped_column(String(8), nullable=False, default="SWIFT")
+    payout_fee: Mapped[Decimal | None] = mapped_column(Money)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDING")
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)  # Airwallex idempotency key
+    airwallex_transfer_id: Mapped[str | None] = mapped_column(String(64))
+
+    run: Mapped[PayrollRun] = relationship(back_populates="pay_lines")
+
+
+class Approval(TimestampMixin, Base):
+    """A human decision, with the Visa TAP signature that makes it count."""
+
+    __tablename__ = "approvals"
+    __table_args__ = (
+        CheckConstraint(_in("kind", APPROVAL_KINDS), name="ck_approval_kind"),
+        CheckConstraint(_in("decision", DECISIONS), name="ck_approval_decision"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), nullable=False,
+                                              index=True)
+    kind: Mapped[str] = mapped_column(String(12), nullable=False)
+    decision: Mapped[str] = mapped_column(String(8), nullable=False)
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_by_email: Mapped[str] = mapped_column(String(254), nullable=False)
+    signed_body: Mapped[str | None] = mapped_column(Text)  # canonical JSON that was signed
+    tap_key_id: Mapped[str | None] = mapped_column(String(80))
+    tap_signature_input: Mapped[str | None] = mapped_column(Text)
+    tap_signature: Mapped[str | None] = mapped_column(Text)
+    tap_nonce: Mapped[str | None] = mapped_column(String(64), unique=True)  # single-use, DB-enforced
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    run: Mapped[PayrollRun] = relationship(back_populates="approvals")
+
+
+class AgentEvent(TimestampMixin, Base):
+    """Ordered, per-run record of what each agent did. Append-only."""
+
+    __tablename__ = "agent_events"
+    __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_agent_event_seq"),)
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), nullable=False)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent: Mapped[str] = mapped_column(String(24), nullable=False)
+    level: Mapped[str] = mapped_column(String(10), nullable=False, default="info")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    run: Mapped[PayrollRun] = relationship(back_populates="events")
+
+
+class AirwallexRequest(TimestampMixin, Base):
+    """Every Airwallex call PaySilo made, keyed by its idempotency ``request_id``."""
+
+    __tablename__ = "airwallex_requests"
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("employers.id", ondelete="CASCADE"))
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), index=True)
+    operation: Mapped[str] = mapped_column(String(40), nullable=False)
+    on_behalf_of: Mapped[str | None] = mapped_column(String(64))
+    response: Mapped[dict | None] = mapped_column(JsonType)
+
+
+class SettlementReceipt(TimestampMixin, Base):
+    """Metal anchor for a settled run's reconciliation receipt (hashes only)."""
+
+    __tablename__ = "settlement_receipts"
+    __table_args__ = (UniqueConstraint("chain", "receipt_hash", name="uq_receipt_chain_hash"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("employers.id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), nullable=False,
+                                              unique=True)
+    chain: Mapped[str] = mapped_column(String(16), nullable=False)  # "mock" | "metal-l2"
+    chain_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    prev_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    receipt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    tx_hash: Mapped[str | None] = mapped_column(String(80))  # set when anchored on Metal L2
+
+
+class TapKey(TimestampMixin, Base):
+    """Public half of every Visa TAP agent key PaySilo has signed with."""
+
+    __tablename__ = "tap_keys"
+
+    key_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    public_key_pem: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# Ledger (double-entry, append-only)
+# ---------------------------------------------------------------------------
+
+class LedgerTransaction(TimestampMixin, Base):
+    """A balanced set of entries touching at most ONE employer namespace."""
+
+    __tablename__ = "ledger_transactions"
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("employers.id", ondelete="CASCADE"),
+                                                          index=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payroll_runs.id", ondelete="SET NULL"))
+    memo: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+    entries: Mapped[list[LedgerEntry]] = relationship(back_populates="transaction", cascade="all, delete-orphan")
+
+
+class LedgerEntry(Base):
+    __tablename__ = "ledger_entries"
+    __table_args__ = (
+        CheckConstraint("amount <> 0", name="ck_ledger_entry_nonzero"),
+        Index("ix_ledger_entries_account", "account"),
+    )
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("ledger_transactions.id", ondelete="CASCADE"),
+                                                nullable=False, index=True)
+    account: Mapped[str] = mapped_column(String(120), nullable=False)  # "<namespace>:<account>:<CCY>"
+    namespace: Mapped[str] = mapped_column(String(40), nullable=False)  # employer ledger key | platform | external
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)  # signed; + = into the account
+
+    transaction: Mapped[LedgerTransaction] = relationship(back_populates="entries")
