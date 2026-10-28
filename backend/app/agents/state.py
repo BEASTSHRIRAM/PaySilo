@@ -38,6 +38,7 @@ class PayrollRunState(TypedDict, total=False):
     funding_usd: str
     pay_lines: list[PayLineDict]
     raw_input: Optional[str]
+    directory: list[PayLineDict]  # this employer's contractors (bank details), for intake matching
     # policy output (all Decimal text)
     assessment: Optional[dict]
     route: Optional[str]  # "approval" | "escalate" | "refused"

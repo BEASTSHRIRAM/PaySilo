@@ -94,6 +94,14 @@ class AirwallexSimulator:
 
         return self._once(request_id, _create)
 
+    def restore_account(self, account_id: str, *, business_name: str,
+                        balances: dict[str, Decimal] | None = None) -> None:
+        """Rehydrate an account (e.g. from the persisted ledger after a restart)."""
+        self._accounts[account_id] = {
+            "name": business_name, "contact": "", "status": "ACTIVE",
+            "balances": {c: round_money(to_decimal(v)) for c, v in (balances or {}).items()},
+        }
+
     def get_balances(self, *, account_id: str | None = None) -> dict[str, Decimal]:
         acct = self._account(account_id or PLATFORM_ACCOUNT_ID)
         return {c: round_money(v) for c, v in acct["balances"].items() if v != 0}

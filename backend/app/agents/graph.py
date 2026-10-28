@@ -97,11 +97,20 @@ def _normalise_line(line: dict) -> dict:
     return out
 
 
+def _directory_entry(contractor: dict) -> dict:
+    keep = ("name", "currency", "method", "iban", "swift_code", "account_number", "routing_code",
+            "country_code", "contractor_id")
+    out = {k: str(contractor[k]) for k in keep if contractor.get(k)}
+    out["name"] = out["name"].strip()
+    return out
+
+
 def initial_state(*, run_id: str, employer_key: str, employer_name: str,
                   contact_name: str = "", funding_usd: object = "0",
                   pay_lines: list[dict] | None = None,
                   raw_input: str | None = None,
-                  account_id: str | None = None) -> PayrollRunState:
+                  account_id: str | None = None,
+                  directory: list[dict] | None = None) -> PayrollRunState:
     return PayrollRunState(
         run_id=run_id,
         employer_key=employer_key,
@@ -111,6 +120,7 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
         funding_usd=money_str(to_decimal(str(funding_usd))),
         pay_lines=[_normalise_line(l) for l in (pay_lines or [])],
         raw_input=raw_input,
+        directory=[_directory_entry(d) for d in (directory or [])],
         assessment=None,
         route=None,
         decision=None,
@@ -194,10 +204,20 @@ def build_graph(services: Services, checkpointer=None):
             parsed_name, funding, parsed = parse_intake(state["raw_input"])
             if parsed_name and parsed_name != "Unknown Employer":
                 employer_name = parsed_name
-            pay_lines = [_normalise_line({"name": p.name, "amount": p.amount,
-                                          "currency": p.currency, "method": p.method})
-                         for p in parsed]
-            _log(state, "intake", f"Read {len(pay_lines)} pay line(s) from unstructured input.",
+            # Match names against THIS employer's contractor directory only.
+            directory = {d["name"].casefold(): d for d in state.get("directory", [])}
+            pay_lines = []
+            for p in parsed:
+                known = directory.get(p.name.strip().casefold())
+                line = {"name": p.name, "amount": p.amount, "currency": p.currency, "method": p.method}
+                if known:
+                    line.update({k: v for k, v in known.items() if k not in ("name", "amount")})
+                    line["currency"] = p.currency
+                else:
+                    _log(state, "intake", f"{p.name} is not in {employer_name}'s contractor directory.",
+                         "warning", audit, events)
+                pay_lines.append(_normalise_line(line))
+            _log(state, "intake", f"Read {len(pay_lines)} pay line(s) from the instruction.",
                  audit=audit, events=events)
         account_id = state.get("account_id")
         if not account_id:
