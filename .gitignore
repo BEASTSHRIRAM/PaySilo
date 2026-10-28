@@ -18,3 +18,8 @@ out/
 # Misc
 .DS_Store
 *.log
+
+# Local SQLite database (demo mode)
+*.db
+*.db-journal
+.pytest_tmp/
