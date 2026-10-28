@@ -14,21 +14,22 @@ import {
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "lib", "lottie");
 
+// Palette: #244855 ink · #E64833 coral · #874F41 clay · #90AEAD sage · #FBE9D0 sand
 const C = {
-  violet: "#8B5CF6",
-  violetDeep: "#6D28D9",
-  violetArm: "#7C3AED",
-  cream: "#F3EDFF",
-  ink: "#1B0B33",
-  pinkEar: "#FFB3D1",
-  cheek: "#FF8FC0",
-  tail: "#FF8A1F",
-  tailLight: "#FFB866",
-  nut: "#E0904A",
-  cap: "#8A5530",
-  stem: "#6B3F22",
-  shadow: "#0B0518",
-  gold: "#FFC83D",
+  violet: "#874F41", // body (clay)
+  violetDeep: "#6E3F34", // feet
+  violetArm: "#7A463A", // arms
+  cream: "#FBE9D0", // belly + muzzle (sand)
+  ink: "#0C1D23",
+  pinkEar: "#F2917F",
+  cheek: "#F2917F",
+  tail: "#E64833", // coral
+  tailLight: "#F2917F",
+  nut: "#D9A066",
+  cap: "#563129",
+  stem: "#3E231D",
+  shadow: "#061015",
+  gold: "#F3D7B0",
   white: "#FFFFFF",
 };
 
@@ -226,7 +227,7 @@ function siloShy() {
 // ---------------------------------------------------------------- scenes
 function silos() {
   const op = 180, W = 560, H = 400;
-  const tones = [["#8B5CF6", "#6D28D9"], ["#A855F7", "#7E22CE"], ["#FF8A1F", "#D96A00"]];
+  const tones = [["#90AEAD", "#6F8F8E"], ["#874F41", "#6E3F34"], ["#E64833", "#A42F1F"]];
   const xs = [110, 280, 450];
   const layers = [];
   xs.forEach((x, idx) => {
@@ -235,8 +236,8 @@ function silos() {
     const bump = anim([[0, [100, 100]], [land, [100, 100]], [land + 6, [106, 94]], [land + 16, [100, 100]], [op, [100, 100]]]);
     layers.push(shapeLayer(`silo-${idx}`, [
       group("lock", [
-        group("shackle", [path([[x - 15, 290], [x + 15, 290]], [[0, 0], [0, -28]], [[0, -28], [0, 0]]), stroke("#FFFFFF", 7, 90)]),
-        group("lock-body", [rect(x, 306, 44, 34, 9), fill("#FFFFFF", 92)]),
+        group("shackle", [path([[x - 15, 290], [x + 15, 290]], [[0, 0], [0, -28]], [[0, -28], [0, 0]]), stroke("#FBE9D0", 7, 95)]),
+        group("lock-body", [rect(x, 306, 44, 34, 9), fill("#FBE9D0", 95)]),
       ], { pivot: [x, 300], scale: anim([[0, [100, 100]], [land + 6, [100, 100]], [land + 14, [118, 118]], [land + 24, [100, 100]], [op, [100, 100]]]) }),
       group("top", [ellipse(x, 150, 142, 40), fill(dark)]),
       group("rim", [ellipse(x, 155, 152, 48), fill(main)]),
@@ -247,9 +248,9 @@ function silos() {
     const t0 = land - 30;
     layers.push(shapeLayer(`coin-${idx}`, [
       group("coin", [
-        group("mark", [rect(x, 0, 6, 16, 2), fill("#B7791F")]),
-        group("ring", [ellipse(x, 0, 26, 26), stroke("#E0A82E", 4)]),
-        group("face", [ellipse(x, 0, 38, 38), fill(C.gold)]),
+        group("mark", [rect(x, 0, 6, 16, 2), fill("#874F41")]),
+        group("ring", [ellipse(x, 0, 26, 26), stroke("#C08A7C", 4)]),
+        group("face", [ellipse(x, 0, 38, 38), fill("#F3D7B0")]),
       ], { pivot: [x, 0], scale: anim([[0, [100, 100]], [t0 + 20, [100, 100]], [t0 + 30, [100, 30]], [op, [100, 30]]]) }),
     ], op, {
       pivot: [x, 0],
@@ -270,12 +271,12 @@ function shield() {
     group("check", [
       path([[110, 150], [140, 180], [196, 118]], [[0, 0], [0, 0], [0, 0]], [[0, 0], [0, 0], [0, 0]]),
       trim(0, anim([[0, 0], [18, 0], [48, 100], [op, 100]])),
-      stroke("#FFFFFF", 16),
+      stroke("#FBE9D0", 16),
     ]),
-    group("shield-inner", [shieldPath, fill("#6D28D9")], { pivot: [150, 150], scale: [86, 86] }),
-    group("shield", [shieldPath, fill("#8B5CF6")]),
+    group("shield-inner", [shieldPath, fill("#244855")], { pivot: [150, 150], scale: [86, 86] }),
+    group("shield", [shieldPath, fill("#90AEAD")]),
   ], op, { pivot: [150, 150], scale: anim([[0, [92, 92]], [14, [104, 104]], [26, [100, 100]], [op, [100, 100]]]) });
-  const ring = shapeLayer("ring", [group("ring", [ellipse(150, 150, 220, 220), stroke("#FF8A1F", 6)])], op, {
+  const ring = shapeLayer("ring", [group("ring", [ellipse(150, 150, 220, 220), stroke("#E64833", 6)])], op, {
     pivot: [150, 150],
     scale: anim([[0, [70, 70]], [48, [70, 70]], [96, [130, 130]], [op, [130, 130]]]),
     opacity: anim([[0, 0], [48, 0], [52, 90], [96, 0], [op, 0]]),
@@ -285,7 +286,7 @@ function shield() {
 
 function burst() {
   const op = 90, cx = 200, cy = 200;
-  const colors = [C.violet, C.tail, C.gold, C.cheek, "#34D399", C.tailLight];
+  const colors = ["#E64833", "#FBE9D0", "#90AEAD", "#874F41", "#F2917F", "#F3D7B0"];
   const pieces = Array.from({ length: 22 }, (_, idx) => {
     const angle = (Math.PI * 2 * idx) / 22 + (idx % 3) * 0.12;
     const dist = 120 + (idx % 4) * 22;
