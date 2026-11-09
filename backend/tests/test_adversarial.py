@@ -32,7 +32,8 @@ SIGNUP = {
     "admin": {"full_name": "Nadia Khan", "email": "nadia@northwind.io", "password": "Northwind2026"},
 }
 
-START_BALANCES = {ACME: {"USD": "20000.00"}, BOREALIS: {"USD": "5000.00"}, COBALT: {}}
+START_BALANCES = {ACME: {"USD": "20000.00"}, BOREALIS: {"USD": "5000.00"}, COBALT: {},
+                 "Delta Studios BV": {"USD": "5000.00"}}
 
 
 def _employers(c: TestClient) -> dict[str, dict]:

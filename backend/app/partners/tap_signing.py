@@ -15,6 +15,7 @@ replay guard and a short expiry window.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +33,8 @@ from .tap import (
     sign_request,
     verify_request,
 )
+
+logger = logging.getLogger(__name__)
 
 AUTHORITY = "agent.paysilo.app"
 
@@ -133,7 +136,10 @@ def registry_from_tap_key_rows(rows, *, now: datetime | None = None) -> TapAgent
         expires = _aware(getattr(row, "expires_at", None))
         if expires is not None and expires <= now:
             continue
-        registry.register_pem(key_id=row.key_id, agent_id=row.agent_id, pem=row.public_key_pem)
+        try:
+            registry.register_pem(key_id=row.key_id, agent_id=row.agent_id, pem=row.public_key_pem)
+        except Exception:  # noqa: BLE001 - a corrupt row must not stop boot; it just can't verify
+            logger.warning("Visa TAP: tap_keys row %s has an unusable public key; skipped.", row.key_id)
     return registry
 
 
@@ -182,7 +188,7 @@ def _same(a: object, b: object) -> bool:
 
 
 def compare_signed_body_to_run(signed_body: str, *, run_id: str, assessment: dict | None,
-                               pay_lines: list[dict]) -> str | None:
+                               pay_lines: list[dict], held_lines: list[dict] | None = None) -> str | None:
     """Check that what the human signed is what the run actually holds.
 
     Returns ``None`` when consistent, else a short mismatch description.
@@ -208,6 +214,15 @@ def compare_signed_body_to_run(signed_body: str, *, run_id: str, assessment: dic
                 or (signed.get("method") or "SWIFT") != (actual.get("method") or "SWIFT")
                 or not _same(signed.get("amount"), actual["amount"])):
             return f"signed pay line {i + 1} differs from the run"
+    signed_held = body.get("held_lines") or []
+    held_lines = held_lines or []
+    if len(signed_held) != len(held_lines):
+        return "number of signed held lines differs from the run"
+    for i, (signed, actual) in enumerate(zip(signed_held, held_lines)):
+        if (signed.get("name") != actual["name"] or signed.get("currency") != actual["currency"]
+                or (signed.get("method") or "SWIFT") != (actual.get("method") or "SWIFT")
+                or not _same(signed.get("amount"), actual["amount"])):
+            return f"signed held line {i + 1} differs from the run"
     return None
 
 
@@ -215,10 +230,21 @@ def canonical_json(body: dict) -> str:
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _line_fields(lines: list[dict]) -> list[dict]:
+    return [{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+             "method": l.get("method") or "SWIFT"} for l in lines]
+
+
 def approval_body(*, run_id: str, employer_key: str, decision: str, assessment: dict,
-                  pay_lines: list[dict], decided_by: str) -> dict:
-    """The exact thing a human approves. Changing any field breaks the signature."""
-    return {
+                  pay_lines: list[dict], decided_by: str,
+                  held_lines: list[dict] | None = None) -> dict:
+    """The exact thing a human approves. Changing any field breaks the signature.
+
+    ``held_lines`` (partial payout) are the lines this run deliberately does NOT
+    pay. They are bound too, so a signature over a different split is rejected.
+    The key is omitted when nothing is held (full payouts keep their old shape).
+    """
+    body = {
         "type": "payroll.approval",
         "run_id": run_id,
         "employer": employer_key,
@@ -227,12 +253,11 @@ def approval_body(*, run_id: str, employer_key: str, decision: str, assessment: 
         "required_usd": assessment.get("required_usd"),
         "total_required": assessment.get("total_required"),
         "payroll_currency": assessment.get("payroll_currency"),
-        "pay_lines": [
-            {"name": l["name"], "amount": l["amount"], "currency": l["currency"],
-             "method": l.get("method", "SWIFT")}
-            for l in pay_lines
-        ],
+        "pay_lines": _line_fields(pay_lines),
     }
+    if held_lines:
+        body["held_lines"] = _line_fields(held_lines)
+    return body
 
 
 def payout_body(*, run_id: str, employer_key: str, account_id: str, line: dict, index: int) -> dict:

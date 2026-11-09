@@ -53,7 +53,12 @@ def _run_mismatch(db: Session, organization_id: uuid.UUID, approval_id: uuid.UUI
     if approval is None or not approval.signed_body:
         return None
     run = db.get(PayrollRun, approval.run_id)
+    ordered = sorted(run.pay_lines, key=lambda l: l.position)
     lines = [{"name": l.beneficiary_name, "amount": l.amount, "currency": l.currency, "method": l.method}
-             for l in run.pay_lines]
+             for l in ordered]
+    # Partial payout: the persisted HELD tail (assessment.held_count) is what the approver saw as held.
+    held_n = int((run.assessment or {}).get("held_count") or 0)
+    held = lines[len(lines) - held_n:] if held_n else []
+    paid = lines[:len(lines) - held_n] if held_n else lines
     return compare_signed_body_to_run(approval.signed_body, run_id=str(run.id),
-                                      assessment=run.assessment, pay_lines=lines)
+                                      assessment=run.assessment, pay_lines=paid, held_lines=held)

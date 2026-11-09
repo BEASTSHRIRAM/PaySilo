@@ -375,7 +375,8 @@ def build_graph(services: Services, checkpointer=None):
         decision, decided_by, envelope = _decision_of(value)
         expected = approval_body(run_id=state["run_id"], employer_key=state["employer_key"],
                                  decision=decision, assessment=state["assessment"],
-                                 pay_lines=state["pay_lines"], decided_by=decided_by)
+                                 pay_lines=state["pay_lines"], decided_by=decided_by,
+                                 held_lines=state.get("held_lines") or [])
         if envelope is None:
             result_code, ok = "missing_signature", False
         else:

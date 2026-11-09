@@ -207,7 +207,7 @@ def test_balances_and_history_survive_a_restart(tmp_path):
     with TestClient(create_app(settings, Database.from_url(url))) as c:  # "restart": seed must not re-run
         c.post("/auth/login", json=login)
         assert _employers(c)["Acme Manufacturing GmbH"]["balances"] == {"USD": "13343.24"}
-        assert len(_employers(c)) == 3
+        assert len(_employers(c)) == 4
         assert c.get(f"/runs/{run['id']}").json()["status"] == "SETTLED"
         stale = c.get(f"/runs/{paused['id']}").json()
         assert stale["resumable"] is False

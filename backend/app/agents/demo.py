@@ -72,7 +72,8 @@ def demo_resume(services: Services, state: dict, interrupt_payload: dict) -> dic
     if interrupt_payload.get("kind") == "approval":
         envelope = services.tap.sign_approval(
             run_id=state["run_id"], employer_key=state["employer_key"], decision="approve",
-            assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=DEMO_APPROVER)
+            assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=DEMO_APPROVER,
+            held_lines=state.get("held_lines") or [])
         return {"decision": "approve", "decided_by": DEMO_APPROVER, "tap": envelope.as_dict()}
     return {"decision": "hold", "decided_by": DEMO_APPROVER}
 

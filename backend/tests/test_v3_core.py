@@ -239,7 +239,7 @@ def test_second_run_for_same_employer_is_rejected_while_first_is_open(demo_clien
 
 
 # --------------------------------------------------------------------- 7. settlement chain continuity
-def test_runtime_seeds_the_settlement_chain_from_the_last_persisted_receipt(tmp_path, monkeypatch):
+def test_runtime_seeds_the_settlement_chain_from_the_last_persisted_receipt(tmp_path):
     from fastapi.testclient import TestClient
     from sqlalchemy import select
 
@@ -263,11 +263,126 @@ def test_runtime_seeds_the_settlement_chain_from_the_last_persisted_receipt(tmp_
     db = Database.from_url(url)
     with db.sessionmaker() as s:
         last = s.scalars(select(SettlementReceipt).order_by(SettlementReceipt.chain_index.desc())).first()
-        expected = (last.receipt_hash, last.chain_index)
+        last_index, last_hash = last.chain_index, last.receipt_hash
 
-    seeded: list[tuple] = []
-    monkeypatch.setattr(MockSettlementChain, "seed",
-                        lambda self, prev_hash, index: seeded.append((prev_hash, index)), raising=False)
-    with TestClient(create_app(settings, Database.from_url(url))):
-        pass
-    assert seeded == [expected]
+    # Real MockSettlementChain.seed (no monkeypatch): the NEXT receipt continues the chain.
+    with TestClient(create_app(settings, Database.from_url(url))) as c:
+        c.post("/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})
+        emp = {e["name"]: e for e in c.get("/employers").json()}["Acme Manufacturing GmbH"]
+        detail = c.get(f"/employers/{emp['id']}").json()
+        run = c.post("/runs", json={"employer_id": emp["id"],
+                                    "lines": [{"contractor_id": x["id"]} for x in detail["contractors"]]}).json()
+        assert c.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()["status"] == "SETTLED"
+    with db.sessionmaker() as s:
+        newest = s.scalars(select(SettlementReceipt).order_by(SettlementReceipt.chain_index.desc())).first()
+        assert newest.chain_index == last_index + 1
+        assert newest.prev_hash == last_hash
+
+
+# --------------------------------------------------------------------- 8. held lines bound into the approval
+def test_approval_signed_without_the_held_lines_is_rejected():
+    services = build_demo_services()
+    graph, config, _ = _run_to_interrupt(services, funding="5000", lines=ACME_LINES)
+    state = dict(graph.get_state(config).values)
+    assert state["held_lines"]
+    forged = services.tap.sign_approval(  # right paid line, but the held split is not bound
+        run_id=state["run_id"], employer_key=state["employer_key"], decision="approve",
+        assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by="x@example.com")
+    graph.invoke(Command(resume={"decision": "approve", "decided_by": "x@example.com",
+                                 "tap": forged.as_dict()}), config)
+    final = graph.get_state(config).values
+    assert final["status"] == "APPROVAL_REJECTED" and final["completed_payouts"] == []
+
+
+def test_compare_signed_body_checks_held_lines():
+    from app.partners.tap_signing import approval_body, canonical_json, compare_signed_body_to_run
+
+    paid = [{"name": "A", "amount": "100.00", "currency": "EUR", "method": "SWIFT"}]
+    held = [{"name": "B", "amount": "900.00", "currency": "EUR", "method": "SWIFT"}]
+    a = {"required_usd": "1", "total_required": "1", "payroll_currency": "EUR"}
+    body = canonical_json(approval_body(run_id="r", employer_key="e", decision="approve", assessment=a,
+                                        pay_lines=paid, decided_by="u", held_lines=held))
+    assert compare_signed_body_to_run(body, run_id="r", assessment=a, pay_lines=paid, held_lines=held) is None
+    assert "held" in compare_signed_body_to_run(body, run_id="r", assessment=a, pay_lines=paid)
+    other = [{**held[0], "amount": "901.00"}]
+    assert "held line 1" in compare_signed_body_to_run(body, run_id="r", assessment=a, pay_lines=paid,
+                                                       held_lines=other)
+
+
+# --------------------------------------------------------------------- 9. TAP runtime wiring
+def test_live_mode_without_tap_private_key_refuses_to_create_the_app():
+    from app.api import create_app
+    from app.config import Settings
+    from app.db import Database
+    from app.partners.tap_signing import TapKeyError
+
+    live = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k", tap_private_key=None,
+                    jwt_secret="live-secret-" + "x" * 32, database_url="sqlite://", _env_file=None)
+    with pytest.raises(TapKeyError, match="TAP_PRIVATE_KEY is required"):
+        create_app(live, Database.from_url("sqlite://"))
+
+
+def test_tap_key_is_retired_across_two_startups(tmp_path):
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from app.api import create_app
+    from app.config import Settings
+    from app.db import Database
+    from app.db.models import TapKey
+
+    def seed_b64() -> str:
+        raw = Ed25519PrivateKey.generate().private_bytes(
+            serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+        return base64.b64encode(raw).decode()
+
+    url = f"sqlite:///{(tmp_path / 'tap.db').as_posix()}"
+
+    def boot(material: str):
+        settings = Settings(database_url=url, jwt_secret="tap-secret-" + "x" * 32, tap_private_key=material,
+                            seed_demo=False, _env_file=None)
+        app = create_app(settings, Database.from_url(url))
+        with TestClient(app):
+            return app.state.runtime.signer
+
+    first = boot(seed_b64())
+    second = boot(seed_b64())
+    assert first.key.key_id != second.key.key_id
+    with Database.from_url(url).sessionmaker() as s:
+        rows = {r.key_id: r for r in s.scalars(select(TapKey))}
+    assert rows[first.key.key_id].retired_at is not None
+    assert rows[second.key.key_id].retired_at is None
+    # the retired key still verifies: the second runtime's registry holds both
+    assert second.registry.lookup(first.key.key_id) is not None
+    assert second.registry.lookup(second.key.key_id) is not None
+
+
+# --------------------------------------------------------------------- 10. Delta Studios: Kit 6 partial payout story
+def test_delta_studios_pays_the_smaller_line_and_holds_the_other(demo_client):
+    emp = {e["name"]: e for e in demo_client.get("/employers").json()}["Delta Studios BV"]
+    assert emp["balances"] == {"USD": "5000.00"}
+    detail = demo_client.get(f"/employers/{emp['id']}").json()
+    run = demo_client.post("/runs", json={"employer_id": emp["id"],
+                                          "lines": [{"contractor_id": c["id"]} for c in detail["contractors"]]}).json()
+    assert run["status"] == "RESERVED" and run["pending"]["kind"] == "approval"
+    assert run["pending"]["partial"] is True
+    assert [l["name"] for l in run["pending"]["pay_lines"]] == ["Noor van Dijk"]
+    assert [l["name"] for l in run["pending"]["held_lines"]] == ["Pieter Jansen"]
+
+    done = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
+    assert done["status"] == "PARTIALLY_PAID", done
+    by_name = {p["beneficiary_name"]: p["status"] for p in done["pay_lines"]}
+    assert by_name == {"Noor van Dijk": "PAID", "Pieter Jansen": "HELD"}
+    assert done["fee_charged_usd"] == "149.00"
+    balance = Decimal({e["name"]: e for e in demo_client.get("/employers").json()}["Delta Studios BV"]
+                      ["balances"]["USD"])
+    assert balance >= Decimal("1000")  # reserve floor kept
+    # the stored approval still verifies against the run (paid + held split bound)
+    check = demo_client.post("/tap/verify", json={"run_id": run["id"]}).json()
+    assert check["verified"] is True, check
+    overview = demo_client.get("/overview").json()
+    assert overview["runs_settled"] == 1 and overview["platform_fees"] == {"USD": "149.00"}

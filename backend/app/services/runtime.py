@@ -58,11 +58,12 @@ from ..db.models import (
 from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
 from ..partners.metal import MetalL2SettlementChain, MockSettlementChain
-from ..partners.tap import generate_tap_agent, load_public_key_pem, public_key_raw
+from ..partners.tap import load_public_key_pem, public_key_raw
 from ..partners.tap_signing import (
     TapSigner,
     registry_from_tap_key_rows,
-    signer_from_key_material,
+    register_active_key,
+    signer_for_settings,
     verify_stored_approval,
 )
 
@@ -106,28 +107,19 @@ class PlatformRuntime:
         self.settings = settings
         self.db = db
         self.lock = threading.RLock()
-        self.recorder = RecordingAirwallex(
-            AirwallexSimulator() if settings.demo_mode else AirwallexClient(settings))
-        if settings.tap_private_key:
-            # Persistent key: same key and stable keyid in every process, so
-            # signatures survive restarts and verify from the DB.
-            self.signer = signer_from_key_material(
-                settings.tap_agent_id, settings.tap_private_key, key_id=settings.tap_key_id)
-            self.tap_key_persistent = True
+        # Live mode refuses to start without TAP_PRIVATE_KEY (TapKeyError); demo
+        # mode falls back to an ephemeral key that will not verify after a restart.
+        self.signer, self.tap_key_persistent = signer_for_settings(settings)
+        if self.tap_key_persistent:
             logger.info("Visa TAP: persistent signing key loaded from TAP_PRIVATE_KEY (keyid %s).",
                         self.signer.key.key_id)
         else:
-            # Explicit dev behaviour: a fresh ephemeral key per process.
-            # Approvals signed by a previous process will NOT verify after a
-            # restart — set TAP_PRIVATE_KEY for anything beyond a demo.
-            key = generate_tap_agent(settings.tap_agent_id,
-                                     key_id=f"{settings.tap_agent_id}-{uuid.uuid4().hex[:12]}")
-            self.signer = TapSigner(key=key)
-            self.tap_key_persistent = False
             logger.warning(
-                "Visa TAP: TAP_PRIVATE_KEY is not set — using an ephemeral dev key (keyid %s). "
+                "Visa TAP: TAP_PRIVATE_KEY is not set - using an ephemeral dev key (keyid %s). "
                 "Signatures from previous processes will not verify after a restart.",
                 self.signer.key.key_id)
+        self.recorder = RecordingAirwallex(
+            AirwallexSimulator() if settings.demo_mode else AirwallexClient(settings))
         self.ledger = Ledger()
         if settings.demo_mode:
             # Demo pricing uses the static demo table, as before.
@@ -161,21 +153,17 @@ class PlatformRuntime:
     # ------------------------------------------------------------------ boot
     def startup(self) -> None:
         with self.db.sessionmaker() as s:
-            # Register the active public key, then load every published key
-            # (active + retired) into the verification registry so signatures
-            # made under a retired keyid keep verifying after a rotation.
-            s.merge(TapKey(key_id=self.signer.key.key_id, agent_id=self.signer.key.agent_id,
-                           public_key_pem=self.signer.key.public_key_pem(), algorithm="ed25519"))
+            # Register the active public key (retiring any previous one), then
+            # load every non-revoked, non-expired key (active + retired) into the
+            # verification registry so signatures made under a retired keyid keep
+            # verifying after a rotation.
+            register_active_key(s, self.signer.key)
             s.commit()
-            for row in s.scalars(select(TapKey).where(TapKey.revoked_at.is_(None))):
-                if row.key_id == self.signer.key.key_id:
-                    continue
-                try:
-                    self.signer.registry.register_pem(key_id=row.key_id, agent_id=row.agent_id,
-                                                      pem=row.public_key_pem)
-                except Exception:
-                    logger.warning("Visa TAP: tap_keys row %s has an unusable public key; skipped.",
-                                   row.key_id)
+            rows = s.scalars(select(TapKey)).all()
+            registry = registry_from_tap_key_rows(rows)
+            if registry.lookup(self.signer.key.key_id) is None:
+                registry.register(self.signer.key)
+            self.signer.registry = registry
             self._hydrate(s)
             self._seed_chain(s)
 
@@ -194,7 +182,7 @@ class PlatformRuntime:
                         .order_by(SettlementReceipt.chain_index.desc(), SettlementReceipt.created_at.desc())
                         .limit(1))
         if last is not None:
-            seed(prev_hash=last.receipt_hash, index=last.chain_index)
+            seed(prev_hash=last.receipt_hash, index=last.chain_index + 1)
             logger.info("Settlement chain %s seeded from receipt #%d", chain_name, last.chain_index)
 
     # ------------------------------------------------------------- Visa TAP
@@ -308,12 +296,12 @@ class PlatformRuntime:
                 business_name=employer.name, contact_name=employer.contact_name or "")
             employer.airwallex_account_id = account["id"]
             if not self.settings.demo_mode:
-                self._onboard_live_account(employer)
+                self._onboard_live_account(employer, account.get("status"))
             employer.status = "ACTIVE"
             self._flush_calls(s, employer.organization_id, employer.id, None)
         return employer
 
-    def _onboard_live_account(self, employer: Employer) -> None:
+    def _onboard_live_account(self, employer: Employer, account_status: str | None = None) -> None:
         """Onboard a live connected account and force it to ACTIVE.
 
         Hosted onboarding comes first when a template is configured: the
@@ -321,6 +309,10 @@ class PlatformRuntime:
         Airwallex-hosted form. In the sandbox the account is then moved to
         ACTIVE through the simulation status endpoint — strictly before
         any deposit, FX or transfer for this employer.
+
+        ``create_connected_account`` on the live client already runs the whole
+        Kit 6 activation (create -> update/EIN -> submit -> simulate ACTIVE ->
+        confirm) and returns ACTIVE; the extra forced activation is skipped then.
         """
         account_id = employer.airwallex_account_id
         template = self.settings.airwallex_hosted_onboarding_template
@@ -331,6 +323,8 @@ class PlatformRuntime:
             self.recorder.authorize_hosted_onboarding_link(flow_id=flow["id"])
             logger.info("Hosted onboarding flow %s created and authorised for employer %s",
                         flow["id"], employer.id)
+        if account_status == "ACTIVE":
+            return
         activated = self.recorder.activate_connected_account(account_id=account_id)
         if activated.get("status") != "ACTIVE":
             raise RuntimeError(
@@ -471,7 +465,8 @@ class PlatformRuntime:
             if kind == "approval":
                 envelope = self.signer.sign_approval(
                     run_id=str(run.id), employer_key=employer.ledger_key, decision=decision,
-                    assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=user.email)
+                    assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=user.email,
+                    held_lines=state.get("held_lines") or [])
                 resume["tap"] = envelope.as_dict()
                 sig_input = envelope.headers["Signature-Input"]
                 approval.signed_body = envelope.body
