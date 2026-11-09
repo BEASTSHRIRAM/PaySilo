@@ -309,3 +309,126 @@ def test_tap_verify_other_tenant_gets_404(demo_client):
         "admin": {"full_name": "Olive Other", "email": "olive@other.io", "password": "Other2026x"}})
     r = demo_client.post("/tap/verify", json={"run_id": done["id"]})
     assert r.status_code == 404  # tenant isolation: not a verification result
+
+
+# ---------------------------------------------------------------------------
+# v3: key lifecycle, freshness at created time, run-body comparison
+# ---------------------------------------------------------------------------
+
+def test_live_mode_refuses_ephemeral_tap_key():
+    from app.config import Settings
+    from app.partners.tap_signing import TapKeyError, signer_for_settings
+
+    live = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                    tap_private_key=None, _env_file=None)
+    assert live.demo_mode is False
+    with pytest.raises(TapKeyError, match="TAP_PRIVATE_KEY is required"):
+        signer_for_settings(live)
+    demo = Settings(app_env="demo", tap_private_key=None, _env_file=None)
+    signer, persistent = signer_for_settings(demo)
+    assert persistent is False and signer.key.key_id
+
+
+def test_live_mode_with_key_is_persistent_and_bad_key_error_hides_material():
+    from app.config import Settings
+    from app.partners.tap_signing import TapKeyError, signer_for_settings
+
+    raw = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    ok = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                  tap_private_key=base64.b64encode(raw).decode(), _env_file=None)
+    assert signer_for_settings(ok)[1] is True
+    bad = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                   tap_private_key="not-a-key!!", _env_file=None)
+    with pytest.raises(TapKeyError) as exc:
+        signer_for_settings(bad)
+    assert "not-a-key" not in str(exc.value)
+
+
+def _session():
+    from app.db import Database
+
+    db = Database.from_url("sqlite://")
+    db.create_schema()
+    return db.sessionmaker()
+
+
+def test_register_active_key_retires_superseded_and_rejects_key_id_reuse():
+    from app.db.models import TapKey
+    from app.partners.tap_signing import TapKeyError, register_active_key
+
+    old = generate_tap_agent("paysilo-agent", key_id="k-old")
+    new = generate_tap_agent("paysilo-agent", key_id="k-new")
+    impostor = generate_tap_agent("paysilo-agent", key_id="k-old")
+    with _session() as s:
+        register_active_key(s, old)
+        s.commit()
+        register_active_key(s, new)
+        s.commit()
+        assert s.get(TapKey, "k-old").retired_at is not None
+        assert s.get(TapKey, "k-new").retired_at is None
+        with pytest.raises(TapKeyError, match="different public key"):
+            register_active_key(s, impostor)
+        # same key again is fine (restart) and re-activates, retiring the other.
+        register_active_key(s, old)
+        s.commit()
+        assert s.get(TapKey, "k-old").retired_at is None
+        assert s.get(TapKey, "k-new").retired_at is not None
+
+
+def test_registry_skips_revoked_and_expired_rows():
+    from datetime import timedelta
+
+    good = generate_tap_agent("a", key_id="good")
+    revoked = generate_tap_agent("a", key_id="revoked")
+    expired = generate_tap_agent("a", key_id="expired")
+    rows = [_Row(good), _Row(revoked), _Row(expired)]
+    rows[1].revoked_at = datetime.now(UTC)
+    rows[2].expires_at = datetime.now(UTC) - timedelta(days=1)
+    registry = registry_from_tap_key_rows(rows)
+    assert registry.key_ids() == ["good"]
+
+
+def test_stored_approval_freshness_uses_signature_created_not_insert_time():
+    signer = TapSigner(key=generate_tap_agent("paysilo-agent", key_id="paysilo-agent-stored"))
+    run_id = uuid.uuid4()
+    env = signer.sign_approval(
+        run_id=str(run_id), employer_key="e", decision="approve",
+        assessment={"required_usd": "1.00", "total_required": "1.00", "payroll_currency": "USD"},
+        pay_lines=[{"name": "A", "amount": "1.00", "currency": "USD"}], decided_by="x@y.z")
+    approval = _ApprovalRow(env, run_id)
+    # A bogus insert time years later must not make a valid signature "expired"
+    approval.created_at = datetime(2035, 1, 1, tzinfo=UTC)
+    assert verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)])).valid is True
+    approval.created_at = None
+    assert verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)])).valid is True
+
+
+def test_compare_signed_body_to_run():
+    from app.partners.tap_signing import compare_signed_body_to_run
+
+    signer, approval = _stored_approval()
+    assessment = {"required_usd": "6754.88", "total_required": "6025.70", "payroll_currency": "EUR"}
+    lines = [{"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"}]
+    run_id = str(approval.run_id)
+    assert compare_signed_body_to_run(approval.signed_body, run_id=run_id, assessment=assessment,
+                                      pay_lines=lines) is None
+    assert "pay line 1" in compare_signed_body_to_run(
+        approval.signed_body, run_id=run_id, assessment=assessment,
+        pay_lines=[{**lines[0], "amount": "3500.00"}])
+    assert "required_usd" in compare_signed_body_to_run(
+        approval.signed_body, run_id=run_id, assessment={**assessment, "required_usd": "1.00"}, pay_lines=lines)
+    assert compare_signed_body_to_run(approval.signed_body, run_id=run_id, assessment=assessment,
+                                      pay_lines=lines + lines)
+
+
+def test_tap_verify_endpoint_flags_run_that_changed_after_signing(demo_client):
+    from app.db.models import PayLine
+
+    done = _settled_run_with_approval(demo_client)
+    with demo_client.app.state.db.sessionmaker() as s:
+        line = s.query(PayLine).filter(PayLine.run_id == uuid.UUID(done["id"])).first()
+        line.amount = line.amount + 1
+        s.commit()
+    result = demo_client.post("/tap/verify", json={"run_id": done["id"]}).json()
+    assert result["verified"] is False and result["code"] == "run_mismatch"
