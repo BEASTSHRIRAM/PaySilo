@@ -48,7 +48,7 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
   },
 ];
 
-function isActive(pathname: string, href: string): boolean {
+export function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -56,7 +56,7 @@ function isActive(pathname: string, href: string): boolean {
 export function DashboardNav() {
   const pathname = usePathname() ?? "/dashboard";
   return (
-    <nav aria-label="Dashboard sections" className="glass mt-2 overflow-x-auto rounded-full border border-sand-200/10 px-2 py-1.5">
+    <nav aria-label="Dashboard sections" className="glass mt-2 overflow-x-auto rounded-full border border-sand-200/10 px-2 py-1.5 lg:hidden">
       <ul className="flex min-w-max items-center gap-1">
         {NAV_GROUPS.map((group, gi) => (
           <li key={group.label} className="flex items-center gap-1">
