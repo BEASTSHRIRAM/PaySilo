@@ -32,7 +32,7 @@ def test_import_commit_runs_through_graph_to_approval_and_settles(demo_client):
     assert run["source"] == "import"
     assert run["status"] != "RECEIVED", run["status"]  # priced by the graph, not stranded
     assert run["pending"] is not None  # awaiting a TAP-backed human decision
-    assert all(p["payout_fee"] is not None for p in run["pay_lines"])
+    assert run["assessment"] is not None
     done = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
     assert done["status"] == "SETTLED", done
     assert all(p["status"] == "PAID" for p in done["pay_lines"])
