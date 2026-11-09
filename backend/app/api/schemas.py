@@ -239,6 +239,7 @@ class DecisionIn(BaseModel):
 
 
 class PayLineOut(BaseModel):
+    id: str
     position: int
     beneficiary_name: str
     amount: str

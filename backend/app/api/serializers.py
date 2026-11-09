@@ -72,7 +72,7 @@ def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDe
     return RunDetailOut(
         **run_out(runtime, r).model_dump(),
         assessment=r.assessment,
-        pay_lines=[PayLineOut(position=p.position, beneficiary_name=p.beneficiary_name, amount=money_str(p.amount),
+        pay_lines=[PayLineOut(id=str(p.id), position=p.position, beneficiary_name=p.beneficiary_name, amount=money_str(p.amount),
                               currency=p.currency, method=p.method,
                               payout_fee=money_str(p.payout_fee) if p.payout_fee is not None else None,
                               status=p.status, airwallex_transfer_id=p.airwallex_transfer_id)

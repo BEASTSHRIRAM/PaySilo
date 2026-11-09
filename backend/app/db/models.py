@@ -400,6 +400,10 @@ class ChatMessage(Base):
         ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Ordered thinking/tool trace emitted while this (assistant) message was
+    # produced, so the UI can re-render its cards after a reload. NULL for
+    # user messages and for assistant messages written before traces existed.
+    trace: Mapped[list | None] = mapped_column(JsonType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     thread: Mapped[ChatThread] = relationship(back_populates="messages")
@@ -455,3 +459,64 @@ class LedgerEntry(Base):
     amount: Mapped[Decimal] = mapped_column(Money, nullable=False)  # signed; + = into the account
 
     transaction: Mapped[LedgerTransaction] = relationship(back_populates="entries")
+
+
+# ---------------------------------------------------------------------------
+# Source imports (CSV payroll obligation imports — guide §8.4 / C04)
+# Appended at the END of this module for the v3 bedata lane (additive only).
+# ---------------------------------------------------------------------------
+
+IMPORT_STATUSES = ("PREVIEWED", "COMMITTED")
+IMPORT_ROW_STATUSES = ("ok", "error", "duplicate")
+
+
+class SourceImport(TimestampMixin, Base):
+    """One CSV file previewed (and optionally committed) for ONE employer.
+
+    Idempotency: ``(employer_id, content_hash)`` is unique — re-previewing
+    the same file for the same employer returns the existing import, and a
+    second commit returns the run created by the first commit.
+    """
+
+    __tablename__ = "source_imports"
+    __table_args__ = (
+        UniqueConstraint("employer_id", "content_hash", name="uq_source_import_employer_hash"),
+        CheckConstraint(_in("status", IMPORT_STATUSES), name="ck_source_import_status"),
+        Index("ix_source_imports_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    filename: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    mapping: Mapped[dict | None] = mapped_column(JsonType)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PREVIEWED")
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payroll_runs.id", ondelete="SET NULL"))
+
+    rows: Mapped[list[SourceImportRow]] = relationship(back_populates="source_import",
+                                                       cascade="all, delete-orphan",
+                                                       order_by="SourceImportRow.row_number")
+
+
+class SourceImportRow(Base):
+    __tablename__ = "source_import_rows"
+    __table_args__ = (
+        CheckConstraint(_in("status", IMPORT_ROW_STATUSES), name="ck_source_import_row_status"),
+        Index("ix_source_import_rows_import", "import_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    import_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_imports.id", ondelete="CASCADE"), nullable=False)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="ok")
+    errors: Mapped[list | None] = mapped_column(JsonType)
+    data: Mapped[dict | None] = mapped_column(JsonType)
+    business_key: Mapped[str | None] = mapped_column(String(500))
+
+    source_import: Mapped[SourceImport] = relationship(back_populates="rows")

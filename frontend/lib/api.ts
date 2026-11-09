@@ -109,13 +109,26 @@ export interface ContractorIn {
   account_number?: string | null; routing_code?: string | null; default_amount?: string | null;
 }
 
-// ------------------------------------------------------------------ chat (issue #11 contract)
+// ------------------------------------------------------------------ chat (SSE v2 contract)
+// Live stream: thinking / tool_start / tool_result / token / approval /
+// done / error. The legacy `tool` event is still parsed so an older
+// backend keeps rendering while the v2 backend rolls out.
 export interface ChatContext { employer_id?: string; run_id?: string; page?: string }
 export interface ChatApproval {
   run_id: string; employer_id: string; employer_name: string; summary: string;
 }
+/** One replayable trace entry, as stored on assistant messages in history. */
+export type ChatTraceEvent =
+  | { type: "thinking"; step: string; detail?: string; status: "start" | "done" }
+  | { type: "tool_start"; tool: string; label: string; input: unknown }
+  | { type: "tool_result"; tool: string; summary: string; data?: unknown }
+  | { type: "tool"; name: string; label: string; status: string };
+
 export type ChatEvent =
   | { type: "token"; text: string }
+  | { type: "thinking"; step: string; detail?: string; status: "start" | "done" }
+  | { type: "tool_start"; tool: string; label: string; input: unknown }
+  | { type: "tool_result"; tool: string; summary: string; data?: unknown }
   | { type: "tool"; name: string; label: string; status: string }
   | { type: "approval"; approval: ChatApproval }
   | { type: "done"; thread_id: string }
@@ -135,16 +148,52 @@ function chatEventFrom(eventName: string | null, raw: string): ChatEvent | null 
   switch (kind) {
     case "token":
       return { type: "token", text: str(data.text) || str(data.delta) };
+    case "thinking": {
+      const step = str(data.step) || str(data.title) || str(data.label) || str(data.message);
+      if (!step) return null;
+      const rawStatus = str(data.status).toLowerCase();
+      return {
+        type: "thinking",
+        step,
+        ...(str(data.detail) ? { detail: str(data.detail) } : {}),
+        status: rawStatus === "done" || rawStatus === "complete" || rawStatus === "completed" ? "done" : "start",
+      };
+    }
+    case "tool_start": {
+      const tool = str(data.tool) || str(data.name);
+      if (!tool) return null;
+      return {
+        type: "tool_start",
+        tool,
+        label: str(data.label) || tool,
+        input: data.input ?? data.args ?? data.arguments ?? null,
+      };
+    }
+    case "tool_result": {
+      const tool = str(data.tool) || str(data.name);
+      if (!tool) return null;
+      const resultData = data.data ?? data.result ?? data.output;
+      return {
+        type: "tool_result",
+        tool,
+        summary: str(data.summary) || str(data.message),
+        ...(resultData !== undefined ? { data: resultData } : {}),
+      };
+    }
     case "tool":
       return { type: "tool", name: str(data.name), label: str(data.label) || str(data.name), status: str(data.status) || "running" };
-    case "approval":
+    case "approval": {
+      const nested = typeof data.approval === "object" && data.approval !== null
+        ? (data.approval as Record<string, unknown>)
+        : data;
       return {
         type: "approval",
         approval: {
-          run_id: str(data.run_id), employer_id: str(data.employer_id),
-          employer_name: str(data.employer_name), summary: str(data.summary),
+          run_id: str(nested.run_id), employer_id: str(nested.employer_id),
+          employer_name: str(nested.employer_name), summary: str(nested.summary),
         },
       };
+    }
     case "done":
       return { type: "done", thread_id: str(data.thread_id) };
     case "error":
@@ -228,3 +277,206 @@ export async function streamChat(
   }
   if (buffer.trim()) flushBlock(buffer);
 }
+
+// ==================================================================
+// v3 — FEB lane (execution / exceptions / reconciliation / journals /
+// evidence / receipts). Appended as one delimited section so the
+// coordinator can merge lib/api.ts across lanes without conflicts.
+// Backend contracts for these endpoints land in parallel; every field
+// below is consumed defensively (missing data renders an honest empty
+// state, never an invented figure).
+// ==================================================================
+
+// ------------------------------------------------------------------ v3 types
+/** One row of GET /exceptions. */
+export interface ExceptionItem {
+  id: string;
+  type: string;
+  severity: string; // "critical" | "high" | "medium" | "low" (ordered worst first)
+  employer_id: string;
+  employer_name: string;
+  run_id?: string | null;
+  title: string;
+  detail: string;
+  owner: string;
+  next_action: string;
+  evidence_label: string;
+  created_at: string;
+}
+
+/** One currency silo of GET /employers/{id}/reconciliation. All money is a decimal string in `currency`. */
+export interface ReconCurrency {
+  currency: string;
+  opening_cash: string;
+  deposits: string;
+  refunds: string;
+  fx_buys: string;
+  fx_sells: string;
+  payout_debits: string;
+  provider_fees: string;
+  platform_charges: string;
+  closing_cash: string;
+  status: string; // e.g. "MATCHED" | "VARIANCE" — shown verbatim, variance in coral
+}
+
+export interface ReconSettlement {
+  run_id: string;
+  pay_line_id: string;
+  beneficiary_name: string;
+  amount: string;
+  currency: string;
+  status: string;
+  matched: boolean;
+  provider_ref: string | null;
+}
+
+export interface Reconciliation {
+  currencies: ReconCurrency[];
+  settlements: ReconSettlement[];
+  matched_percent: number;
+}
+
+/** One double-entry line of a journal transaction. Exactly one of debit/credit is non-zero. */
+export interface JournalLine {
+  account: string;
+  debit: string | null;
+  credit: string | null;
+  currency: string;
+}
+
+export interface JournalTxn {
+  id: string;
+  date: string;
+  memo: string;
+  lines: JournalLine[];
+  balanced: boolean;
+}
+
+/**
+ * GET /runs/{id}/evidence. The top-level keys are the contract; the
+ * manifest / tap / metal payloads are backend-owned records, so they are
+ * typed as records and read through small accessors in the UI.
+ */
+export interface EvidenceBundle {
+  manifest: Record<string, unknown> | string | null;
+  employer: Record<string, unknown> | null;
+  run: Record<string, unknown> | null;
+  approvals: Record<string, unknown>[];
+  pay_lines: Record<string, unknown>[];
+  agent_events: Record<string, unknown>[];
+  tap: Record<string, unknown> | null;
+  metal: Record<string, unknown> | null;
+  journal_transaction_ids: string[];
+  exceptions: Record<string, unknown>[];
+  limitations: string[];
+}
+
+/** GET /receipts/{pay_line_id}?token= — the public worker receipt. */
+export interface ReceiptData {
+  beneficiary_name: string;
+  amount: string;
+  currency: string;
+  method: string;
+  status: string;
+  employer_name: string;
+  timeline: { label: string; at: string }[];
+  bank_masked: string | null;
+  verification: {
+    tap_verified: boolean;
+    metal_tx_hash: string | null;
+    metal_explorer_url: string | null;
+    mode: string;
+  };
+}
+
+// ------------------------------------------------------------------ v3 calls
+/** v3 endpoints, merged into the shared `api` object at the bottom of this section. */
+// v3 — FE-A lane: Command Center support, Import Wizard, Payroll
+// Calendar, Funding Planner. Appended in a delimited section; other
+// v3 lanes append their own sections — the coordinator merges.
+// Contracts (backend landing in parallel — built exactly to these):
+//   POST /employers/{id}/imports/preview
+//   POST /employers/{id}/imports/{import_id}/commit
+//   GET  /employers/{id}/calendar
+// ==================================================================
+
+export interface ImportPreviewRow {
+  row_number: number;
+  /** Backend-owned vocabulary: "ok" | "error" | "duplicate" (the UI also tolerates "valid" / "invalid"). */
+  status: string;
+  errors: string[];
+  data: Record<string, unknown>;
+}
+
+export interface ImportPreview {
+  import_id: string;
+  content_hash: string;
+  row_count: number;
+  valid_count: number;
+  error_count: number;
+  duplicate_count: number;
+  rows: ImportPreviewRow[];
+  summary: Record<string, unknown> | string | null;
+}
+
+export interface ImportPreviewIn {
+  filename: string;
+  content: string;
+  /** CSV column name -> canonical PaySilo field name. */
+  mapping?: Record<string, string>;
+}
+
+export interface ImportCommitIn {
+  period_label?: string;
+  /** ISO date, YYYY-MM-DD. */
+  pay_date?: string;
+}
+
+export type CalendarEventKind = "pay_date" | "cutoff" | "funding_due" | "period_start";
+
+export interface CalendarEvent {
+  /** ISO date, YYYY-MM-DD. */
+  date: string;
+  kind: CalendarEventKind | string;
+  run_id?: string | null;
+  label: string;
+  employer_id?: string | null;
+  employer_name?: string | null;
+}
+
+export interface CalendarResponse {
+  events: CalendarEvent[];
+}
+
+export const apiV3 = {
+  // FEB lane
+  exceptions: () => request<ExceptionItem[]>("/exceptions"),
+  reconciliation: (employerId: string) =>
+    request<Reconciliation>(`/employers/${encodeURIComponent(employerId)}/reconciliation`),
+  employerJournals: (employerId: string) =>
+    request<JournalTxn[]>(`/employers/${encodeURIComponent(employerId)}/journals`),
+  platformJournals: () => request<JournalTxn[]>("/platform/journals"),
+  runEvidence: (runId: string) =>
+    request<EvidenceBundle>(`/runs/${encodeURIComponent(runId)}/evidence`),
+  receipt: (payLineId: string, token: string) =>
+    request<ReceiptData>(`/receipts/${encodeURIComponent(payLineId)}?token=${encodeURIComponent(token)}`),
+  // FE-A lane
+  previewImport: (employerId: string, body: ImportPreviewIn) =>
+    post<ImportPreview>(`/employers/${encodeURIComponent(employerId)}/imports/preview`, body),
+  commitImport: (employerId: string, importId: string, body: ImportCommitIn = {}) =>
+    post<RunSummary>(`/employers/${encodeURIComponent(employerId)}/imports/${encodeURIComponent(importId)}/commit`, body),
+  calendar: (employerId: string) =>
+    request<CalendarResponse>(`/employers/${encodeURIComponent(employerId)}/calendar`),
+};
+
+/** Direct-download URLs (the endpoints return file attachments; the session cookie is first-party). */
+export const v3Downloads = {
+  employerJournals: (employerId: string, format: "csv" | "json") =>
+    `/api/employers/${encodeURIComponent(employerId)}/journals?format=${format}`,
+  platformJournals: (format: "csv" | "json") => `/api/platform/journals?format=${format}`,
+  evidenceBundle: (runId: string) => `/api/runs/${encodeURIComponent(runId)}/evidence`,
+};
+
+// Pages in this lane import { api } for the pre-existing calls above and
+// { apiV3 } for the calls in this section; the two are kept as separate
+// objects so this section stays append-only for the cross-lane merge.

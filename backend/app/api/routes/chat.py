@@ -1,13 +1,16 @@
 """Silo chat routes: SSE streaming chat plus per-user thread history.
 
-Contract (fixed — the frontend builds against this):
+Contract (v2 — the frontend builds against this):
 
 - ``POST /chat`` — body ``{thread_id?, message, context?}``; response is an
-  SSE stream of ``token`` / ``tool`` / ``approval`` / ``done`` / ``error``
-  events.
+  SSE stream of ``thinking`` / ``tool_start`` / ``tool_result`` / ``token`` /
+  ``approval`` / ``done`` / ``error`` events. The ``thinking`` and tool
+  events are emitted from the real execution path as the work happens.
 - ``GET /chat/threads`` — the signed-in user's threads.
 - ``GET /chat/threads/{thread_id}/messages`` — messages of the owner's
-  thread only; another user's or organization's thread is a 404.
+  thread only; another user's or organization's thread is a 404. Each
+  assistant message carries its persisted ``trace`` (the ordered
+  thinking/tool events of its turn) so the UI can re-render them.
 """
 
 from __future__ import annotations
@@ -50,6 +53,10 @@ class MessageOut(BaseModel):
     role: str
     content: str
     created_at: datetime
+    # Ordered thinking/tool_start/tool_result events emitted while an
+    # assistant message was produced; None for user messages and for
+    # assistant messages written before traces existed.
+    trace: list[dict] | None = None
 
 
 def _sse(event: dict) -> str:
@@ -104,5 +111,5 @@ def thread_messages(thread_id: uuid.UUID, tenant: Tenant = Depends(current_tenan
                                 user_id=tenant.user.id, thread_id=thread_id)
     if thread is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Chat thread not found.")
-    return [MessageOut(role=m.role, content=m.content, created_at=m.created_at)
+    return [MessageOut(role=m.role, content=m.content, created_at=m.created_at, trace=m.trace)
             for m in service.thread_messages(db, thread)]

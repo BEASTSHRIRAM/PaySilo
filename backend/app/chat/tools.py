@@ -128,26 +128,31 @@ def list_employers(ctx: ChatContext) -> ToolResult:
         return ToolResult("This organization has no employers yet.")
     lines = [f"- {e.name} ({e.status})" for e in rows]
     return ToolResult(f"Employers in {ctx.organization_name}:\n" + "\n".join(lines),
-                      data={"employers": [{"id": str(e.id), "name": e.name} for e in rows]})
+                      data={"employers": [{"id": str(e.id), "name": e.name, "status": e.status}
+                                          for e in rows]})
 
 
 def get_employer_balance(ctx: ChatContext, employer: str | None = None) -> ToolResult:
     emp = resolve_employer(ctx, employer)
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.")
+        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
+                          data={"employer": employer, "found": False})
     targets = [emp] if emp else employers(ctx)
     parts = []
+    balances_by_employer: dict[str, dict[str, str]] = {}
     for e in targets:
         balances = ctx.runtime.balances(ctx.db, e)
+        balances_by_employer[e.name] = dict(balances)
         rendered = ", ".join(f"{ccy} {amt}" for ccy, amt in balances.items()) or "no funds yet"
         parts.append(f"{e.name}: {rendered} (derived from its own ledger).")
-    return ToolResult(" ".join(parts))
+    return ToolResult(" ".join(parts), data={"balances": balances_by_employer})
 
 
 def list_runs(ctx: ChatContext, employer: str | None = None, limit: int = 10) -> ToolResult:
     emp = resolve_employer(ctx, employer) if employer else None
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.")
+        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
+                          data={"employer": employer, "found": False})
     q = (select(PayrollRun).options(selectinload(PayrollRun.employer))
          .where(PayrollRun.organization_id == ctx.organization_id)
          .order_by(PayrollRun.created_at.desc()).limit(limit))
@@ -155,26 +160,34 @@ def list_runs(ctx: ChatContext, employer: str | None = None, limit: int = 10) ->
         q = q.where(PayrollRun.employer_id == emp.id)
     rows = list(ctx.db.scalars(q))
     if not rows:
-        return ToolResult("No payroll runs found for this organization yet.")
+        return ToolResult("No payroll runs found for this organization yet.", data={"runs": []})
     lines = []
     for r in rows:
         extra = f", short by {fmt_usd(r.shortfall_usd)}" if r.shortfall_usd else ""
         lines.append(f"- {r.employer.name}: {r.status} (run {str(r.id)[:8]}, "
                      f"required {fmt_usd(r.required_usd) if r.required_usd is not None else 'not priced yet'}{extra})")
-    return ToolResult("Recent payroll runs:\n" + "\n".join(lines))
+    data = {"runs": [{"run_id": str(r.id), "employer_name": r.employer.name, "status": r.status,
+                      "required_usd": str(r.required_usd) if r.required_usd is not None else None,
+                      "shortfall_usd": str(r.shortfall_usd) if r.shortfall_usd is not None else None}
+                     for r in rows]}
+    return ToolResult("Recent payroll runs:\n" + "\n".join(lines), data=data)
 
 
 def explain_run(ctx: ChatContext, run_id: str | None = None, employer: str | None = None) -> ToolResult:
     emp = resolve_employer(ctx, employer) if employer else None
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.")
+        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
+                          data={"employer": employer, "found": False})
     run = resolve_run(ctx, run_id, emp)
     if run is None:
-        return ToolResult("I cannot find that payroll run in this organization.")
+        return ToolResult("I cannot find that payroll run in this organization.",
+                          data={"found": False})
     a = run.assessment or {}
     name = run.employer.name
     if not a:
-        return ToolResult(f"Run {str(run.id)[:8]} for {name} is {run.status} and has not been priced yet.")
+        return ToolResult(f"Run {str(run.id)[:8]} for {name} is {run.status} and has not been priced yet.",
+                          data={"run_id": str(run.id), "employer_name": name, "status": run.status,
+                                "priced": False})
     per_currency = "; ".join(
         f"{r['currency']} {r['required']} (salaries {r['payroll']} + payout fees {r['fees']})"
         for r in a.get("by_currency", []))
@@ -193,18 +206,33 @@ def explain_run(ctx: ChatContext, run_id: str | None = None, employer: str | Non
     if run.explanation:
         text += f" Assessment note: {run.explanation}"
     approval = approval_payload(run) if run.pending_interrupt else None
-    return ToolResult(text, approval=approval, data={"run_id": str(run.id), "status": run.status})
+    return ToolResult(text, approval=approval, data={
+        "run_id": str(run.id), "employer_name": name, "status": run.status,
+        "payroll_usd": str(a.get("payroll_usd", "0")),
+        "required_usd": str(a.get("required_usd", "0")),
+        "available_usd": str(a.get("available_usd", "0")),
+        "shortfall_usd": str(a.get("shortfall_usd", "0")),
+        "platform_fee_usd": str(a.get("platform_fee_usd", "0")),
+        "reserve_floor_usd": str(a.get("reserve_floor_usd", "0")),
+        "can_run": bool(a.get("can_run")),
+    })
 
 
 def get_run_timeline(ctx: ChatContext, run_id: str | None = None, employer: str | None = None) -> ToolResult:
     emp = resolve_employer(ctx, employer) if employer else None
     run = resolve_run(ctx, run_id, emp)
     if run is None:
-        return ToolResult("I cannot find that payroll run in this organization.")
+        return ToolResult("I cannot find that payroll run in this organization.",
+                          data={"found": False})
     if not run.events:
-        return ToolResult(f"Run {str(run.id)[:8]} for {run.employer.name} has no recorded agent events yet.")
+        return ToolResult(f"Run {str(run.id)[:8]} for {run.employer.name} has no recorded agent events yet.",
+                          data={"run_id": str(run.id), "employer_name": run.employer.name,
+                                "status": run.status, "events": []})
     lines = [f"- [{e.agent}] {e.message}" for e in run.events]
-    return ToolResult(f"Timeline for {run.employer.name} run {str(run.id)[:8]} ({run.status}):\n" + "\n".join(lines))
+    return ToolResult(f"Timeline for {run.employer.name} run {str(run.id)[:8]} ({run.status}):\n" + "\n".join(lines),
+                      data={"run_id": str(run.id), "employer_name": run.employer.name,
+                            "status": run.status,
+                            "events": [{"agent": e.agent, "message": e.message} for e in run.events]})
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +286,9 @@ def demo_fund_employer(ctx: ChatContext, employer: str | None = None, amount: st
     balances = ctx.runtime.balances(ctx.db, emp)
     rendered = ", ".join(f"{ccy} {amt}" for ccy, amt in balances.items()) or "no funds"
     return ToolResult(f"Funded {emp.name}'s own wallet with {fmt_usd(value)} (demo mode). "
-                      f"Its balance is now {rendered}. This does not start or approve any payroll run.")
+                      f"Its balance is now {rendered}. This does not start or approve any payroll run.",
+                      data={"employer_name": emp.name, "funded_usd": str(value),
+                            "balances": dict(balances)})
 
 
 def request_approval(ctx: ChatContext, run_id: str | None = None, employer: str | None = None) -> ToolResult:

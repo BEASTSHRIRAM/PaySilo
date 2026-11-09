@@ -1,4 +1,4 @@
--- PaySilo schema (generated from app/db/models.py â€” do not edit by hand).
+-- PaySilo schema (generated from app/db/models.py — do not edit by hand).
 -- Regenerate: uv run python -m app.db.export_schema > db/schema.sql
 
 CREATE TABLE organizations (
@@ -96,6 +96,7 @@ CREATE TABLE chat_messages (
 	thread_id UUID NOT NULL, 
 	role VARCHAR(16) NOT NULL, 
 	content TEXT NOT NULL, 
+	trace JSONB, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	CONSTRAINT ck_chat_message_role CHECK (role IN ('user', 'assistant', 'system', 'tool')), 
@@ -292,6 +293,30 @@ CREATE TABLE settlement_receipts (
 );
 CREATE INDEX ix_settlement_receipts_organization_id ON settlement_receipts (organization_id);
 
+CREATE TABLE source_imports (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	created_by_id UUID, 
+	filename VARCHAR(255) NOT NULL, 
+	content_hash VARCHAR(64) NOT NULL, 
+	content TEXT NOT NULL, 
+	mapping JSONB, 
+	status VARCHAR(16) NOT NULL, 
+	run_id UUID, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_source_import_employer_hash UNIQUE (employer_id, content_hash), 
+	CONSTRAINT ck_source_import_status CHECK (status IN ('PREVIEWED', 'COMMITTED')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(run_id) REFERENCES payroll_runs (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_source_imports_employer_id ON source_imports (employer_id);
+CREATE INDEX ix_source_imports_org_employer ON source_imports (organization_id, employer_id);
+CREATE INDEX ix_source_imports_organization_id ON source_imports (organization_id);
+
 CREATE TABLE ledger_entries (
 	id BIGSERIAL NOT NULL, 
 	transaction_id BIGINT NOT NULL, 
@@ -305,6 +330,20 @@ CREATE TABLE ledger_entries (
 );
 CREATE INDEX ix_ledger_entries_account ON ledger_entries (account);
 CREATE INDEX ix_ledger_entries_transaction_id ON ledger_entries (transaction_id);
+
+CREATE TABLE source_import_rows (
+	id BIGSERIAL NOT NULL, 
+	import_id UUID NOT NULL, 
+	row_number INTEGER NOT NULL, 
+	status VARCHAR(12) NOT NULL, 
+	errors JSONB, 
+	data JSONB, 
+	business_key VARCHAR(500), 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_source_import_row_status CHECK (status IN ('ok', 'error', 'duplicate')), 
+	FOREIGN KEY(import_id) REFERENCES source_imports (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_source_import_rows_import ON source_import_rows (import_id);
 
 -- Ledger guards: one employer per transaction, balanced per currency, append-only.
 CREATE OR REPLACE FUNCTION paysilo_check_ledger_transaction() RETURNS trigger AS $$
@@ -365,4 +404,6 @@ ALTER TABLE "approvals" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_transactions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_entries" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "source_import_rows" ENABLE ROW LEVEL SECURITY;

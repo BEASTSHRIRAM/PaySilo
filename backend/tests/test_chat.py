@@ -57,7 +57,8 @@ def test_why_is_borealis_held_answers_with_real_shortfall(demo_client):
     assert "2,642.88" in text  # the real shortfall, from the stored assessment
     assert "Borealis Labs AB" in text
     assert any(kind == "done" and d.get("thread_id") for kind, d in events)
-    assert any(kind == "tool" and d["name"] == "explain_run" for kind, d in events)
+    assert any(kind == "tool_start" and d["tool"] == "explain_run" for kind, d in events)
+    assert any(kind == "tool_result" and d["tool"] == "explain_run" for kind, d in events)
 
 
 def test_fallback_answers_balance_and_employer_questions(demo_client):

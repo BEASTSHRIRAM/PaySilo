@@ -3,25 +3,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import {
-  Check, Loader2, MessageCircle, PauseCircle, Plus, Send, WifiOff, Wrench, X,
+  ArrowUp, Loader2, MessageCircle, Plus, RotateCcw, Square, WifiOff, X,
 } from "lucide-react";
 
 import { LottieAnimation } from "@/components/brand/lottie";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { api, ApiError, streamChat, type ChatApproval, type ChatContext } from "@/lib/api";
+import {
+  api, ApiError, streamChat, type ChatContext,
+} from "@/lib/api";
 import { MarkdownText } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
+import { ApprovalCard, type ApprovalCardState } from "./approval-card";
+import { summariseValue, type ThinkingStep, type ToolCardState } from "./chat-types";
+import { ThinkingBlock } from "./thinking-block";
+import { ToolCard } from "./tool-card";
 
 // ------------------------------------------------------------------ types
-interface ToolCall { id: string; name: string; label: string; status: "running" | "done" | "error" }
-interface ApprovalCard extends ChatApproval { state: "pending" | "busy" | "approve" | "hold"; error?: string }
 interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   text: string;
-  tools: ToolCall[];
-  approvals: ApprovalCard[];
+  thinking: ThinkingStep[];
+  tools: ToolCardState[];
+  approvals: ApprovalCardState[];
   streaming?: boolean;
   error?: boolean;
 }
@@ -30,8 +35,101 @@ interface ThreadSummary { id: string; title: string }
 let nextId = 1;
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
 
-// The chat history endpoints' payloads are owned by the backend; normalise
-// defensively (array or wrapped) without trusting any single shape.
+function humaniseTool(tool: string): string {
+  const words = tool.replace(/[_-]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Tool";
+}
+
+// ------------------------------------------------------------------ turn reducers
+// One set of reducers drives both the live SSE stream and history replay,
+// so a reloaded thread renders exactly the turn the user watched happen.
+function applyThinking(steps: ThinkingStep[], step: string, detail: string | undefined, status: "start" | "done"): ThinkingStep[] {
+  if (status === "done") {
+    const idx = steps.findIndex((s) => s.status === "active" && s.step === step);
+    if (idx >= 0) {
+      return steps.map((s, i) => (i === idx ? { ...s, status: "done" as const, detail: detail ?? s.detail } : s));
+    }
+    if (steps.some((s) => s.step === step && s.status === "done")) return steps;
+    return [...steps, { id: `think-${steps.length}-${step}`, step, detail, status: "done" }];
+  }
+  const active = steps.find((s) => s.status === "active" && s.step === step);
+  if (active) return steps.map((s) => (s === active ? { ...s, detail: detail ?? s.detail } : s));
+  // A new step starting implies the previous one finished.
+  return [
+    ...steps.map((s) => (s.status === "active" ? { ...s, status: "done" as const } : s)),
+    { id: `think-${steps.length}-${step}`, step, detail, status: "active" as const },
+  ];
+}
+
+function applyToolStart(tools: ToolCardState[], tool: string, label: string, input: unknown): ToolCardState[] {
+  return [
+    ...tools,
+    {
+      id: `tool-${tools.length}-${tool}`,
+      tool,
+      label: label || humaniseTool(tool),
+      input,
+      inputSummary: summariseValue(input),
+      status: "running",
+      summary: "",
+      hasData: false,
+    },
+  ];
+}
+
+function applyToolResult(tools: ToolCardState[], tool: string, summary: string, data: unknown): ToolCardState[] {
+  const hasData = data !== undefined && data !== null;
+  const idx = tools.findIndex((t) => t.tool === tool && t.status === "running");
+  if (idx < 0) {
+    // A result with no start in this turn (e.g. a trimmed trace): still a
+    // real event, so show the completed call rather than dropping it.
+    return [
+      ...tools,
+      {
+        id: `tool-${tools.length}-${tool}`,
+        tool,
+        label: humaniseTool(tool),
+        input: null,
+        inputSummary: "",
+        status: "done",
+        summary,
+        data,
+        hasData,
+      },
+    ];
+  }
+  return tools.map((t, i) => (i === idx ? { ...t, status: "done" as const, summary, data, hasData } : t));
+}
+
+function applyLegacyTool(tools: ToolCardState[], name: string, label: string, status: string): ToolCardState[] {
+  const nextStatus = status === "error" ? "error" : status === "running" || status === "started" ? "running" : "done";
+  const existing = tools.find((t) => t.tool === name && t.label === label && t.status === "running");
+  if (existing) {
+    return tools.map((t) => (t === existing ? { ...t, status: nextStatus as ToolCardState["status"] } : t));
+  }
+  if (nextStatus !== "running" && tools.some((t) => t.tool === name && t.label === label)) return tools;
+  return [
+    ...tools,
+    {
+      id: `tool-${tools.length}-${name}`,
+      tool: name,
+      label: label || humaniseTool(name),
+      input: null,
+      inputSummary: "",
+      status: nextStatus as ToolCardState["status"],
+      summary: "",
+      hasData: false,
+    },
+  ];
+}
+
+function finishThinking(steps: ThinkingStep[]): ThinkingStep[] {
+  return steps.map((s) => (s.status === "active" ? { ...s, status: "done" as const } : s));
+}
+
+// ------------------------------------------------------- history normalising
+// The history payloads are owned by the backend; normalise defensively
+// (array or wrapped) without trusting any single shape.
 function asRecord(v: unknown): Record<string, unknown> | null {
   return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
 }
@@ -45,6 +143,8 @@ function asList(v: unknown): unknown[] {
   }
   return [];
 }
+const strOf = (v: unknown) => (typeof v === "string" ? v : "");
+
 function normaliseThreads(raw: unknown): ThreadSummary[] {
   return asList(raw).flatMap((item) => {
     const rec = asRecord(item);
@@ -55,6 +155,51 @@ function normaliseThreads(raw: unknown): ThreadSummary[] {
     return [{ id, title: typeof title === "string" && title ? title : "Conversation" }];
   });
 }
+
+/** Rebuild thinking steps + tool cards from one message's persisted trace. */
+function traceToTurn(trace: unknown): { thinking: ThinkingStep[]; tools: ToolCardState[] } {
+  let thinking: ThinkingStep[] = [];
+  let tools: ToolCardState[] = [];
+  if (!Array.isArray(trace)) return { thinking, tools };
+  for (const item of trace) {
+    const rec = asRecord(item);
+    if (!rec) continue;
+    const kind = strOf(rec.type) || strOf(rec.kind) || strOf(rec.event);
+    if (kind === "thinking" || (!kind && typeof rec.step === "string")) {
+      const step = strOf(rec.step) || strOf(rec.title) || strOf(rec.label);
+      if (!step) continue;
+      const raw = strOf(rec.status).toLowerCase();
+      thinking = applyThinking(thinking, step, strOf(rec.detail) || undefined, raw === "start" || raw === "running" ? "start" : "done");
+    } else if (kind === "tool_start" || kind === "tool_call") {
+      const tool = strOf(rec.tool) || strOf(rec.name);
+      if (tool) tools = applyToolStart(tools, tool, strOf(rec.label), rec.input ?? rec.args ?? null);
+    } else if (kind === "tool_result" || kind === "tool_output") {
+      const tool = strOf(rec.tool) || strOf(rec.name);
+      if (tool) tools = applyToolResult(tools, tool, strOf(rec.summary) || strOf(rec.message), rec.data ?? rec.result ?? rec.output);
+    } else if (kind === "tool") {
+      const name = strOf(rec.name) || strOf(rec.tool);
+      if (name) tools = applyLegacyTool(tools, name, strOf(rec.label) || name, strOf(rec.status) || "done");
+    }
+  }
+  // A persisted turn is complete by definition: nothing stays "active".
+  return { thinking: finishThinking(thinking), tools: tools.map((t) => (t.status === "running" ? { ...t, status: "done" as const } : t)) };
+}
+
+function normaliseApprovals(raw: unknown): ApprovalCardState[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    const rec = asRecord(item);
+    if (!rec || typeof rec.run_id !== "string") return [];
+    return [{
+      run_id: rec.run_id,
+      employer_id: strOf(rec.employer_id),
+      employer_name: strOf(rec.employer_name),
+      summary: strOf(rec.summary),
+      state: "pending" as const,
+    }];
+  });
+}
+
 function normaliseMessages(raw: unknown): ChatMessage[] {
   return asList(raw).flatMap((item) => {
     const rec = asRecord(item);
@@ -63,7 +208,17 @@ function normaliseMessages(raw: unknown): ChatMessage[] {
     const role = roleRaw === "user" || roleRaw === "human" ? "user" : "assistant";
     const textRaw = rec.content ?? rec.text ?? rec.message;
     if (typeof textRaw !== "string" || !textRaw) return [];
-    return [{ id: nextId++, role: role as "user" | "assistant", text: textRaw, tools: [], approvals: [] }];
+    const { thinking, tools } = role === "assistant"
+      ? traceToTurn(rec.trace ?? rec.events)
+      : { thinking: [] as ThinkingStep[], tools: [] as ToolCardState[] };
+    return [{
+      id: nextId++,
+      role: role as "user" | "assistant",
+      text: textRaw,
+      thinking,
+      tools,
+      approvals: role === "assistant" ? normaliseApprovals(rec.approvals) : [],
+    }];
   });
 }
 
@@ -81,6 +236,9 @@ export function SiloChatPanel() {
   const [contextName, setContextName] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lastSentRef = useRef<string>("");
 
   // Context from the route: /dashboard/employers/{id} or /dashboard/runs/{id}
   const segments = pathname.split("/").filter(Boolean);
@@ -130,12 +288,22 @@ export function SiloChatPanel() {
     if (open && !historyLoaded) void loadHistory();
   }, [open, historyLoaded, loadHistory]);
 
+  // Keep the view pinned to the newest content only while the reader is
+  // already at the bottom; scrolling up to re-read is never overridden.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (el && stickRef.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, open]);
 
+  useEffect(() => {
+    if (open) inputRef.current?.focus();
+  }, [open ]);
+
   async function openThread(id: string) {
+    abortRef.current?.abort();
+    setSending(false);
     setThreadId(id);
+    stickRef.current = true;
     try {
       setMessages(normaliseMessages(await api.chatMessages(id)));
       setOffline(false);
@@ -149,80 +317,161 @@ export function SiloChatPanel() {
     setThreadId(null);
     setMessages([]);
     setSending(false);
+    stickRef.current = true;
+    inputRef.current?.focus();
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+    setSending(false);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.streaming
+          ? {
+              ...m,
+              streaming: false,
+              thinking: finishThinking(m.thinking),
+              tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: "done" as const } : t)),
+              text: m.text || "Stopped. Ask again when you are ready.",
+            }
+          : m,
+      ),
+    );
   }
 
   function patchMessage(id: number, patch: (m: ChatMessage) => ChatMessage) {
     setMessages((prev) => prev.map((m) => (m.id === id ? patch(m) : m)));
   }
 
+  const dispatch = useCallback(
+    async (text: string, activeThreadId: string | null) => {
+      const userMsg: ChatMessage = { id: nextId++, role: "user", text, thinking: [], tools: [], approvals: [] };
+      const assistantId = nextId++;
+      const assistantMsg: ChatMessage = {
+        id: assistantId, role: "assistant", text: "", thinking: [], tools: [], approvals: [], streaming: true,
+      };
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      setSending(true);
+      stickRef.current = true;
+      lastSentRef.current = text;
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        await streamChat(
+          { ...(activeThreadId ? { thread_id: activeThreadId } : {}), message: text, context },
+          (event) => {
+            switch (event.type) {
+              case "token":
+                patchMessage(assistantId, (m) => ({ ...m, text: m.text + event.text }));
+                break;
+              case "thinking":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  thinking: applyThinking(m.thinking, event.step, event.detail, event.status),
+                }));
+                break;
+              case "tool_start":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  tools: applyToolStart(m.tools, event.tool, event.label, event.input),
+                }));
+                break;
+              case "tool_result":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  tools: applyToolResult(m.tools, event.tool, event.summary, event.data),
+                }));
+                break;
+              case "tool":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  tools: applyLegacyTool(m.tools, event.name, event.label, event.status),
+                }));
+                break;
+              case "approval":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  approvals: [...m.approvals, { ...event.approval, state: "pending" }],
+                }));
+                break;
+              case "done":
+                if (event.thread_id) {
+                  setThreadId(event.thread_id);
+                  setThreads((prev) =>
+                    prev.some((t) => t.id === event.thread_id)
+                      ? prev
+                      : [{ id: event.thread_id, title: text.slice(0, 60) }, ...prev],
+                  );
+                }
+                patchMessage(assistantId, (m) => ({ ...m, streaming: false, thinking: finishThinking(m.thinking) }));
+                break;
+              case "error":
+                patchMessage(assistantId, (m) => ({
+                  ...m,
+                  error: true,
+                  streaming: false,
+                  thinking: finishThinking(m.thinking),
+                  text: m.text || event.message,
+                }));
+                break;
+            }
+          },
+          controller.signal,
+        );
+        patchMessage(assistantId, (m) => ({
+          ...m,
+          streaming: false,
+          thinking: finishThinking(m.thinking),
+          tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: "done" as const } : t)),
+          text: m.text || (m.tools.length === 0 && m.approvals.length === 0 && !m.error ? "Done." : m.text),
+        }));
+      } catch (err) {
+        if ((err as { name?: string })?.name === "AbortError") return;
+        const unreachable = err instanceof ApiError && (err.status === 0 || err.status === 404);
+        if (unreachable) setOffline(true);
+        patchMessage(assistantId, (m) => ({
+          ...m,
+          streaming: false,
+          error: true,
+          thinking: finishThinking(m.thinking),
+          text: m.text || (unreachable ? "Silo chat is not available right now." : errMsg(err)),
+        }));
+      } finally {
+        setSending(false);
+      }
+    },
+    // `context` is rebuilt from the pathname on every render; the values
+    // it carries are stable per route, which is what the stream needs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pathname, employerId, runId],
+  );
+
   async function send(ev?: React.FormEvent) {
     ev?.preventDefault();
     const text = input.trim();
     if (!text || sending) return;
     setInput("");
+    if (inputRef.current) inputRef.current.style.height = "auto";
     setOffline(false);
-    const userMsg: ChatMessage = { id: nextId++, role: "user", text, tools: [], approvals: [] };
-    const assistantId = nextId++;
-    const assistantMsg: ChatMessage = { id: assistantId, role: "assistant", text: "", tools: [], approvals: [], streaming: true };
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-    setSending(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await streamChat(
-        { ...(threadId ? { thread_id: threadId } : {}), message: text, context },
-        (event) => {
-          if (event.type === "token") {
-            patchMessage(assistantId, (m) => ({ ...m, text: m.text + event.text }));
-          } else if (event.type === "tool") {
-            patchMessage(assistantId, (m) => {
-              const status = event.status === "error" ? "error" : event.status === "running" || event.status === "started" ? "running" : "done";
-              const existing = m.tools.find((t) => t.name === event.name && t.label === event.label);
-              if (existing) {
-                return { ...m, tools: m.tools.map((t) => (t === existing ? { ...t, status } : t)) };
-              }
-              return { ...m, tools: [...m.tools, { id: `${event.name}-${m.tools.length}`, name: event.name, label: event.label, status }] };
-            });
-          } else if (event.type === "approval") {
-            patchMessage(assistantId, (m) => ({
-              ...m,
-              approvals: [...m.approvals, { ...event.approval, state: "pending" }],
-            }));
-          } else if (event.type === "done") {
-            if (event.thread_id) {
-              setThreadId(event.thread_id);
-              setThreads((prev) =>
-                prev.some((t) => t.id === event.thread_id) ? prev : [{ id: event.thread_id, title: text.slice(0, 60) }, ...prev],
-              );
-            }
-          } else if (event.type === "error") {
-            patchMessage(assistantId, (m) => ({ ...m, error: true, text: m.text || event.message }));
-          }
-        },
-        controller.signal,
-      );
-      patchMessage(assistantId, (m) => ({
-        ...m,
-        streaming: false,
-        tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: "done" as const } : t)),
-        text: m.text || (m.tools.length === 0 && m.approvals.length === 0 ? "Done." : m.text),
-      }));
-    } catch (err) {
-      if ((err as { name?: string })?.name === "AbortError") return;
-      const unreachable = err instanceof ApiError && (err.status === 0 || err.status === 404);
-      if (unreachable) setOffline(true);
-      patchMessage(assistantId, (m) => ({
-        ...m,
-        streaming: false,
-        error: true,
-        text: m.text || (unreachable ? "Silo chat is not available right now." : errMsg(err)),
-      }));
-    } finally {
-      setSending(false);
-    }
+    await dispatch(text, threadId);
   }
 
-  async function decideApproval(msgId: number, card: ApprovalCard, decision: "approve" | "hold") {
+  function retryLast(failedId: number) {
+    const text = lastSentRef.current;
+    if (!text || sending) return;
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === failedId);
+      if (idx < 0) return prev;
+      // Drop the failed turn (its assistant bubble and the user message
+      // directly above it) — dispatch re-adds both cleanly.
+      const dropUser = idx > 0 && prev[idx - 1].role === "user";
+      return prev.filter((_, i) => i !== idx && !(dropUser && i === idx - 1));
+    });
+    setOffline(false);
+    void dispatch(text, threadId);
+  }
+
+  async function decideApproval(msgId: number, card: ApprovalCardState, decision: "approve" | "hold") {
     patchMessage(msgId, (m) => ({
       ...m,
       approvals: m.approvals.map((a) => (a === card ? { ...a, state: "busy" as const, error: undefined } : a)),
@@ -244,13 +493,19 @@ export function SiloChatPanel() {
     }
   }
 
+  const suggestions = [
+    `Check the balance for ${contextName ?? "an employer"}`,
+    "Explain the most recent payroll run",
+    "Which runs are waiting for approval?",
+  ];
+
   if (!open) {
     return (
       <button
         type="button"
         onClick={() => setOpen(true)}
         aria-label="Open Silo chat"
-        className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full border-2 border-sage-600/60 bg-ink-800 py-2 pl-2 pr-4 shadow-2xl transition-transform hover:scale-[1.03]"
+        className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full border-2 border-sage-600/60 bg-ink-800 py-2 pl-2 pr-4 shadow-2xl transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/60"
       >
         <span className="grid size-10 place-items-center overflow-hidden rounded-full bg-sand-200">
           <LottieAnimation name="silo-wave" className="size-10" label="Silo" />
@@ -265,7 +520,7 @@ export function SiloChatPanel() {
   return (
     <aside
       aria-label="Silo chat"
-      className="fixed inset-0 z-50 flex flex-col border-ink-700 bg-ink-900 shadow-2xl sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[400px] sm:max-w-full sm:border-l-2"
+      className="fixed inset-0 z-50 flex flex-col border-ink-700 bg-ink-900 shadow-2xl sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[420px] sm:max-w-full sm:border-l-2"
     >
       <header className="flex items-center gap-3 border-b-2 border-ink-700 px-4 py-3">
         <span className="grid size-11 shrink-0 place-items-center overflow-hidden rounded-full bg-sand-200">
@@ -278,13 +533,18 @@ export function SiloChatPanel() {
         <Button type="button" variant="ghost" size="sm" onClick={newChat}>
           <Plus /> New chat
         </Button>
-        <button type="button" onClick={() => setOpen(false)} aria-label="Close Silo chat" className="rounded-full p-2 text-sage-300 hover:bg-ink-700 hover:text-sand-100">
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          aria-label="Close Silo chat"
+          className="rounded-full p-2 text-sage-300 transition-colors hover:bg-ink-700 hover:text-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sage-400/60"
+        >
           <X className="size-5" />
         </button>
       </header>
 
       <div className="flex flex-wrap items-center gap-2 border-b-2 border-ink-700 px-4 py-2.5">
-        <span className="text-xs font-extrabold uppercase tracking-widest text-sage-500">Looking at:</span>
+        <span className="text-xs font-bold text-sage-400">Looking at:</span>
         <Badge tone="sage">{contextName ?? (employerId || runId ? "This page" : "All employers")}</Badge>
         {threads.length > 1 && (
           <label className="ml-auto flex items-center gap-1 text-xs font-bold text-sage-400">
@@ -292,7 +552,7 @@ export function SiloChatPanel() {
             <select
               value={threadId ?? ""}
               onChange={(e) => void openThread(e.target.value)}
-              className="max-w-36 rounded-lg border border-ink-600 bg-ink-800 px-1.5 py-1 text-xs font-semibold text-sand-100"
+              className="max-w-36 rounded-lg border border-ink-600 bg-ink-800 px-1.5 py-1 text-xs font-semibold text-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sage-400/60"
               aria-label="Open a previous conversation"
             >
               {threads.map((t) => (
@@ -303,12 +563,19 @@ export function SiloChatPanel() {
         )}
       </div>
 
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        {offline ? (
+      <div
+        ref={scrollRef}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+        }}
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-4 [scrollbar-color:theme(colors.ink.600)_transparent] [scrollbar-width:thin]"
+      >
+        {offline && messages.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center" role="status">
             <WifiOff className="size-8 text-sage-500" />
             <p className="font-bold text-sand-100">Silo chat is offline</p>
-            <p className="max-w-64 text-sm text-sage-400">
+            <p className="max-w-64 text-sm leading-relaxed text-sage-300">
               The chat service is not reachable yet. The rest of the dashboard works as normal.
             </p>
             <Button type="button" variant="outline" size="sm" onClick={() => { setHistoryLoaded(false); void loadHistory(); }}>
@@ -316,88 +583,105 @@ export function SiloChatPanel() {
             </Button>
           </div>
         ) : messages.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 py-10 text-center">
+          <div className="flex flex-col items-center gap-3 py-8 text-center">
             <LottieAnimation name="silo-wave" className="size-24" label="Silo waving" />
-            <p className="font-bold text-sand-100">Hi, I am Silo.</p>
-            <p className="max-w-64 text-sm text-sage-400">
-              Ask me to check a balance, explain a run, or start payroll — for example, “Run payroll for {contextName ?? "an employer"}”.
-            </p>
+            <div className="grid gap-1">
+              <p className="font-display text-lg font-semibold text-sand-100">Hi, I am Silo.</p>
+              <p className="max-w-72 text-sm leading-relaxed text-sage-300">
+                Ask me to check a balance, explain a run, or start payroll. You will see how I work through it, step by step.
+              </p>
+            </div>
+            <div className="grid w-full max-w-80 gap-2 pt-2 text-left">
+              {suggestions.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={sending}
+                  onClick={() => void dispatch(s, threadId)}
+                  className="rounded-2xl border border-ink-600 bg-ink-800/70 px-3.5 py-2.5 text-sm font-semibold text-sand-200 transition-colors hover:border-sage-600/70 hover:bg-ink-800 hover:text-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sage-400/60 disabled:opacity-50"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
-          <ul className="grid gap-4">
+          <ul className="grid gap-5">
             {messages.map((m) => (
               <li key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-                <div
-                  className={cn(
-                    "grid max-w-[92%] gap-2 rounded-3xl px-4 py-3 text-[15px]",
-                    m.role === "user"
-                      ? "bg-coral-500 text-sand-50"
-                      : m.error
-                        ? "border-2 border-coral-600/60 bg-coral-500/10 text-coral-200"
-                        : "bg-ink-800 text-sand-200",
-                  )}
-                >
-                  {m.role === "user" ? (
+                {m.role === "user" ? (
+                  <div className="max-w-[88%] rounded-3xl rounded-br-lg bg-coral-500 px-4 py-3 text-[15px] text-sand-50">
                     <p className="leading-relaxed">{m.text}</p>
-                  ) : (
-                    <>
-                      {m.text && <MarkdownText text={m.text} />}
-                      {m.streaming && !m.text && (
-                        <p className="flex items-center gap-2 font-semibold text-sage-400">
-                          <Loader2 className="size-4 animate-spin" /> Silo is thinking…
-                        </p>
-                      )}
-                      {m.tools.map((t) => (
-                        <div key={t.id} className="flex items-center gap-2 rounded-2xl bg-ink-950/50 px-3 py-2 text-sm font-semibold text-sage-200">
-                          {t.status === "running" ? (
-                            <Loader2 className="size-4 shrink-0 animate-spin text-sage-300" />
-                          ) : t.status === "error" ? (
-                            <X className="size-4 shrink-0 text-coral-400" />
-                          ) : (
-                            <Check className="size-4 shrink-0 text-mint-400" />
-                          )}
-                          <Wrench className="size-3.5 shrink-0 text-sage-500" />
-                          <span className="min-w-0 truncate">{t.label}</span>
-                        </div>
-                      ))}
-                      {m.approvals.map((card, ci) => (
-                        <div key={ci} className="grid gap-2 rounded-2xl border-2 border-sage-600/60 bg-sage-500/10 px-3 py-3">
-                          <p className="text-sm font-bold text-sand-100">Approval needed · {card.employer_name}</p>
-                          {card.summary && <p className="text-sm text-sand-200">{card.summary}</p>}
-                          {card.state === "approve" || card.state === "hold" ? (
-                            <p className="flex items-center gap-2 text-sm font-bold text-sage-200">
-                              {card.state === "approve" ? <Check className="size-4 text-mint-400" /> : <PauseCircle className="size-4 text-sand-300" />}
-                              You chose to {card.state === "approve" ? "approve & sign" : "hold"} this run.
-                            </p>
-                          ) : (
-                            <div className="flex flex-wrap gap-2">
-                              <Button type="button" variant="success" size="sm" disabled={card.state === "busy"} onClick={() => void decideApproval(m.id, card, "approve")}>
-                                {card.state === "busy" ? <Loader2 className="animate-spin" /> : <Check />} Approve &amp; sign
-                              </Button>
-                              <Button type="button" variant="outline" size="sm" disabled={card.state === "busy"} onClick={() => void decideApproval(m.id, card, "hold")}>
-                                <PauseCircle /> Hold
-                              </Button>
-                            </div>
-                          )}
-                          {card.error && <p className="text-sm font-bold text-coral-300">{card.error}</p>}
-                        </div>
-                      ))}
-                      {m.streaming && m.text && <Loader2 className="size-4 animate-spin text-sage-400" aria-label="Streaming" />}
-                    </>
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  <div
+                    className={cn(
+                      "grid w-full max-w-[96%] gap-2.5 rounded-3xl rounded-bl-lg px-4 py-3.5 text-[15px]",
+                      m.error
+                        ? "border-2 border-coral-600/50 bg-coral-500/10 text-coral-200"
+                        : "bg-ink-800 text-sand-200",
+                    )}
+                  >
+                    <ThinkingBlock steps={m.thinking} streaming={Boolean(m.streaming)} />
+                    {m.tools.map((t) => (
+                      <ToolCard key={t.id} card={t} />
+                    ))}
+                    {m.text && <MarkdownText text={m.text} />}
+                    {m.streaming && !m.text && m.thinking.length === 0 && m.tools.length === 0 && (
+                      <p className="flex items-center gap-2 font-semibold text-sage-300" role="status">
+                        <Loader2 className="size-4 animate-spin" /> Silo is thinking…
+                      </p>
+                    )}
+                    {m.streaming && m.text && (
+                      <span className="flex items-center gap-1.5 text-xs font-bold text-sage-400" role="status">
+                        <span className="size-1.5 animate-pulse rounded-full bg-sage-400" aria-hidden />
+                        Writing…
+                      </span>
+                    )}
+                    {m.approvals.map((card, ci) => (
+                      <ApprovalCard
+                        key={`${card.run_id}-${ci}`}
+                        card={card}
+                        onDecide={(c, d) => void decideApproval(m.id, c, d)}
+                      />
+                    ))}
+                    {m.error && !m.streaming && (
+                      <button
+                        type="button"
+                        onClick={() => retryLast(m.id)}
+                        disabled={sending}
+                        className="inline-flex w-fit items-center gap-1.5 rounded-lg px-1 py-0.5 text-sm font-extrabold text-coral-300 transition-colors hover:text-coral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral-400/60 disabled:opacity-50"
+                      >
+                        <RotateCcw className="size-3.5" aria-hidden /> Try again
+                      </button>
+                    )}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
         )}
       </div>
 
+      {offline && messages.length > 0 && (
+        <p className="flex items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs font-bold text-sand-300" role="status">
+          <WifiOff className="size-3.5 shrink-0 text-sage-400" aria-hidden />
+          Chat connection dropped. Your messages above are saved in this thread.
+        </p>
+      )}
+
       <form onSubmit={(e) => void send(e)} className="flex items-end gap-2 border-t-2 border-ink-700 px-4 py-3">
         <label htmlFor="silo-chat-input" className="sr-only">Message Silo</label>
         <textarea
+          ref={inputRef}
           id="silo-chat-input"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            const el = e.currentTarget;
+            el.style.height = "auto";
+            el.style.height = `${Math.min(el.scrollHeight, 112)}px`;
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -406,11 +690,17 @@ export function SiloChatPanel() {
           }}
           rows={1}
           placeholder="Ask Silo…"
-          className="max-h-28 min-h-11 flex-1 resize-none rounded-2xl border-2 border-ink-600 bg-ink-950/60 px-3.5 py-2.5 text-[15px] font-semibold text-sand-100 placeholder:font-medium placeholder:text-muted-foreground/60 focus-visible:border-sage-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-500/25"
+          className="max-h-28 min-h-11 flex-1 resize-none rounded-2xl border-2 border-ink-600 bg-ink-950/60 px-3.5 py-2.5 text-[15px] font-semibold text-sand-100 placeholder:font-medium placeholder:text-sage-400/80 focus-visible:border-sage-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-500/25"
         />
-        <Button type="submit" size="icon" disabled={!input.trim() || sending} aria-label="Send message">
-          {sending ? <Loader2 className="animate-spin" /> : <Send />}
-        </Button>
+        {sending ? (
+          <Button type="button" size="icon" variant="outline" onClick={stop} aria-label="Stop Silo">
+            <Square />
+          </Button>
+        ) : (
+          <Button type="submit" size="icon" disabled={!input.trim()} aria-label="Send message">
+            <ArrowUp />
+          </Button>
+        )}
       </form>
     </aside>
   );

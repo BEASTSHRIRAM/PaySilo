@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from ...agents.demo import run_demo
 from ...agents.graph import AGENTS
 from ...config import Settings
-from ...db.models import Employer, PayrollRun
+from ...db.models import Employer, LedgerTransaction, PayrollRun
 from ...services.runtime import PlatformRuntime
 from ..deps import Tenant, current_tenant, get_db, get_runtime, get_settings
 from ..schemas import OrganizationOut, OverviewOut
@@ -65,6 +65,21 @@ def overview(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get
         runs_waiting=count(PayrollRun.pending_interrupt.is_not(None)),
         mode="demo" if settings.demo_mode else "live",
     )
+
+
+@router.get("/platform/journals")
+def platform_journals(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
+    """Platform book: every transaction in the caller's organization that
+    touches the ``platform`` namespace (fee revenue). Full transaction
+    lines are returned so the balanced flag is the computed truth."""
+    from .bedata import journals_for
+
+    txns = db.scalars(
+        select(LedgerTransaction).options(selectinload(LedgerTransaction.entries))
+        .where(LedgerTransaction.organization_id == tenant.organization.id)
+        .order_by(LedgerTransaction.id)).all()
+    platform_txns = [t for t in txns if any(e.namespace == "platform" for e in t.entries)]
+    return journals_for(db, platform_txns)
 
 
 @router.post("/demo/kit6")

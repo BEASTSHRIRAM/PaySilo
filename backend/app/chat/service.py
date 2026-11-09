@@ -1,12 +1,23 @@
 """Silo chat service: one streamed turn of conversation.
 
-A turn is a generator of events in the fixed SSE contract:
+A turn is a generator of events in the v2 SSE contract:
 
-    {"type": "token",    "text": ...}
-    {"type": "tool",     "name": ..., "label": ..., "status": "start"|"done"}
-    {"type": "approval", "run_id": ..., "employer_id": ..., "employer_name": ..., "summary": ...}
-    {"type": "done",     "thread_id": ...}
-    {"type": "error",    "message": ...}
+    {"type": "thinking",    "step": ..., "detail": ..., "status": "start"|"done"}
+    {"type": "tool_start",  "tool": ..., "label": ..., "input": {...}}
+    {"type": "tool_result", "tool": ..., "label": ..., "summary": ..., "data": {...}}
+    {"type": "token",       "text": ...}
+    {"type": "approval",    "run_id": ..., "employer_id": ..., "employer_name": ..., "summary": ...}
+    {"type": "done",        "thread_id": ...}
+    {"type": "error",       "message": ...}
+
+Every ``thinking`` / ``tool_start`` / ``tool_result`` event is emitted from
+the real execution path, in the order the work actually happens: a
+``tool_start`` is yielded *before* its tool runs and its ``tool_result``
+carries the summary and data of the result the tool actually returned.
+Nothing in the trace is fabricated — both engines below execute the same
+org-scoped tools, and the ordered trace of a turn is persisted on the
+assistant message (``ChatMessage.trace``) so the UI can re-render the
+thinking/tool cards after a reload.
 
 Two engines produce those events over the *same* org-scoped tools:
 
@@ -50,6 +61,13 @@ SYSTEM_PROMPT = (
 
 _AMOUNT_RE = re.compile(r"(?:USD\s*)?\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.IGNORECASE)
 
+_HELP_INTRO = (
+    "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
+    "(including exactly why a payroll is held), show a run's timeline, start a run — which "
+    "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
+    "own wallet. I cannot approve a run or move money between employers. "
+)
+
 
 # ---------------------------------------------------------------------------
 # Threads
@@ -85,14 +103,15 @@ def thread_messages(db: Session, thread: ChatThread) -> list[ChatMessage]:
                            .order_by(ChatMessage.id)))
 
 
-def _save(db: Session, thread: ChatThread, role: str, content: str) -> None:
-    db.add(ChatMessage(thread_id=thread.id, role=role, content=content))
+def _save(db: Session, thread: ChatThread, role: str, content: str,
+          trace: list[dict] | None = None) -> None:
+    db.add(ChatMessage(thread_id=thread.id, role=role, content=content, trace=trace))
     thread.title = thread.title  # touch: updates updated_at via onupdate
     db.commit()
 
 
 # ---------------------------------------------------------------------------
-# Event helpers
+# Event helpers (v2 typed contract)
 # ---------------------------------------------------------------------------
 
 def _tokens(text: str) -> Iterator[dict]:
@@ -103,11 +122,55 @@ def _tokens(text: str) -> Iterator[dict]:
         yield {"type": "token", "text": chunk + (" " if i + 6 < len(words) else "")}
 
 
-def _tool_events(name: str, result: chat_tools.ToolResult) -> Iterator[dict]:
-    yield {"type": "tool", "name": name, "label": chat_tools.TOOL_LABELS.get(name, name), "status": "start"}
-    yield {"type": "tool", "name": name, "label": chat_tools.TOOL_LABELS.get(name, name), "status": "done"}
-    if result.approval:
-        yield {"type": "approval", **result.approval}
+def _thinking(step: str, status: str, detail: str | None = None) -> dict:
+    event: dict = {"type": "thinking", "step": step, "status": status}
+    if detail:
+        event["detail"] = detail
+    return event
+
+
+def _safe_input(name: str, kwargs: dict) -> dict:
+    """A safe summary of the real arguments a tool is about to run with.
+
+    Tool arguments can only name things inside the caller's own
+    organization (an employer name, a run id, an amount) — never secrets —
+    so they are safe to show, truncated, in the stream and the trace.
+    """
+    out: dict = {}
+    for key, value in kwargs.items():
+        if value is None:
+            continue
+        out[key] = value[:80] if isinstance(value, str) else value
+    return out
+
+
+def _summarize_result(name: str, result: chat_tools.ToolResult) -> str:
+    """One-line summary of what a tool actually returned."""
+    data = result.data or {}
+    if name == "explain_run" and data.get("required_usd") is not None:
+        summary = (f"{data.get('employer_name', 'Run')} is {data.get('status')}: required "
+                   f"{chat_tools.fmt_usd(data['required_usd'])}, wallet holds "
+                   f"{chat_tools.fmt_usd(data.get('available_usd', '0'))}")
+        shortfall = str(data.get("shortfall_usd", "0"))
+        if shortfall not in ("0", "0.00", "0.0"):
+            summary += f", shortfall {chat_tools.fmt_usd(shortfall)} — payroll held"
+        return summary
+    text = " ".join(result.text.split())
+    return text[:240] + ("…" if len(text) > 240 else "")
+
+
+def _tool_start_event(name: str, kwargs: dict) -> dict:
+    return {"type": "tool_start", "tool": name,
+            "label": chat_tools.TOOL_LABELS.get(name, name), "input": _safe_input(name, kwargs)}
+
+
+def _tool_result_event(name: str, result: chat_tools.ToolResult) -> dict:
+    return {"type": "tool_result", "tool": name,
+            "label": chat_tools.TOOL_LABELS.get(name, name),
+            "summary": _summarize_result(name, result), "data": result.data or {}}
+
+
+_TRACE_TYPES = ("thinking", "tool_start", "tool_result")
 
 
 def _run_tool(ctx: chat_tools.ChatContext, name: str, kwargs: dict) -> chat_tools.ToolResult:
@@ -127,46 +190,65 @@ def _employer_ref_in(ctx: chat_tools.ChatContext, message: str) -> str | None:
     return None
 
 
-def fallback_turn(ctx: chat_tools.ChatContext, message: str,
-                  context: dict) -> Iterator[tuple[str, chat_tools.ToolResult]]:
-    """Yield (tool_name, result) steps for one user message, deterministically."""
+def fallback_plan(ctx: chat_tools.ChatContext, message: str,
+                  context: dict) -> tuple[list[tuple[str, dict]], str, str | None]:
+    """Plan one user message deterministically.
+
+    Returns ``(steps, intent_detail, reply_prefix)``: the tool steps to
+    execute (name + real arguments), a human-readable description of the
+    routing decision for the ``intent_routing`` thinking event, and an
+    optional prefix for the reply text (used only by the help fallback).
+    Planning reads the employer's names from the DB; it executes nothing.
+    """
     text = message.casefold()
     employer_ref = _employer_ref_in(ctx, message) or context.get("employer_name")
     run_ref = context.get("run_id")
 
     if any(w in text for w in ("timeline", "what happened", "history of", "events")):
-        yield "get_run_timeline", chat_tools.get_run_timeline(ctx, run_id=run_ref, employer=employer_ref)
-        return
+        return ([("get_run_timeline", {"run_id": run_ref, "employer": employer_ref})],
+                "Matched the run-timeline intent", None)
     if ("why" in text and ("held" in text or "short" in text)) or "explain" in text \
             or "shortfall" in text or ("held" in text and "?" in message) or "held" in text:
-        yield "explain_run", chat_tools.explain_run(ctx, run_id=run_ref, employer=employer_ref)
-        return
+        return ([("explain_run", {"run_id": run_ref, "employer": employer_ref})],
+                "Matched the explain-a-run intent (why a payroll is held or short)", None)
     if "approval" in text or "approve" in text:
-        yield "request_approval", chat_tools.request_approval(ctx, run_id=run_ref, employer=employer_ref)
-        return
+        return ([("request_approval", {"run_id": run_ref, "employer": employer_ref})],
+                "Matched the request-approval intent (surfacing a human decision, never making one)", None)
     if any(w in text for w in ("fund", "deposit", "top up", "top-up", "add money")):
         m = _AMOUNT_RE.search(message)
-        yield "demo_fund_employer", chat_tools.demo_fund_employer(
-            ctx, employer=employer_ref, amount=m.group(1).replace(",", "") if m else None)
-        return
+        amount = m.group(1).replace(",", "") if m else None
+        return ([("demo_fund_employer", {"employer": employer_ref, "amount": amount})],
+                "Matched the demo-funding intent for the employer's own wallet", None)
     if ("start" in text or "run payroll" in text or "new run" in text) and "run" in text:
-        yield "start_payroll_run", chat_tools.start_payroll_run(ctx, employer=employer_ref)
-        return
+        return ([("start_payroll_run", {"employer": employer_ref})],
+                "Matched the start-a-payroll-run intent (the run will pause for human approval)", None)
     if "balance" in text or "how much" in text and "have" in text:
-        yield "get_employer_balance", chat_tools.get_employer_balance(ctx, employer=employer_ref)
-        return
+        return ([("get_employer_balance", {"employer": employer_ref})],
+                "Matched the wallet-balance intent", None)
     if "run" in text and any(w in text for w in ("list", "show", "recent", "status")):
-        yield "list_runs", chat_tools.list_runs(ctx, employer=employer_ref)
-        return
+        return ([("list_runs", {"employer": employer_ref})],
+                "Matched the list-runs intent", None)
     if "employer" in text or "client" in text:
-        yield "list_employers", chat_tools.list_employers(ctx)
-        return
-    yield "list_employers", chat_tools.ToolResult(
-        "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
-        "(including exactly why a payroll is held), show a run's timeline, start a run — which "
-        "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
-        "own wallet. I cannot approve a run or move money between employers. "
-        + chat_tools.list_employers(ctx).text)
+        return ([("list_employers", {})], "Matched the list-employers intent", None)
+    return ([("list_employers", {})],
+            "No specific intent matched; answering with the capability summary and the employer list",
+            _HELP_INTRO)
+
+
+def fallback_turn(ctx: chat_tools.ChatContext, message: str,
+                  context: dict) -> Iterator[tuple[str, chat_tools.ToolResult]]:
+    """Yield (tool_name, result) steps for one user message, deterministically.
+
+    Kept for callers that only need the executed results; the streaming
+    service executes :func:`fallback_plan` step by step instead, so each
+    ``tool_start`` event is emitted before its tool actually runs.
+    """
+    steps, _detail, prefix = fallback_plan(ctx, message, context)
+    for name, kwargs in steps:
+        result = _run_tool(ctx, name, kwargs)
+        if prefix:
+            result = chat_tools.ToolResult(prefix + result.text, approval=result.approval, data=result.data)
+        yield name, result
 
 
 # ---------------------------------------------------------------------------
@@ -199,20 +281,26 @@ def _llm_turn(ctx: chat_tools.ChatContext, model, history: list[ChatMessage],
     messages.append(HumanMessage(message))
 
     reply_text = ""
-    for _ in range(6):  # bounded tool-calling loop
+    for round_no in range(6):  # bounded tool-calling loop
+        yield _thinking("planning", "start",
+                        "Asking the model to plan the next step" if round_no == 0
+                        else f"Asking the model to continue (step {round_no + 1})")
         ai = bound.invoke(messages)
         messages.append(ai)
-        if not getattr(ai, "tool_calls", None):
+        calls = getattr(ai, "tool_calls", None) or []
+        yield _thinking("planning", "done",
+                        f"Model requested {len(calls)} tool call(s)" if calls
+                        else "Model answered directly, without further tools")
+        if not calls:
             reply_text = ai.content if isinstance(ai.content, str) else str(ai.content)
             break
-        for call in ai.tool_calls:
+        for call in calls:
             name = call["name"]
-            yield {"type": "tool", "name": name,
-                   "label": chat_tools.TOOL_LABELS.get(name, name), "status": "start"}
-            result_text = wrappers[name](**call.get("args", {}))
-            yield {"type": "tool", "name": name,
-                   "label": chat_tools.TOOL_LABELS.get(name, name), "status": "done"}
+            args = call.get("args", {})
+            yield _tool_start_event(name, args)
+            result_text = wrappers[name](**args)
             result = wrappers[name].last
+            yield _tool_result_event(name, result)
             if result and result.approval:
                 yield {"type": "approval", **result.approval}
             messages.append(ToolMessage(content=result_text, tool_call_id=call["id"]))
@@ -240,47 +328,84 @@ def stream_chat(db: Session, *, settings: Settings, runtime: PlatformRuntime,
     else:
         thread = create_thread(db, organization_id=organization_id, user_id=user_id, first_message=message)
 
+    # The ordered, honest record of this turn's work. Every event appended
+    # here is yielded to the client at the moment it is recorded, and the
+    # list is persisted on the assistant message when the turn completes.
+    trace: list[dict] = []
+
+    def emit(event: dict) -> dict:
+        if event.get("type") in _TRACE_TYPES:
+            trace.append(event)
+        return event
+
     ctx = chat_tools.ChatContext(
         db=db, runtime=runtime, organization_id=organization_id, organization_name=organization_name,
         user_id=user_id, user_email=user_email, role=role, demo_mode=settings.demo_mode,
         page_employer_id=context.get("employer_id"), page_run_id=context.get("run_id"))
+
+    yield emit(_thinking("context_load", "start", "Loading this thread's history and organization context"))
     # UI context ids are untrusted input: validate them against the org and drop fakes.
+    dropped: list[str] = []
     for key, resolver in (("employer_id", chat_tools.resolve_employer), ("run_id", chat_tools.resolve_run)):
         raw = context.get(key)
         if raw and resolver(ctx, raw) is None:
             log_security_event(db, organization_id=organization_id, user_id=user_id, thread_id=thread.id,
                                kind="foreign_context_id", detail=f"context {key}={raw} is not in this organization")
             context = {**context, key: None}
-
+            dropped.append(key)
     history = thread_messages(db, thread)
+    detail = f"Loaded {len(history)} prior message(s) in this thread"
+    if dropped:
+        detail += f"; dropped foreign context id(s): {', '.join(dropped)}"
+    yield emit(_thinking("context_load", "done", detail))
     _save(db, thread, "user", message)
 
+    yield emit(_thinking("guard_check", "start",
+                         "Screening the message for cross-tenant and instruction-override attempts"))
     refusal = screen_message(db, organization_id, message)
     if refusal is not None:
         kind, refusal_text = refusal
+        yield emit(_thinking("guard_check", "done",
+                             f"Refused ({kind}): the request crosses a silo or overrides a system rule; "
+                             "no tools were run"))
         log_security_event(db, organization_id=organization_id, user_id=user_id, thread_id=thread.id,
                            kind=kind, detail=message)
-        _save(db, thread, "assistant", refusal_text)
+        _save(db, thread, "assistant", refusal_text, trace=trace)
         yield from _tokens(refusal_text)
         yield {"type": "done", "thread_id": str(thread.id)}
         return
+    yield emit(_thinking("guard_check", "done",
+                         "No cross-tenant or instruction-override pattern detected"))
 
     reply_parts: list[str] = []
     try:
         model = get_chat_model(settings)
         if model is None:
-            for name, result in fallback_turn(ctx, message, context):
-                yield from _tool_events(name, result)
-                reply_parts.append(result.text)
-                yield from _tokens(result.text)
+            steps, intent_detail, prefix = fallback_plan(ctx, message, context)
+            yield emit(_thinking("intent_routing", "start",
+                                 "No LLM key configured; routing the message with the deterministic intent router"))
+            yield emit(_thinking("intent_routing", "done", intent_detail))
+            for name, kwargs in steps:
+                yield emit(_tool_start_event(name, kwargs))
+                result = _run_tool(ctx, name, kwargs)
+                yield emit(_tool_result_event(name, result))
+                if result.approval:
+                    yield {"type": "approval", **result.approval}
+                text = (prefix + result.text) if prefix else result.text
+                reply_parts.append(text)
+                yield from _tokens(text)
         else:
+            yield emit(_thinking("intent_routing", "start",
+                                 "Routing the message to the configured LLM with the org-scoped tools"))
+            yield emit(_thinking("intent_routing", "done",
+                                 "Live LLM engine selected; the model may only call the org-scoped tools"))
             collected: list[str] = []
 
             def _capture(gen):
                 for event in gen:
                     if event.get("type") == "token":
                         collected.append(event["text"])
-                    yield event
+                    yield emit(event)
 
             yield from _capture(_llm_turn(ctx, model, history, message))
             reply_parts.append("".join(collected))
@@ -288,5 +413,5 @@ def stream_chat(db: Session, *, settings: Settings, runtime: PlatformRuntime,
         logger.exception("Silo chat turn failed")
         yield {"type": "error", "message": f"Chat failed: {exc}"}
         return
-    _save(db, thread, "assistant", "\n".join(p for p in reply_parts if p))
+    _save(db, thread, "assistant", "\n".join(p for p in reply_parts if p), trace=trace)
     yield {"type": "done", "thread_id": str(thread.id)}
