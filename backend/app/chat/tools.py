@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..db.models import Employer, PayrollRun
 from ..money import to_decimal
-from ..services.runtime import PlatformRuntime
+from ..services.runtime import PlatformRuntime, RuntimeConflict
 
 EDITOR_ROLES = {"owner", "admin"}
 
@@ -255,8 +255,12 @@ def start_payroll_run(ctx: ChatContext, employer: str | None = None) -> ToolResu
 
     org = ctx.db.get(Organization, ctx.organization_id)
     user = ctx.db.get(User, ctx.user_id)
-    run = ctx.runtime.start_run(ctx.db, org=org, user=user, employer=emp, pay_lines=lines,
-                                raw_input=None, source="chat")
+    try:
+        run = ctx.runtime.start_run(ctx.db, org=org, user=user, employer=emp, pay_lines=lines,
+                                    raw_input=None, source="chat")
+    except RuntimeConflict as exc:
+        ctx.db.rollback()
+        return ToolResult(str(exc))
     ctx.db.expire_all()
     run = resolve_run(ctx, str(run.id))
     text = (f"Started a payroll run for {emp.name} (run {str(run.id)[:8]}). It is now {run.status}. "

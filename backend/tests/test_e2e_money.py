@@ -200,9 +200,12 @@ def test_same_day_runs_share_one_wallet_so_cumulative_spend_is_capped(demo_clien
         assert _balances(demo_client)[ACME] == {"USD": expected_balance}
 
     third = _start_acme_run_via_api(demo_client)
-    assert third["status"] == "HELD_SHORTFALL"
-    # Needs 6,656.76 out + 1,000 reserve = 7,656.76 vs 6,686.48 available.
+    # Needs 6,656.76 out + 1,000 reserve = 7,656.76 vs 6,686.48 available: the
+    # full batch is short by 970.28, so only the smaller line (Tomas, 2,600) is
+    # offered for approval and the larger one is held. Nothing is paid yet.
+    assert third["status"] == "RESERVED"
     assert third["shortfall_usd"] == "970.28"
+    assert sorted(p["status"] for p in third["pay_lines"]) == ["HELD", "PENDING"]
     assert _balances(demo_client)[ACME] == {"USD": "6686.48"}
     assert demo_client.get("/overview").json()["platform_fees"] == {"USD": "298.00"}  # exactly two runs
 

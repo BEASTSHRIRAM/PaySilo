@@ -39,6 +39,10 @@ Decider = Callable[[Services, dict, dict], dict]
 
 _OUTCOME_BY_STATUS = {
     "SETTLED": "settled",
+    "PARTIALLY_PAID": "partial",
+    "ATTEST_PENDING": "settled",
+    "SENT_FEE_FAILED": "failed",
+    "SENT_UNRECONCILED": "failed",
     "HELD_SHORTFALL": "held",
     "HELD_BY_HUMAN": "held",
     "APPROVAL_REJECTED": "held",
@@ -92,7 +96,7 @@ def run_batch(services: Services, employers: list[dict[str, Any]], *,
             results[key] = {
                 "outcome": outcome, "status": status, "run_id": run_id,
                 "employer": spec["name"], "assessment": final.get("assessment"),
-                "shortfall_usd": assessment.get("shortfall_usd"),
+                "shortfall_usd": assessment.get("full_shortfall_usd") or assessment.get("shortfall_usd"),
                 "fee_charged_usd": final.get("fee_charged_usd", "0.00"),
                 "balances": final.get("balances", {}), "error": final.get("error"),
             }
