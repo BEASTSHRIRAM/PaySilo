@@ -118,6 +118,9 @@ def test_create_connected_account_runs_kit6_activation_flow():
     upd = only(calls, f"/accounts/{ACCOUNT_ID}/update")["json"]
     ids = upd["account_details"]["business_details"]["business_identifiers"]
     assert ids[0]["type"] == "EIN" and ids[0]["number"]
+    # Accounts API: operating_country is array[string] (a bare string -> 400 invalid_argument, seen live).
+    for path in ("/accounts/create", f"/accounts/{ACCOUNT_ID}/update"):
+        assert only(calls, path)["json"]["account_details"]["business_details"]["operating_country"] == ["US"]
     assert only(calls, f"/simulation/accounts/{ACCOUNT_ID}/update_status")["json"] == {
         "next_status": "ACTIVE", "force": True}
 

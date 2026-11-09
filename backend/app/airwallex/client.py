@@ -292,7 +292,8 @@ class AirwallexClient:
         details: dict = {
             "business_details": {
                 "business_name": business_name,
-                "operating_country": country_code,
+                # array[string] per the Accounts API (a bare string is rejected with invalid_argument)
+                "operating_country": [country_code],
                 "business_identifiers": [{"country_code": country_code, "number": ein, "type": "EIN"}],
             },
             "business_person_details": [{"first_name": first or business_name,

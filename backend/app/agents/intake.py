@@ -103,7 +103,7 @@ def _claude_parse(text: str, api_key: str) -> tuple[str, Decimal, list[Contracto
     from langchain_anthropic import ChatAnthropic
 
     model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_CLAUDE_MODEL)
-    llm = ChatAnthropic(model=model, api_key=api_key, temperature=0, max_tokens=2048)
+    llm = ChatAnthropic(model=model, api_key=api_key, max_tokens=2048)  # no temperature: rejected by current Claude models
     reader = llm.with_structured_output(_PayrollInstructionOut)
     out: _PayrollInstructionOut = reader.invoke(
         "You are PaySilo's Intake Agent. Extract the payroll instruction below. Copy names and "
