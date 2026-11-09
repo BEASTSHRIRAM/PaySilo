@@ -73,7 +73,8 @@ def get_chat_model(settings: Settings):
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=model, api_key=api_key, temperature=0, max_tokens=2048)
+        # No ``temperature``: current Claude models reject non-default sampling values.
+        return ChatAnthropic(model=model, api_key=api_key, max_tokens=2048)
     from langchain_openai import ChatOpenAI
 
     kwargs: dict = {"model": model, "api_key": api_key, "temperature": 0, "max_tokens": 2048}
