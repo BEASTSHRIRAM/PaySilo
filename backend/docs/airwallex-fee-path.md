@@ -22,9 +22,11 @@ The fee is a property of the **run**, not of any individual payout:
   number of payouts, currencies and methods. Splitting it per transfer would
   invent rounding remainder rules and couple the fee to payout composition.
   A single charge carries the exact amount the policy priced.
-- **Tenant isolation.** A charge names one `source_id` — the employer's own
-  connected account — and the client sends it with `x-on-behalf-of` set to
-  that same account, so the debit can only ever leave that employer's silo.
+- **Tenant isolation.** A charge names exactly one `source` — the employer's own
+  connected account (Kit 6 shape: `source` is a plain `acct_...` string, the
+  `reason` is the enum value `professional_business_services`, and the call
+  is sent WITHOUT `x-on-behalf-of`, because the platform is the beneficiary).
+  The debit can only ever leave that one employer's silo.
   It is priced into that employer's affordability check up front (payroll +
   payout fees + USD 149 run fee + USD 1,000 reserve floor), so a settled run
   can never be surprised by it.
@@ -49,9 +51,35 @@ across transfers.
 ## Implementation
 
 - Client: `AirwallexClient.create_charge` (`POST /charges/create`,
-  `x-on-behalf-of: <source account>`, duplicate recovery via
+  no `x-on-behalf-of`, `source: <employer account>`, duplicate recovery via
   `details.source_id` → `GET /charges/{id}`).
 - Simulator: `AirwallexSimulator.create_charge` implements the same
   contract (debit the source employer, credit the platform wallet, return
   the original result on a repeated `request_id`), so demo mode and the
   graph's fee step behave identically in both modes.
+
+
+## Fixture provenance (which recorded shapes are doc-verified)
+
+`backend/tests/fixtures/airwallex/*.json` mix two kinds of evidence. Checked
+on 2026-11-09 against the Kit 6 guide (airwallexdev.com/guide) and the API
+reference pages for Accounts and FX Conversion:
+
+Doc-verified (request side): `POST /accounts/create`, `/accounts/{id}/update`
+(EIN in `account_details.business_details.business_identifiers`, entries
+`{country_code, number, type: "EIN"}`), `/accounts/{id}/submit` (empty body),
+`/simulation/accounts/{id}/update_status` (`{"next_status":"ACTIVE","force":true}`),
+`POST /charges/create` (`source`, `reason`, `reference` required; status `NEW`
+until `SETTLED`), `POST /fx/conversions/create` (`buy_currency`, `sell_currency`,
+one of `buy_amount`/`sell_amount`, `request_id`; settles immediately;
+no `x-api-version`).
+
+Assumed / self-authored (response bodies and anything not named above):
+`auth_login`, `balances_current`, `beneficiary_*`, `*_duplicate_*`,
+`connected_account_*`, `deposit_*`, `fx_*`, `hosted_flow_*`,
+`simulation_deposit_create`, `transfer_*`. They follow documented field names
+but were not captured from a live sandbox. `term_agreement` on FX conversions
+is NOT in the published reference for conversions create, so it is not sent.
+Not verified: the exact `/accounts/{id}/update` body (we reuse the create
+`account_details` shape) and whether `/accounts/create` honours `request_id`
+(we do not send one; the graph persists the account id per employer).
