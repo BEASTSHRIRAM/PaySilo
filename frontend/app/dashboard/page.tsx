@@ -17,10 +17,11 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import { api, ApiError, type Employer, type Overview, type RunDetail, type RunSummary, type Session } from "@/lib/api";
+import { useDataChanged } from "@/lib/events";
 import { AnimatedNumber, Stagger } from "@/lib/gsap-anim";
+import { DECIDER_ROLES, runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
-const DECIDERS = ["owner", "admin", "approver"];
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
 
 /*
@@ -33,11 +34,12 @@ const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something w
  */
 const isInProgress = (r: RunSummary) => r.status === "RECEIVED" || r.status === "PRICED";
 const isPendingApproval = (r: RunSummary) => r.pending?.kind === "approval" || r.status === "RESERVED";
-const isHeld = (r: RunSummary) => r.status.startsWith("HELD") || r.pending?.kind === "escalation";
+const isHeld = (r: RunSummary) => r.status.startsWith("HELD") || r.status === "PARTIALLY_PAID" || r.pending?.kind === "escalation";
 const isSettled = (r: RunSummary) => r.status === "SETTLED";
 
 const STATUS_ORDER = [
   "RECEIVED", "PRICED", "RESERVED", "APPROVED", "SENT", "SETTLED",
+  "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING",
   "HELD_SHORTFALL", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED",
 ];
 
@@ -180,14 +182,20 @@ export default function DashboardPage() {
     setNotice(null);
     try {
       const detail = await api.employer(employer.id);
+      // Same rule as the employer page: only contractors with a default amount are runnable.
       const active = detail.contractors.filter((c) => c.is_active);
-      if (active.length === 0 || !active.some((c) => c.default_amount)) {
-        setNotice(`${employer.name} has no active contractors with a default amount to pay. Add contractors or import a payroll sheet instead.`);
+      const payable = active.filter((c) => c.default_amount);
+      const skipped = active.filter((c) => !c.default_amount);
+      if (payable.length === 0) {
+        setNotice(`${employer.name} has nothing to run: ${active.length === 0 ? "no active contractors" : "none of its active contractors has a default amount"}. Add a default amount to a contractor, or import a payroll sheet with amounts.`);
         return;
       }
-      const run = await api.startRun(employer.id, active.filter((c) => c.default_amount).map((c) => ({ contractor_id: c.id })));
+      const run = await api.startRun(employer.id, payable.map((c) => ({ contractor_id: c.id })));
       setSelected(run);
       setChooserOpen(false);
+      if (skipped.length > 0) {
+        setNotice(`Skipped ${skipped.length} contractor${skipped.length === 1 ? "" : "s"} without a default amount: ${skipped.map((c) => c.full_name).join(", ")}.`);
+      }
       await refresh();
     } catch (err) {
       setError(errMsg(err));
@@ -226,6 +234,15 @@ export default function DashboardPage() {
       setError(errMsg(err));
     }
   }
+
+  // A decision made elsewhere (e.g. the chat panel) refreshes the list and the open run.
+  useDataChanged(() => {
+    void refresh().catch((err) => setError(errMsg(err)));
+    setSelected((cur) => {
+      if (cur) api.run(cur.id).then(setSelected).catch(() => { /* keep what is shown */ });
+      return cur;
+    });
+  });
 
   async function onRunChange(run: RunDetail) {
     setSelected(run);
@@ -270,7 +287,7 @@ export default function DashboardPage() {
 
   const fees = overview ? Object.entries(overview.platform_fees) : [];
   const feeText = fees.length === 0 ? formatMoney(0) : fees.map(([c, a]) => formatMoney(a, c)).join(" + ");
-  const canDecide = !!session && DECIDERS.includes(session.role);
+  const canDecide = !!session && DECIDER_ROLES.includes(session.role);
 
   return (
     <div className="min-h-dvh pb-16">
@@ -377,7 +394,7 @@ export default function DashboardPage() {
                   <NativeSelect id="run-status-filter" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
                     <option value="ALL">All statuses</option>
                     {statusOptions.map((s) => (
-                      <option key={s} value={s}>{s.replaceAll("_", " ")}</option>
+                      <option key={s} value={s}>{runStatusInfo({ status: s }).label}</option>
                     ))}
                   </NativeSelect>
                 </div>
@@ -423,7 +440,8 @@ export default function DashboardPage() {
                             <span className="text-sage-500">{new Date(r.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                           </td>
                           <td className="px-5 py-3.5">
-                            <Badge tone={toneForStatus(r.status)}>{r.status.replaceAll("_", " ")}</Badge>
+                            <Badge tone={runStatusInfo(r).tone}>{runStatusInfo(r).label}</Badge>
+                            {runStatusInfo(r).detail && <span className="mt-1 block max-w-52 text-xs font-semibold text-sand-300">{runStatusInfo(r).detail}</span>}
                             {r.pending && <span className="mt-1 block max-w-44 text-xs font-semibold text-sand-300">{r.pending.message}</span>}
                           </td>
                           <td className="px-5 py-3.5 text-right font-display font-semibold tabular-nums text-sand-100">

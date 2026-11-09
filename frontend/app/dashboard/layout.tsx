@@ -13,11 +13,13 @@ const STORAGE_KEY = "paysilo-sidebar-collapsed";
  * side-bar.tsx) carries the grouped navigation on lg+ screens — collapsed
  * it is the slim icon rail, expanded it shows labels and group headings;
  * the choice persists in localStorage. Below lg the sidebar hides and
- * each page's AppBar pill nav takes over. The docked Silo chat panel
- * (issue #11) is hosted here for every page.
+ * each page's AppBar pill nav takes over. The Silo chat panel is
+ * hosted here for every page: a docked right column on xl+ screens (the
+ * content reserves its width while open) and a sheet below that.
  */
 export default function DashboardLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -42,10 +44,18 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
     <>
       <SideBar collapsed={collapsed} onToggle={toggle} />
-      <div className={cn("transition-[padding] duration-300 ease-out", collapsed ? "lg:pl-[76px]" : "lg:pl-60")}>
+      <div
+        className={cn(
+          "transition-[padding] duration-300 ease-out",
+          collapsed ? "lg:pl-[76px]" : "lg:pl-60",
+          // Open: on xl+ the chat is a docked column, so reserve its width.
+          // Closed: leave room under the content for the floating pill.
+          chatOpen ? "xl:pr-[420px]" : "pb-20",
+        )}
+      >
         {children}
       </div>
-      <SiloChatPanel />
+      <SiloChatPanel open={chatOpen} onOpenChange={setChatOpen} />
     </>
   );
 }
