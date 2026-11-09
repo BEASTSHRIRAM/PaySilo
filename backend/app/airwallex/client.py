@@ -500,7 +500,7 @@ class AirwallexClient:
                            currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
                            iban: str = "", swift_code: str = "", account_number: str = "",
                            routing_code: str = "", street_address: str = "", city: str = "",
-                           postcode: str = "") -> dict:
+                           postcode: str = "", state: str = "") -> dict:
         bank_account: dict = {"account_name": name, "account_currency": currency,
                               "bank_country_code": country_code}
         if iban:
@@ -512,6 +512,10 @@ class AirwallexClient:
         if routing_code:
             bank_account["account_routing_type1"] = "aba" if currency == "USD" else "sort_code"
             bank_account["account_routing_value1"] = routing_code
+        if currency == "USD" and method == "LOCAL":
+            # Live-verified: US ACH payees need the account category and clearing system.
+            bank_account["bank_account_category"] = "Checking"
+            bank_account["local_clearing_system"] = "ACH"
         # The live API requires beneficiary.address.{country_code,street_address,city}
         # (400 validation_failed otherwise). PaySilo does not collect payee street
         # addresses, so unless the caller supplies them these are SANDBOX-ONLY
@@ -522,6 +526,9 @@ class AirwallexClient:
         # Some countries (DE: "beneficiary.address.postcode") also require a postcode.
         postcode = postcode or SANDBOX_PLACEHOLDER_POSTCODES.get(country_code, "10001")
         address["postcode"] = postcode
+        # US payees also need a state (live: beneficiary.address.state). Sandbox placeholder.
+        if country_code == "US":
+            address["state"] = state or "NY"
         payload = {"request_id": request_id,
                    "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account,
                                    "address": address},

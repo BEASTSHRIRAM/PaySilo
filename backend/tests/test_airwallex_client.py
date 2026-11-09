@@ -526,3 +526,33 @@ def test_get_balances_accepts_bare_array_and_items_wrapper():
 
 def test_default_base_url_is_sandbox():
     assert Settings(_env_file=None).airwallex_base_url == "https://api.sandbox.airwallex.com/api/v1"
+
+
+def test_usd_local_beneficiary_sends_ach_fields_and_us_state():
+    # Live sandbox: USD LOCAL payees fail validation without bank_account_category
+    # and beneficiary.address.state.
+    client, calls = make_client({
+        ("POST", "/beneficiaries/validate"): (200, load("beneficiary_validate.json")),
+        ("POST", "/beneficiaries/create"): (201, load("beneficiary_create.json")),
+    })
+    client.create_beneficiary(request_id="req-b-usd", on_behalf_of=ACCOUNT_ID, name="Sam Lee",
+                              currency="USD", country_code="US", method="LOCAL",
+                              account_number="50001121", routing_code="021000021")
+    body = only(calls, "/beneficiaries/validate")["json"]["beneficiary"]
+    assert body["bank_details"]["bank_account_category"] == "Checking"
+    assert body["bank_details"]["local_clearing_system"] == "ACH"
+    assert body["bank_details"]["account_routing_type1"] == "aba"
+    assert body["address"]["state"]
+
+
+def test_gbp_local_beneficiary_uses_sort_code_without_ach_fields():
+    client, calls = make_client({
+        ("POST", "/beneficiaries/validate"): (200, load("beneficiary_validate.json")),
+        ("POST", "/beneficiaries/create"): (201, load("beneficiary_create.json")),
+    })
+    client.create_beneficiary(request_id="req-b-gbp", on_behalf_of=ACCOUNT_ID, name="Olivia Brown",
+                              currency="GBP", country_code="GB", method="LOCAL",
+                              account_number="55779911", routing_code="200000")
+    bank = only(calls, "/beneficiaries/validate")["json"]["beneficiary"]["bank_details"]
+    assert bank["account_routing_type1"] == "sort_code" and bank["account_routing_value1"] == "200000"
+    assert "bank_account_category" not in bank
