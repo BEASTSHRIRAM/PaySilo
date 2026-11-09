@@ -1,1 +1,1 @@
-{"account_id":"acct_hkdmCy9wnfEJjMHNxINdC","amount":"20000.00","created_at":"2026-11-09T00:08:00+0000","currency":"USD","id":"dep_7f3a2c1e9b4d4f0aa1c2","status":"SETTLED"}
+{"amount":5000.0,"create_time":"2026-11-09T19:24:50.000+00:00","currency":"USD","deposit_type":"Credit","id":"dep_7f3a2c1e9b4d4f0aa1c2","payer_name":"PaySilo sandbox funding","reference":"fixture-deposit","statement_ref":"00000000-0000-4000-8000-000000000001","status":"PENDING"}
