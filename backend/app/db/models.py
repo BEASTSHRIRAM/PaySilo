@@ -61,7 +61,9 @@ ROLES = ("owner", "admin", "approver", "viewer")
 EMPLOYER_STATUSES = ("PENDING", "ACTIVE", "SUSPENDED")
 PAYOUT_METHODS = ("SWIFT", "LOCAL")
 RUN_STATUSES = ("RECEIVED", "PRICED", "RESERVED", "APPROVED", "SENT", "SETTLED", "HELD_SHORTFALL",
-                "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED")
+                "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED",
+                # v3: partial payout + post-payout failures (money already moved)
+                "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING")
 PAY_LINE_STATUSES = ("PENDING", "PAID", "HELD", "FAILED")
 APPROVAL_KINDS = ("approval", "escalation")
 DECISIONS = ("approve", "hold")

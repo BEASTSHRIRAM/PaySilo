@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..db.models import Employer, PayrollRun
 from ..money import to_decimal
-from ..services.runtime import PlatformRuntime
+from ..services.runtime import PlatformRuntime, RuntimeConflict
 
 EDITOR_ROLES = {"owner", "admin"}
 
@@ -67,26 +67,53 @@ def employers(ctx: ChatContext) -> list[Employer]:
         .order_by(Employer.created_at)))
 
 
-def resolve_employer(ctx: ChatContext, ref: str | None) -> Employer | None:
-    """Resolve an employer by id or (partial) name, inside the caller's org only."""
+def employer_candidates(ctx: ChatContext, ref: str | None) -> list[Employer]:
+    """Employers in the caller's org that ``ref`` names EXACTLY.
+
+    An id, or a full name (case-insensitive), is an exact reference. The
+    employer's first word ("Acme") is accepted only when it is unique in
+    the org. Substrings never match ("a" is not "Acme"). More than one
+    candidate means the reference is ambiguous.
+    """
     rows = employers(ctx)
+    if not ref:
+        return []
+    ref_clean = ref.strip()
+    if not ref_clean:
+        return []
+    try:
+        emp_id = uuid.UUID(ref_clean)
+    except ValueError:
+        emp_id = None
+    if emp_id is not None:
+        return [e for e in rows if e.id == emp_id]
+    lowered = ref_clean.casefold()
+    exact = [e for e in rows if e.name.casefold() == lowered]
+    if exact:
+        return exact
+    return [e for e in rows if e.name.split()[0].casefold() == lowered]
+
+
+def resolve_employer(ctx: ChatContext, ref: str | None) -> Employer | None:
+    """Resolve an employer by id or exact name inside the caller's org; None if absent or ambiguous."""
     if ref:
-        ref_clean = ref.strip()
-        try:
-            emp_id = uuid.UUID(ref_clean)
-        except ValueError:
-            emp_id = None
-        if emp_id is not None:
-            return next((e for e in rows if e.id == emp_id), None)
-        lowered = ref_clean.casefold()
-        for e in rows:
-            if lowered == e.name.casefold() or lowered in e.name.casefold() \
-                    or e.name.split()[0].casefold() == lowered:
-                return e
-        return None
+        found = employer_candidates(ctx, ref)
+        return found[0] if len(found) == 1 else None
     if ctx.page_employer_id:
         return resolve_employer(ctx, ctx.page_employer_id)
     return None
+
+
+def employer_not_resolved(ctx: ChatContext, ref: str | None) -> ToolResult:
+    """The reply when ``ref`` named no employer, or several (ask, never guess)."""
+    found = employer_candidates(ctx, ref)
+    if len(found) > 1:
+        names = ", ".join(e.name for e in found)
+        return ToolResult(f"'{ref}' could mean more than one employer ({names}). "
+                          "Which one do you mean? Give me the full name.",
+                          data={"employer": ref, "found": False, "ambiguous": [e.name for e in found]})
+    return ToolResult(f"I cannot find an employer named '{ref}' in {ctx.organization_name}.",
+                      data={"employer": ref, "found": False})
 
 
 def resolve_run(ctx: ChatContext, run_ref: str | None = None, employer: Employer | None = None) -> PayrollRun | None:
@@ -135,8 +162,7 @@ def list_employers(ctx: ChatContext) -> ToolResult:
 def get_employer_balance(ctx: ChatContext, employer: str | None = None) -> ToolResult:
     emp = resolve_employer(ctx, employer)
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
-                          data={"employer": employer, "found": False})
+        return employer_not_resolved(ctx, employer)
     targets = [emp] if emp else employers(ctx)
     parts = []
     balances_by_employer: dict[str, dict[str, str]] = {}
@@ -151,8 +177,7 @@ def get_employer_balance(ctx: ChatContext, employer: str | None = None) -> ToolR
 def list_runs(ctx: ChatContext, employer: str | None = None, limit: int = 10) -> ToolResult:
     emp = resolve_employer(ctx, employer) if employer else None
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
-                          data={"employer": employer, "found": False})
+        return employer_not_resolved(ctx, employer)
     q = (select(PayrollRun).options(selectinload(PayrollRun.employer))
          .where(PayrollRun.organization_id == ctx.organization_id)
          .order_by(PayrollRun.created_at.desc()).limit(limit))
@@ -176,8 +201,7 @@ def list_runs(ctx: ChatContext, employer: str | None = None, limit: int = 10) ->
 def explain_run(ctx: ChatContext, run_id: str | None = None, employer: str | None = None) -> ToolResult:
     emp = resolve_employer(ctx, employer) if employer else None
     if employer and emp is None:
-        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
-                          data={"employer": employer, "found": False})
+        return employer_not_resolved(ctx, employer)
     run = resolve_run(ctx, run_id, emp)
     if run is None:
         return ToolResult("I cannot find that payroll run in this organization.",
@@ -244,6 +268,8 @@ def start_payroll_run(ctx: ChatContext, employer: str | None = None) -> ToolResu
         return ToolResult(f"Your role ({ctx.role}) cannot start payroll runs.")
     emp = resolve_employer(ctx, employer)
     if emp is None:
+        if employer:
+            return employer_not_resolved(ctx, employer)
         return ToolResult("Which employer should I start a run for? Name one of this organization's employers.")
     if emp.status != "ACTIVE":
         return ToolResult(f"{emp.name} is not active, so a run cannot be started.")
@@ -255,8 +281,12 @@ def start_payroll_run(ctx: ChatContext, employer: str | None = None) -> ToolResu
 
     org = ctx.db.get(Organization, ctx.organization_id)
     user = ctx.db.get(User, ctx.user_id)
-    run = ctx.runtime.start_run(ctx.db, org=org, user=user, employer=emp, pay_lines=lines,
-                                raw_input=None, source="chat")
+    try:
+        run = ctx.runtime.start_run(ctx.db, org=org, user=user, employer=emp, pay_lines=lines,
+                                    raw_input=None, source="chat")
+    except RuntimeConflict as exc:
+        ctx.db.rollback()
+        return ToolResult(str(exc))
     ctx.db.expire_all()
     run = resolve_run(ctx, str(run.id))
     text = (f"Started a payroll run for {emp.name} (run {str(run.id)[:8]}). It is now {run.status}. "
@@ -274,6 +304,8 @@ def demo_fund_employer(ctx: ChatContext, employer: str | None = None, amount: st
         return ToolResult(f"Your role ({ctx.role}) cannot fund employers.")
     emp = resolve_employer(ctx, employer)
     if emp is None:
+        if employer:
+            return employer_not_resolved(ctx, employer)
         return ToolResult("Which employer should I fund? Name one of this organization's employers.")
     try:
         value = to_decimal(str(amount)) if amount else Decimal("0")

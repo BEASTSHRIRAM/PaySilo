@@ -68,7 +68,10 @@ from ..partners.tap_signing import (
 
 logger = logging.getLogger(__name__)
 
-TERMINAL = {"SETTLED", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED"}
+TERMINAL = {"SETTLED", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED", "PARTIALLY_PAID",
+            "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
+# Money moved and the run is closed (possibly with a follow-up still owed).
+MONEY_MOVED = {"SETTLED", "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
 _UUID_IN_MEMO = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
 
 
@@ -174,6 +177,25 @@ class PlatformRuntime:
                     logger.warning("Visa TAP: tap_keys row %s has an unusable public key; skipped.",
                                    row.key_id)
             self._hydrate(s)
+            self._seed_chain(s)
+
+    def _seed_chain(self, s: Session) -> None:
+        """Continue the settlement hash chain across restarts.
+
+        An in-process chain starts at genesis; seeding it with the last
+        persisted receipt keeps ``prev_hash`` / ``index`` continuous. Skipped
+        when the chain has no ``seed(prev_hash, index)`` or nothing is persisted.
+        """
+        seed = getattr(self.chain, "seed", None)
+        if not callable(seed):
+            return
+        chain_name = "mock" if isinstance(self.chain, MockSettlementChain) else "metal-l2"
+        last = s.scalar(select(SettlementReceipt).where(SettlementReceipt.chain == chain_name)
+                        .order_by(SettlementReceipt.chain_index.desc(), SettlementReceipt.created_at.desc())
+                        .limit(1))
+        if last is not None:
+            seed(prev_hash=last.receipt_hash, index=last.chain_index)
+            logger.info("Settlement chain %s seeded from receipt #%d", chain_name, last.chain_index)
 
     # ------------------------------------------------------------- Visa TAP
     @staticmethod
@@ -195,12 +217,17 @@ class PlatformRuntime:
     def tap_keys_payload(self, s: Session) -> dict:
         keys = []
         for row in self.published_tap_keys(s):
+            try:
+                raw_key = base64.b64encode(public_key_raw(load_public_key_pem(row.public_key_pem))).decode("ascii")
+            except Exception:
+                logger.warning("Visa TAP: tap_keys row %s has an unusable public key; not published.", row.key_id)
+                continue
             keys.append({
                 "keyid": row.key_id,
                 "agent_id": row.agent_id,
                 "algorithm": row.algorithm,
                 "status": "retired" if row.retired_at is not None else "active",
-                "public_key": base64.b64encode(public_key_raw(load_public_key_pem(row.public_key_pem))).decode("ascii"),
+                "public_key": raw_key,
                 "public_key_pem": row.public_key_pem,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "retired_at": row.retired_at.isoformat() if row.retired_at else None,
@@ -357,6 +384,14 @@ class PlatformRuntime:
                   pay_lines: list[dict] | None, raw_input: str | None, source: str,
                   period_label: str | None = None) -> PayrollRun:
         self.ensure_account(s, employer)
+        with self.lock:  # check-then-create must be atomic: one open run per employer
+            self._reject_if_open_run(s, employer)
+            return self._start_run_locked(s, org=org, user=user, employer=employer, pay_lines=pay_lines,
+                                          raw_input=raw_input, source=source, period_label=period_label)
+
+    def _start_run_locked(self, s: Session, *, org: Organization, user: User, employer: Employer,
+                          pay_lines: list[dict] | None, raw_input: str | None, source: str,
+                          period_label: str | None) -> PayrollRun:
         run = PayrollRun(organization_id=org.id, employer_id=employer.id, created_by_id=user.id,
                          source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED")
         s.add(run)
@@ -373,11 +408,49 @@ class PlatformRuntime:
             raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory)
         with self.lock:
             config = {"configurable": {"thread_id": str(run.id)}}
-            result = self.graph.invoke(state, config)
             self._live_threads.add(str(run.id))
-            self._sync(s, run, employer, result)
-        s.commit()
+            self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(state, config))
         return run
+
+    def _invoke_and_persist(self, s: Session, run: PayrollRun, employer: Employer, call,
+                            approval: Approval | None = None) -> None:
+        """Invoke the graph and ALWAYS persist what happened, even if it raises.
+
+        Money may already have moved when a node raises; the checkpoint,
+        the ledger mirror and the recorded Airwallex calls are the truth, so
+        they are synced and committed before the error propagates.
+        """
+        result: dict = {}
+        failure: BaseException | None = None
+        try:
+            result = call() or {}
+        except Exception as exc:  # noqa: BLE001 - persisted, then re-raised below
+            failure = exc
+            logger.exception("Run %s: graph invocation raised; persisting state before re-raising", run.id)
+        try:
+            self._sync(s, run, employer, result)
+            if failure is not None and not run.error:
+                run.error = f"{type(failure).__name__}: {failure}"[:500]
+            if approval is not None:
+                approval.verified = approval.kind == "approval" and run.status != "APPROVAL_REJECTED"
+                s.add(approval)
+        finally:
+            s.commit()
+        if failure is not None:
+            raise failure
+
+    def _reject_if_open_run(self, s: Session, employer: Employer) -> None:
+        """One open run per employer: a run awaiting a decision holds its reserve."""
+        # Graph invocations are serialised by ``self.lock`` and every one is persisted when it
+        # returns, so the only state a competing run can observe is RESERVED (paused at the
+        # approval). A RESERVED run whose pause did not survive a restart holds nothing.
+        q = select(PayrollRun).where(PayrollRun.employer_id == employer.id, PayrollRun.status == "RESERVED")
+        for other in s.scalars(q):
+            if not self.is_resumable(other):
+                continue
+            raise RuntimeConflict(
+                f"{employer.name} already has an open run awaiting a decision. Approve or hold it "
+                "before starting another payroll for this employer.")
 
     def decide(self, s: Session, *, run: PayrollRun, employer: Employer, user: User, decision: str) -> PayrollRun:
         if run.pending_interrupt is None:
@@ -406,11 +479,8 @@ class PlatformRuntime:
                 approval.tap_signature = envelope.headers["Signature"]
                 approval.tap_key_id = _keyword(sig_input, "keyid")
                 approval.tap_nonce = _keyword(sig_input, "nonce")
-            result = self.graph.invoke(Command(resume=resume), config)
-            self._sync(s, run, employer, result)
-            approval.verified = kind == "approval" and run.status != "APPROVAL_REJECTED"
-            s.add(approval)
-        s.commit()
+            self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(Command(resume=resume), config),
+                                     approval=approval)
         return run
 
     def is_resumable(self, run: PayrollRun) -> bool:
@@ -432,9 +502,7 @@ class PlatformRuntime:
             raise RuntimeConflict("Only a FAILED run can be resumed.")
         config = {"configurable": {"thread_id": str(run.id)}}
         with self.lock:
-            result = resume_failed(self.graph, config)
-            self._sync(s, run, employer, result if isinstance(result, dict) else {})
-        s.commit()
+            self._invoke_and_persist(s, run, employer, lambda: resume_failed(self.graph, config))
         return run
 
     # ------------------------------------------------------------------ sync
@@ -451,9 +519,9 @@ class PlatformRuntime:
         if a:
             run.payroll_currency = a.get("payroll_currency")
             run.required_usd = to_decimal(a["required_usd"])
-            run.shortfall_usd = to_decimal(a["shortfall_usd"])
+            run.shortfall_usd = to_decimal(a.get("full_shortfall_usd") or a["shortfall_usd"])
         run.pending_interrupt = result["__interrupt__"][0].value if "__interrupt__" in result else None
-        if run.status == "SETTLED" and run.settled_at is None:
+        if run.status in MONEY_MOVED and run.settled_at is None:
             run.settled_at = datetime.now(UTC)
         if run.status in TERMINAL:
             self._live_threads.discard(str(run.id))
@@ -479,6 +547,20 @@ class PlatformRuntime:
                 run.pay_lines.append(pl)
             if run.status in ("HELD_SHORTFALL", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED"):
                 pl.status = "HELD"
+
+        # Partial payout: the lines this run does not pay are persisted too, HELD.
+        base = len(values.get("pay_lines", []))
+        for j, line in enumerate(values.get("held_lines") or []):
+            if (base + j) in existing:
+                continue
+            contractor_id = line.get("contractor_id")
+            held = PayLine(run_id=run.id, position=base + j, beneficiary_name=line["name"],
+                           amount=to_decimal(line["amount"]), currency=line["currency"],
+                           method=line.get("method", "SWIFT"),
+                           contractor_id=uuid.UUID(contractor_id) if contractor_id else None,
+                           request_id=request_id_for(str(run.id), f"held-{base + j}"), status="HELD")
+            s.add(held)
+            run.pay_lines.append(held)
 
         calls = self.recorder.log[self._calls_synced:]
         transfers = {c.request_id: c.response for c in calls if c.operation == "create_transfer"}

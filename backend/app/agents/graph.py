@@ -7,6 +7,8 @@ deterministic code: routing reads the policy assessment, never an LLM.
         route = escalate  -> escalate (interrupt: human decision) -> close
         route = approval  -> approval (interrupt: TAP-signed approve / hold)
                                 approve -> execute -> fee -> reconcile -> attest -> END
+                                (a failure after money moved routes to close with an explicit
+                                 status: SENT_FEE_FAILED / SENT_UNRECONCILED / ATTEST_PENDING)
                                 hold / bad signature -> close
         route = refused   -> close
 
@@ -43,7 +45,14 @@ from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
 from ..partners.metal import SettlementChain
 from ..partners.tap_signing import SignedEnvelope, TapSigner, approval_body
-from ..policy import PAYROLL_POLICY, ContractorPayroll, PayrollAssessment, RefusalError, assess_payroll
+from ..policy import (
+    PAYROLL_POLICY,
+    ContractorPayroll,
+    PayrollAssessment,
+    RefusalError,
+    assess_payroll,
+    plan_partial_payout,
+)
 from .intake import explain_assessment, parse_intake
 from .state import PayrollRunState
 
@@ -54,7 +63,8 @@ AGENTS: dict[str, dict[str, str]] = {
     "price": {"name": "Pricing Agent", "kind": "code",
               "job": "Prices salaries plus payout fees per currency, before any FX."},
     "assess": {"name": "Balance & Policy Agent", "kind": "code",
-               "job": "Checks only this employer's wallet against payroll, run fee and reserve floor."},
+               "job": "Checks only this employer's wallet against payroll, run fee and reserve floor; "
+                      "when short, selects the smallest lines it can still pay and holds the rest."},
     "approval": {"name": "Approval Gate", "kind": "human",
                  "job": "Pauses for a Visa TAP-signed human decision on the exact amounts."},
     "escalate": {"name": "Escalation", "kind": "human",
@@ -183,6 +193,11 @@ def assessment_dict(a: PayrollAssessment) -> dict:
     }
 
 
+def _line_view(line: dict) -> dict:
+    return {"name": line["name"], "amount": line["amount"], "currency": line["currency"],
+            "method": line.get("method", "SWIFT")}
+
+
 def _decision_of(value: object) -> tuple[str, str, dict | None]:
     """Normalise an interrupt resume value -> (decision, decided_by, tap envelope)."""
     if isinstance(value, dict):
@@ -288,6 +303,15 @@ def build_graph(services: Services, checkpointer=None):
                 "explanation": explain_assessment(state["employer_name"], assessment),
                 "audit": audit, "events": events}
 
+    def _rates_for(state: PayrollRunState, balances: dict) -> dict:
+        rates = services.usd_rates
+        if services.rate_provider is not None:
+            lines = list(state["pay_lines"]) + list(state.get("held_lines") or [])
+            needed = {l["currency"] for l in lines} | set(balances)
+            rates = services.rate_provider.rates_for(
+                needed, account_id=state["account_id"], run_id=state["run_id"])
+        return rates
+
     def assess_node(state: PayrollRunState) -> dict:
         a = state["assessment"]
         if a["can_run"]:
@@ -298,9 +322,41 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "approval", "status": "RESERVED", "audit": audit, "events": events}
         audit, events = _log(
             state, "assess",
-            f"SHORTFALL USD {a['shortfall_usd']} — DO NOT RUN this payroll. Only this employer's wallet "
-            "was checked; escalating to a human.", "warning")
-        return {"route": "escalate", "status": "HELD_SHORTFALL", "audit": audit, "events": events}
+            f"SHORTFALL USD {a['shortfall_usd']} — the full payroll does not fit in this employer's own wallet. "
+            "Only this employer's wallet was checked.", "warning")
+        # Kit 6: pay what its own balance supports (smallest lines first), escalate the rest.
+        plan = None
+        try:
+            balances = awx.get_balances(account_id=state["account_id"])
+            plan = plan_partial_payout(_pay_lines(state), _rates_for(state, balances), balances)
+        except RefusalError as exc:
+            _log(state, "assess", f"Partial payout not possible: {exc}", "warning", audit, events)
+        if plan is None:
+            _log(state, "assess", "DO NOT RUN — not even the smallest line fits (payout fee, run fee and "
+                 "reserve floor included); escalating to a human.", "warning", audit, events)
+            return {"route": "escalate", "status": "HELD_SHORTFALL", "audit": audit, "events": events}
+        all_lines = state["pay_lines"]
+        paid = [all_lines[i] for i in plan.paid]
+        held = [all_lines[i] for i in plan.held]
+        partial = assessment_dict(plan.assessment)
+        full_shortfall = money_str(plan.full.shortfall_usd)
+        partial.update({
+            "partial": True,
+            "full_required_usd": money_str(plan.full.required_usd),
+            "full_shortfall_usd": full_shortfall,
+            "held_lines": [_line_view(l) for l in held],
+            "held_count": len(held),
+        })
+        _log(state, "assess",
+             f"PARTIAL PAYOUT — paying the {len(paid)} smallest line(s) its own USD {partial['available_usd']} "
+             f"supports (USD {partial['required_usd']} incl. run fee, reserve floor kept); "
+             f"holding {len(held)} line(s) ({', '.join(l['name'] for l in held)}), short USD {full_shortfall}. "
+             "Reserved pending a signed human approval.", "success", audit, events)
+        _log(state, "escalate",
+             f"{len(held)} line(s) escalated and held: {', '.join(l['name'] for l in held)}. "
+             f"Exact shortfall for the full batch: USD {full_shortfall}.", "warning", audit, events)
+        return {"route": "approval", "status": "RESERVED", "assessment": partial,
+                "pay_lines": paid, "held_lines": held, "audit": audit, "events": events}
 
     def approval_node(state: PayrollRunState) -> dict:
         value = interrupt({
@@ -309,8 +365,12 @@ def build_graph(services: Services, checkpointer=None):
             "run_id": state["run_id"],
             "assessment": state["assessment"],
             "pay_lines": state["pay_lines"],
+            "held_lines": [_line_view(l) for l in state.get("held_lines") or []],
+            "partial": bool(state.get("held_lines")),
             "message": "Approve this exact payroll? Amounts, currencies and beneficiaries are fixed "
-                       "and your decision is Visa TAP-signed.",
+                       "and your decision is Visa TAP-signed."
+                       + (" Only the lines listed in pay_lines are paid; held_lines stay HELD."
+                          if state.get("held_lines") else ""),
         })
         decision, decided_by, envelope = _decision_of(value)
         expected = approval_body(run_id=state["run_id"], employer_key=state["employer_key"],
@@ -368,6 +428,24 @@ def build_graph(services: Services, checkpointer=None):
         # original result anyway, and their ledger entries are already posted).
         completed = list(state.get("completed_payouts", []))
         fx_done = list(state.get("fx_done", []))
+        if not fx_done and not completed:
+            # Fail closed: re-run the assessment against FRESH balances before any
+            # money moves (another run, a charge or a withdrawal may have eaten
+            # into the reserve since this run was assessed).
+            try:
+                fresh = awx.get_balances(account_id=acct)
+                recheck = assess_payroll(_pay_lines(state), _rates_for(state, fresh), fresh)
+            except RefusalError as exc:
+                msg = f"Affordability re-check refused: {exc}"
+                _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
+                return {"status": "HELD_SHORTFALL", "error": msg, "balances": balances_str(acct),
+                        "audit": audit, "events": events}
+            if not recheck.can_run:
+                msg = (f"Wallet no longer covers this payroll: USD {money_str(recheck.available_usd)} available, "
+                       f"short USD {money_str(recheck.shortfall_usd)} (payroll + run fee + reserve floor).")
+                _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
+                return {"status": "HELD_SHORTFALL", "error": msg, "balances": balances_str(acct),
+                        "audit": audit, "events": events}
         try:
             # 1. Convert exactly the priced amount per currency, on the employer's behalf.
             for req in a["by_currency"]:
@@ -439,38 +517,67 @@ def build_graph(services: Services, checkpointer=None):
                 "audit": audit, "events": events}
 
     def fee_node(state: PayrollRunState) -> dict:
-        fee = to_decimal(state["assessment"]["platform_fee_usd"])
-        awx.create_charge(request_id=request_id_for(state["run_id"], "platform-fee"),
-                          source_account_id=state["account_id"], amount=fee, currency="USD",
-                          reference="payroll run fee")
-        ledger.post([(f"{state['employer_key']}:cash:USD", -fee), ("platform:fees:USD", fee)],
-                    memo=f"{state['run_id']} platform run fee")
-        audit, events = _log(state, "fee", f"Platform fee USD {money_str(fee)} collected — charged only "
-                             "because this payroll actually ran.", "success")
-        return {"fee_charged_usd": money_str(fee), "balances": balances_str(state["account_id"]),
-                "audit": audit, "events": events}
+        # Money already moved at this point: a failure here is recorded, never raised.
+        try:
+            fee = to_decimal(state["assessment"]["platform_fee_usd"])
+            awx.create_charge(request_id=request_id_for(state["run_id"], "platform-fee"),
+                              source_account_id=state["account_id"], amount=fee, currency="USD",
+                              reference="payroll run fee")
+            ledger.post([(f"{state['employer_key']}:cash:USD", -fee), ("platform:fees:USD", fee)],
+                        memo=f"{state['run_id']} platform run fee")
+            audit, events = _log(state, "fee", f"Platform fee USD {money_str(fee)} collected — charged only "
+                                 "because this payroll actually ran.", "success")
+            return {"fee_charged_usd": money_str(fee), "balances": balances_str(state["account_id"]),
+                    "audit": audit, "events": events}
+        except Exception as exc:
+            audit, events = _log(state, "fee", f"Platform fee collection FAILED after the payouts were sent: "
+                                 f"{exc}. Contractors were paid; the run fee is still owed.", "error")
+            return {"status": "SENT_FEE_FAILED", "error": f"Run fee failed: {exc}",
+                    "audit": audit, "events": events}
 
     def reconcile_node(state: PayrollRunState) -> dict:
         key, acct = state["employer_key"], state["account_id"]
-        if not ledger.is_balanced():
-            raise RuntimeError("Ledger trial balance does not sum to zero — refusing to close the run.")
-        wallet = awx.get_balances(account_id=acct)
-        currencies = set(wallet) | {r["currency"] for r in state["assessment"]["by_currency"]} | {"USD"}
-        for currency in sorted(currencies):
-            ledger_cash = ledger.employer_cash(key, currency)
-            wallet_cash = wallet.get(currency, Decimal("0.00"))
-            if ledger_cash != wallet_cash:
-                raise RuntimeError(f"Reconciliation mismatch for {state['employer_name']} {currency}: "
-                                   f"ledger {ledger_cash} != wallet {wallet_cash}")
+        try:
+            if not ledger.is_balanced():
+                raise RuntimeError("Ledger trial balance does not sum to zero — refusing to close the run.")
+            wallet = awx.get_balances(account_id=acct)
+            currencies = set(wallet) | {r["currency"] for r in state["assessment"]["by_currency"]} | {"USD"}
+            for currency in sorted(currencies):
+                ledger_cash = ledger.employer_cash(key, currency)
+                wallet_cash = wallet.get(currency, Decimal("0.00"))
+                if ledger_cash != wallet_cash:
+                    raise RuntimeError(f"Reconciliation mismatch for {state['employer_name']} {currency}: "
+                                       f"ledger {ledger_cash} != wallet {wallet_cash}")
+        except Exception as exc:
+            audit, events = _log(state, "reconcile", f"Reconciliation FAILED after the payouts were sent: {exc}",
+                                 "error")
+            return {"status": "SENT_UNRECONCILED", "error": f"Reconciliation failed: {exc}",
+                    "audit": audit, "events": events}
         audit, events = _log(state, "reconcile",
                              "Reconciled: ledger matches the wallet in every currency; books balance.", "success")
+        held = state.get("held_lines") or []
+        if held:
+            full_shortfall = (state.get("assessment") or {}).get("full_shortfall_usd", "0.00")
+            _log(state, "escalate",
+                 f"Partially paid: {len(held)} line(s) remain HELD ({', '.join(l['name'] for l in held)}). "
+                 f"Fund this employer's own wallet (short USD {full_shortfall}) and start a new run for them.",
+                 "warning", audit, events)
+            return {"status": "PARTIALLY_PAID", "audit": audit, "events": events}
         return {"status": "SETTLED", "audit": audit, "events": events}
 
     def attest_node(state: PayrollRunState) -> dict:
-        receipt = chain.attest({
-            "run_id": state["run_id"], "employer": state["employer_name"], "status": state["status"],
-            "assessment": state["assessment"], "fee_charged_usd": state["fee_charged_usd"],
-        })
+        # The money movement is already final and reconciled; an attestation
+        # failure must not turn it into a failed payout.
+        try:
+            receipt = chain.attest({
+                "run_id": state["run_id"], "employer": state["employer_name"], "status": state["status"],
+                "assessment": state["assessment"], "fee_charged_usd": state["fee_charged_usd"],
+            })
+        except Exception as exc:
+            audit, events = _log(state, "attest", f"Attestation FAILED: {exc}. The payroll itself settled and "
+                                 "reconciled; the receipt is pending.", "error")
+            return {"status": "ATTEST_PENDING", "error": f"Attestation failed: {exc}",
+                    "audit": audit, "events": events}
         anchor_note = f" tx {receipt.tx_hash}" if receipt.tx_hash else ""
         audit, events = _log(state, "attest",
                              f"Reconciliation receipt anchored ({receipt.chain}, receipt #{receipt.index}, "
@@ -510,8 +617,11 @@ def build_graph(services: Services, checkpointer=None):
     builder.add_conditional_edges("approval", route_after_approval, {"execute": "execute", "close": "close"})
     builder.add_edge("escalate", "close")
     builder.add_conditional_edges("execute", route_after_execute, {"fee": "fee", "close": "close"})
-    builder.add_edge("fee", "reconcile")
-    builder.add_edge("reconcile", "attest")
+    builder.add_conditional_edges("fee", lambda s: "reconcile" if s.get("status") == "SENT" else "close",
+                                  {"reconcile": "reconcile", "close": "close"})
+    builder.add_conditional_edges(
+        "reconcile", lambda s: "attest" if s.get("status") in ("SETTLED", "PARTIALLY_PAID") else "close",
+        {"attest": "attest", "close": "close"})
     builder.add_edge("attest", END)
     builder.add_edge("close", END)
     return builder.compile(checkpointer=checkpointer or MemorySaver())
