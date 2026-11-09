@@ -300,9 +300,12 @@ class AirwallexClient:
                                          "last_name": last or first or business_name,
                                          "roles": ["AUTHORISED_PERSON"]}],
         }
-        create_payload: dict = {"account_details": details}
-        if email:
-            create_payload["primary_contact"] = {"email": email}
+        if not email:
+            # The live API rejects account creation without a primary contact
+            # (400 field_required: primary_contact), although the docs mark it optional.
+            raise AirwallexError("Airwallex needs a primary contact for a connected account: "
+                                 "add the employer's contact email and try again.")
+        create_payload: dict = {"account_details": details, "primary_contact": {"email": email}}
         created = self._request("POST", "/accounts/create", json=create_payload)
         account_id = created.get("id")
         if not account_id:

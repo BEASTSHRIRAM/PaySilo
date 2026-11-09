@@ -81,7 +81,8 @@ class AirwallexSimulator:
         balances[currency] = round_money(current - amount)
 
     # -- connected accounts ------------------------------------------------
-    def create_connected_account(self, *, request_id: str, business_name: str, contact_name: str = "") -> dict:
+    def create_connected_account(self, *, request_id: str, business_name: str, contact_name: str = "",
+                                 email: str = "") -> dict:
         def _create() -> dict:
             account_id = f"acct_{next(self._seq):03d}_{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex[:8]}"
             self._accounts[account_id] = {

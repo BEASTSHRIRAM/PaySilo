@@ -293,7 +293,8 @@ class PlatformRuntime:
         with self.lock:
             account = self.recorder.create_connected_account(
                 request_id=request_id_for(str(employer.id), "connected-account"),
-                business_name=employer.name, contact_name=employer.contact_name or "")
+                business_name=employer.name, contact_name=employer.contact_name or "",
+                email=employer.contact_email or "")
             employer.airwallex_account_id = account["id"]
             if not self.settings.demo_mode:
                 self._onboard_live_account(employer, account.get("status"))

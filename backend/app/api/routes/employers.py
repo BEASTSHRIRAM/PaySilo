@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from ...airwallex.client import AirwallexError
 from ...db.models import Contractor, Employer
 from ...services.runtime import PlatformRuntime, RuntimeConflict
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
@@ -47,7 +48,12 @@ def create_employer(body: EmployerIn, tenant: Tenant = Depends(require_roles(EDI
     except IntegrityError:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "An employer with this name already exists.") from None
-    runtime.ensure_account(db, emp)  # its own connected account = its own silo
+    try:
+        runtime.ensure_account(db, emp)  # its own connected account = its own silo
+    except AirwallexError as exc:
+        # Nothing is saved: the employer only exists once its silo (connected account) does.
+        db.rollback()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Airwallex could not create this employer's account: {exc}") from None
     db.commit()
     return employer_detail_out(db, runtime, load_employer(db, tenant, emp.id))
 
