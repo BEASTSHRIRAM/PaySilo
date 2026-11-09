@@ -12,6 +12,11 @@ type ValidationItem = { loc?: (string | number)[]; msg?: string };
 function parseError(status: number, body: unknown): ApiError {
   const detail = (body as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return new ApiError(status, detail);
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const d = detail as { message?: string; needs_contractor?: { row_number: number; beneficiary_name?: string | null }[] };
+    const names = (d.needs_contractor ?? []).map((r) => r.beneficiary_name || `row ${r.row_number}`).join(", ");
+    if (d.message) return new ApiError(status, names ? `${d.message} Missing contractors: ${names}.` : d.message);
+  }
   if (Array.isArray(detail)) {
     const fields: Record<string, string> = {};
     for (const item of detail as ValidationItem[]) {
@@ -86,7 +91,7 @@ export interface RunSummary {
 }
 export interface RunDetail extends RunSummary {
   assessment: Assessment | null;
-  pay_lines: { position: number; beneficiary_name: string; amount: string; currency: string; method: string;
+  pay_lines: { id: string; position: number; beneficiary_name: string; amount: string; currency: string; method: string;
     payout_fee: string | null; status: string; airwallex_transfer_id: string | null }[];
   events: { seq: number; agent: string; level: string; message: string; created_at: string }[];
   approvals: { kind: string; decision: string; decided_by_email: string; verified: boolean; tap_key_id: string | null;
@@ -316,6 +321,12 @@ export interface ReconCurrency {
   provider_fees: string;
   platform_charges: string;
   closing_cash: string;
+  /** Provider wallet balance for this currency; null/absent when the wallet could not be read. */
+  wallet_balance?: string | null;
+  wallet_available?: boolean;
+  /** Ledger closing cash minus wallet balance (or the internal identity check when no wallet). */
+  variance?: string;
+  identity_variance?: string;
   status: string; // e.g. "MATCHED" | "VARIANCE" — shown verbatim, variance in coral
 }
 
@@ -333,8 +344,15 @@ export interface ReconSettlement {
 export interface Reconciliation {
   currencies: ReconCurrency[];
   settlements: ReconSettlement[];
-  matched_percent: number;
+  /** null when the employer has no pay lines (never reported as 100). */
+  matched_percent: number | null;
+  /** "ledger_vs_wallet" = compared with the provider wallet; "ledger_self_check" = internal only. */
+  basis?: "ledger_vs_wallet" | "ledger_self_check";
+  basis_note?: string;
 }
+
+/** GET /runs/{id}/pay-lines/{line}/receipt-token. `path` is the public frontend page (/receipt/{id}?token=). */
+export interface ReceiptLink { token: string; path: string; api_path: string; expires_at: string }
 
 /** One double-entry line of a journal transaction. Exactly one of debit/credit is non-zero. */
 export interface JournalLine {
@@ -406,6 +424,10 @@ export interface ImportPreviewRow {
   status: string;
   errors: string[];
   data: Record<string, unknown>;
+  /** Set on valid rows: the matched existing contractor, or needs_contractor=true when none matches. */
+  contractor_id?: string | null;
+  needs_contractor?: boolean;
+  match_note?: string | null;
 }
 
 export interface ImportPreview {
@@ -415,6 +437,8 @@ export interface ImportPreview {
   valid_count: number;
   error_count: number;
   duplicate_count: number;
+  /** Valid rows that match no existing contractor; commit is refused (422) until they are added. */
+  needs_contractor_count?: number;
   rows: ImportPreviewRow[];
   summary: Record<string, unknown> | string | null;
 }
@@ -450,7 +474,10 @@ export interface CalendarResponse {
 
 export const apiV3 = {
   // FEB lane
-  exceptions: () => request<ExceptionItem[]>("/exceptions"),
+  exceptions: (limit = 100, offset = 0) =>
+    request<ExceptionItem[]>(`/exceptions?limit=${limit}&offset=${offset}`),
+  receiptLink: (runId: string, payLineId: string) =>
+    request<ReceiptLink>(`/runs/${encodeURIComponent(runId)}/pay-lines/${encodeURIComponent(payLineId)}/receipt-token`),
   reconciliation: (employerId: string) =>
     request<Reconciliation>(`/employers/${encodeURIComponent(employerId)}/reconciliation`),
   employerJournals: (employerId: string) =>
@@ -472,8 +499,8 @@ export const apiV3 = {
 /** Direct-download URLs (the endpoints return file attachments; the session cookie is first-party). */
 export const v3Downloads = {
   employerJournals: (employerId: string, format: "csv" | "json") =>
-    `/api/employers/${encodeURIComponent(employerId)}/journals?format=${format}`,
-  platformJournals: (format: "csv" | "json") => `/api/platform/journals?format=${format}`,
+    `/api/employers/${encodeURIComponent(employerId)}/journals/export?format=${format}`,
+  platformJournals: (format: "csv" | "json") => `/api/platform/journals/export?format=${format}`,
   evidenceBundle: (runId: string) => `/api/runs/${encodeURIComponent(runId)}/evidence`,
 };
 

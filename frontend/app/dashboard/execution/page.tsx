@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
-  Anchor, ArrowUpRight, Check, CircleDot, ClipboardCheck, Landmark, Loader2,
+  Anchor, ArrowUpRight, Check, CircleDot, ClipboardCheck, Copy, Landmark, Loader2,
   RefreshCw, ShieldCheck, X,
 } from "lucide-react";
 
@@ -62,6 +62,9 @@ function CheckRow({ item }: { item: CheckItem }) {
   );
 }
 
+/** Statuses after which a run no longer changes without a new human action. */
+const TERMINAL_RUN_STATUSES = new Set(["SETTLED", "FAILED", "REFUSED", "APPROVAL_REJECTED", "HELD_SHORTFALL", "HELD_BY_HUMAN"]);
+
 export default function ExecutionPage() {
   const { session } = useSession("/dashboard/execution");
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
@@ -74,6 +77,8 @@ export default function ExecutionPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
+  const detailSeq = useRef(0); // guards against out-of-order responses when switching runs quickly
 
   const loadRuns = useCallback(async () => {
     setError(null);
@@ -90,21 +95,28 @@ export default function ExecutionPage() {
 
   useEffect(() => { void loadRuns(); }, [loadRuns]);
 
-  const loadDetail = useCallback(async (id: string) => {
+  const loadDetail = useCallback(async (id: string, opts: { quiet?: boolean } = {}) => {
+    const seq = ++detailSeq.current;
+    const stale = () => seq !== detailSeq.current;
     if (!id) { setDetail(null); setEvidence(null); return; }
-    setDetailLoading(true);
-    setEvidenceNote(null);
+    if (!opts.quiet) { setDetailLoading(true); setEvidenceNote(null); }
     try {
-      setDetail(await api.run(id));
+      const d = await api.run(id);
+      if (stale()) return;
+      setDetail(d);
     } catch (e) {
+      if (stale()) return;
       setError(errMsg(e));
       setDetailLoading(false);
       return;
     }
     // Evidence feeds the verification checklist; its absence must not fail the page.
     try {
-      setEvidence(await apiV3.runEvidence(id));
+      const ev = await apiV3.runEvidence(id);
+      if (stale()) return;
+      setEvidence(ev);
     } catch (e) {
+      if (stale()) return;
       setEvidence(null);
       setEvidenceNote(
         e instanceof ApiError && e.status === 404
@@ -115,7 +127,27 @@ export default function ExecutionPage() {
     setDetailLoading(false);
   }, []);
 
-  useEffect(() => { setSelected(0); void loadDetail(runId); }, [runId, loadDetail]);
+  useEffect(() => { setSelected(0); setLinkNote(null); setDetail(null); void loadDetail(runId); }, [runId, loadDetail]);
+
+  // Poll while the run is in flight (not terminal and not waiting on a human).
+  const polling = !!detail && !TERMINAL_RUN_STATUSES.has(detail.status) && !detail.pending;
+  useEffect(() => {
+    if (!polling || !runId) return;
+    const t = setInterval(() => { void loadDetail(runId, { quiet: true }); }, 4000);
+    return () => clearInterval(t);
+  }, [polling, runId, loadDetail]);
+
+  async function copyReceiptLink(payLineId: string) {
+    setLinkNote(null);
+    try {
+      const link = await apiV3.receiptLink(runId, payLineId);
+      const url = `${window.location.origin}${link.path}`;
+      await navigator.clipboard.writeText(url);
+      setLinkNote("Receipt link copied. It expires in 30 days.");
+    } catch (e) {
+      setLinkNote(`Could not copy the receipt link: ${errMsg(e)}`);
+    }
+  }
 
   async function refresh() {
     setRefreshing(true);
@@ -304,6 +336,12 @@ export default function ExecutionPage() {
                         {formatMoney(line.amount, line.currency)} · {line.method}
                         {line.airwallex_transfer_id ? ` · ${line.airwallex_transfer_id}` : ""}
                       </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <Button variant="outline" size="sm" onClick={() => void copyReceiptLink(line.id)}>
+                          <Copy /> Copy receipt link
+                        </Button>
+                        {linkNote && <span role="status" className="text-xs font-semibold text-sage-400">{linkNote}</span>}
+                      </div>
                       <div className="mt-5">
                         <LifecycleStepper {...lifecycleFor(line.status, detail.status)} />
                       </div>

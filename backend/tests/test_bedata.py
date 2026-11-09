@@ -17,8 +17,8 @@ COBALT = "Cobalt Retail LLC"
 
 CSV_OK = (
     "name,email,amount,currency,method,iban,account_number,swift_code,country\n"
-    "Nina New,nina@example.com,1200,EUR,SWIFT,DE89370400440532013000,,COBADEFFXXX,DE\n"
-    "Omar New,,900,USD,LOCAL,,123456789,,US\n"
+    "Lena Fischer,lena@example.com,1200,EUR,SWIFT,DE89370400440532013000,,COBADEFFXXX,DE\n"
+    "Tomas Rivera,,900,EUR,SWIFT,ES9121000418450200051332,,CAIXESBBXXX,ES\n"
 )
 
 
@@ -58,7 +58,7 @@ def test_import_preview_validates_and_persists(demo_client):
     assert body["content_hash"] == hashlib.sha256(CSV_OK.encode()).hexdigest()
     assert body["row_count"] == 2 and body["valid_count"] == 2
     assert body["error_count"] == 0 and body["duplicate_count"] == 0
-    assert body["rows"][0]["data"]["beneficiary_name"] == "Nina New"
+    assert body["rows"][0]["data"]["beneficiary_name"] == "Lena Fischer"
     assert body["rows"][0]["data"]["amount"] == "1200.00"
     assert body["summary"]["valid_count"] == 2
 
@@ -120,7 +120,7 @@ def test_import_commit_creates_one_run_and_is_idempotent(demo_client):
     run = r1.json()
     assert run["source"] == "import" and run["period_label"] == "Nov 2026"
     assert len(run["pay_lines"]) == 2
-    assert {p["beneficiary_name"] for p in run["pay_lines"]} == {"Nina New", "Omar New"}
+    assert {p["beneficiary_name"] for p in run["pay_lines"]} == {"Lena Fischer", "Tomas Rivera"}
     # Second commit: same run, nothing new.
     r2 = demo_client.post(f"/employers/{acme_id}/imports/{imp['import_id']}/commit", json={})
     assert r2.json()["id"] == run["id"]
@@ -133,12 +133,12 @@ def test_import_commit_creates_one_run_and_is_idempotent(demo_client):
 def test_import_commit_only_ok_rows(demo_client):
     acme_id = _employers(demo_client)[ACME]["id"]
     csv_text = ("name,amount,currency,iban\n"
-                "Good One,100,EUR,DE89370400440532013000\n"
+                "Lena Fischer,100,EUR,DE89370400440532013000\n"
                 "Bad One,-5,EUR,DE89370400440532013001\n")
     imp = demo_client.post(f"/employers/{acme_id}/imports/preview",
                            json={"filename": "mix.csv", "content": csv_text}).json()
     run = demo_client.post(f"/employers/{acme_id}/imports/{imp['import_id']}/commit", json={}).json()
-    assert [p["beneficiary_name"] for p in run["pay_lines"]] == ["Good One"]
+    assert [p["beneficiary_name"] for p in run["pay_lines"]] == ["Lena Fischer"]
 
 
 def test_import_mapping_override_and_cross_tenant_404(demo_client):
@@ -243,7 +243,7 @@ def test_reconciliation_math_against_settled_acme(demo_client):
                     + float(row["fx_buys"]) - float(row["fx_sells"]) - float(row["payout_debits"])
                     - float(row["provider_fees"]) - float(row["platform_charges"]) + float(row["other"]))
         assert abs(identity - float(row["closing_cash"])) < 0.005
-    assert rec["matched_percent"] == 100.0
+    assert rec["matched_percent"] == 100.0 and rec["basis"] == "ledger_vs_wallet"
     assert len(rec["settlements"]) == 2
     assert all(s["matched"] and s["provider_ref"] for s in rec["settlements"])
 
@@ -339,7 +339,7 @@ def test_calendar_derived_from_pay_date(demo_client):
                            json={"filename": "nov.csv", "content": CSV_OK}).json()
     demo_client.post(f"/employers/{acme_id}/imports/{imp['import_id']}/commit",
                      json={"period_label": "Nov 2026", "pay_date": "2026-11-30"})
-    events = demo_client.get(f"/employers/{acme_id}/calendar").json()
+    events = demo_client.get(f"/employers/{acme_id}/calendar").json()["events"]
     by_kind = {e["kind"]: e for e in events}
     assert by_kind["pay_date"]["date"] == "2026-11-30"
     assert by_kind["cutoff"]["date"] == "2026-11-28"
@@ -348,7 +348,7 @@ def test_calendar_derived_from_pay_date(demo_client):
     assert all(e["derived"] is True for e in events)
     # Employers whose runs carry no pay_date produce no invented events.
     cobalt_id = _employers(demo_client)[COBALT]["id"]
-    assert demo_client.get(f"/employers/{cobalt_id}/calendar").json() == []
+    assert demo_client.get(f"/employers/{cobalt_id}/calendar").json() == {"events": []}
 
 
 # --------------------------------------------------------------- receipts
@@ -372,11 +372,11 @@ def test_worker_receipt_token_flow_and_masking(demo_client):
     r = demo_client.get(f"/runs/{done['id']}/pay-lines/{line_id}/receipt-token")
     assert r.status_code == 200, r.text
     token, path = r.json()["token"], r.json()["path"]
-    assert len(token) == 32 and path == f"/receipts/{line_id}?token={token}"
+    assert path == f"/receipt/{line_id}?token={token}" and "." in token
 
     # Public receipt works without any session.
     demo_client.post("/auth/logout")
-    receipt = demo_client.get(path)
+    receipt = demo_client.get(f"/receipts/{line_id}?token={token}")
     assert receipt.status_code == 200, receipt.text
     body = receipt.json()
     assert body["beneficiary_name"] == "Lena Fischer"

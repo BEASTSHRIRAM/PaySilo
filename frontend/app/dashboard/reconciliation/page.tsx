@@ -66,9 +66,25 @@ function SiloCard({ c }: { c: ReconCurrency }) {
           </div>
         ))}
         <div className="mt-1.5 flex items-baseline justify-between gap-3 border-t-2 border-ink-600 pt-2.5">
-          <dt className="font-extrabold text-sand-100">Closing cash</dt>
+          <dt className="font-extrabold text-sand-100">Closing cash (ledger)</dt>
           <dd className="font-display text-lg font-semibold tabular-nums text-sand-100">{formatMoney(c.closing_cash, c.currency)}</dd>
         </div>
+        {c.wallet_available ? (
+          <>
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-sm font-bold text-sage-400">Provider wallet</dt>
+              <dd className="font-display font-semibold tabular-nums text-sand-200">{formatMoney(c.wallet_balance ?? "0", c.currency)}</dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="text-sm font-bold text-sage-400">Variance (ledger − wallet)</dt>
+              <dd className={cn("font-display font-semibold tabular-nums", Number(c.variance ?? 0) !== 0 ? "text-coral-300" : "text-sand-200")}>
+                {formatMoney(c.variance ?? "0", c.currency)}
+              </dd>
+            </div>
+          </>
+        ) : (
+          <p className="text-xs font-semibold text-sage-500">Provider wallet not readable: ledger self-check only.</p>
+        )}
       </dl>
       {!good && (
         <p className="mt-3 rounded-2xl border-2 border-coral-600/50 bg-coral-500/10 px-3 py-2 text-sm font-bold text-coral-300">
@@ -156,7 +172,7 @@ export default function ReconciliationPage() {
     <FebShell
       session={session}
       title="Reconciliation center"
-      subtitle="Per-currency settlement reconciliation for one employer's silo. Matched means the provider record and the PaySilo ledger agree — anything else stays visible."
+      subtitle="Per-currency settlement reconciliation for one employer's silo. Variance compares the PaySilo ledger with the employer's provider wallet when it can be read; otherwise this is a ledger self-check only."
       actions={
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={refreshing}>
           <RefreshCw className={refreshing ? "animate-spin" : undefined} /> Refresh
@@ -201,7 +217,10 @@ export default function ReconciliationPage() {
                         <h2 className="flex items-center gap-2 self-start font-display text-lg font-semibold text-sand-100">
                           <Scale className="size-5 text-sage-400" /> Reconciliation status
                         </h2>
-                        <MatchedRing percent={data.matched_percent} />
+                        <MatchedRing percent={data.matched_percent ?? 0} />
+                        {data.matched_percent === null && (
+                          <p className="text-sm font-semibold text-sage-400">No settlements to match yet.</p>
+                        )}
                         <div className="grid w-full gap-1.5 text-sm">
                           <p className="flex items-center justify-between font-semibold text-sage-300">
                             <span className="inline-flex items-center gap-2"><Check className="size-4 text-mint-400" /> Matched settlements</span>
