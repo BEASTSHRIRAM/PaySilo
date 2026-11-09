@@ -38,6 +38,7 @@ or retrying with a new id.
 from __future__ import annotations
 
 import time
+import uuid
 from decimal import Decimal
 
 import httpx
@@ -81,6 +82,25 @@ class AirwallexClient:
         )
         self._token: str | None = None
         self._token_expiry: float = 0.0
+
+    @staticmethod
+    def _sleep(seconds: float) -> None:
+        time.sleep(seconds)
+
+    @staticmethod
+    def _retry_after(resp: httpx.Response, tries: int) -> float:
+        header = resp.headers.get("Retry-After")
+        try:
+            if header is not None:
+                return min(max(float(header), 0.0), 60.0)
+        except ValueError:
+            pass
+        return min(0.5 * (2 ** (tries - 1)), 30.0)
+
+    @staticmethod
+    def _is_unconfigured_fee(resp: httpx.Response) -> bool:
+        body = _body_json(resp)
+        return isinstance(body, dict) and body.get("code") == "unconfigured_client_fee"
 
     # -- auth ---------------------------------------------------------------
     def _access_token(self) -> str:
@@ -158,16 +178,19 @@ class AirwallexClient:
             except AirwallexError:
                 return None
             items = data.get("items") if isinstance(data, dict) else None
-            if items:
-                return items[0]
-            if isinstance(data, dict) and "id" in data:
+            # Only accept an item that really carries OUR request_id; the list
+            # filter is not guaranteed, and a wrong item must never be adopted.
+            for item in items or []:
+                if isinstance(item, dict) and item.get("request_id") == request_id:
+                    return item
+            if isinstance(data, dict) and "id" in data and data.get("request_id") == request_id:
                 return data
         return None
 
     def _request(self, method: str, path: str, *, on_behalf_of: str | None = None,
                  json: dict | None = None, params: dict | None = None,
                  request_id: str | None = None, duplicate_item_path: str | None = None,
-                 duplicate_collection: str | None = None) -> dict:
+                 duplicate_collection: str | None = None) -> dict | list:
         """One API call, with idempotent retries on transient failures.
 
         A retry re-sends the *identical* payload, including the caller's
@@ -178,7 +201,12 @@ class AirwallexClient:
         """
         attempts = 3 if method.upper() == "POST" else 1
         resp: httpx.Response | None = None
-        for attempt in range(attempts):
+        rate_limit_tries = 0
+        fee_wait_total = 0.0
+        fee_delay = 5.0
+        attempt = -1
+        while True:
+            attempt += 1
             try:
                 resp = self._http.request(method, path, headers=self._headers(on_behalf_of),
                                           json=json, params=params)
@@ -189,6 +217,23 @@ class AirwallexClient:
                 raise AirwallexError(
                     f"Airwallex request to {path} failed after {attempts} attempts: {exc}"
                 ) from exc
+            if resp.status_code == 429:  # sandbox rate limit: back off, same request_id
+                rate_limit_tries += 1
+                if rate_limit_tries <= self.settings.airwallex_rate_limit_retries:
+                    attempt -= 1  # a 429 does not consume a transport/5xx attempt
+                    self._sleep(self._retry_after(resp, rate_limit_tries))
+                    continue
+            elif resp.status_code >= 400 and self._is_unconfigured_fee(resp):
+                # A freshly activated account may take minutes to get its fee
+                # configuration. Bounded retry with the identical request_id.
+                budget = float(self.settings.airwallex_fee_config_retry_seconds)
+                if fee_wait_total < budget:
+                    delay = min(fee_delay, budget - fee_wait_total)
+                    fee_wait_total += delay
+                    fee_delay = min(fee_delay * 2, 30.0)
+                    attempt -= 1
+                    self._sleep(delay)
+                    continue
             if resp.status_code >= 500 and attempt + 1 < attempts:  # transient server error
                 time.sleep(0.1 * (2 ** attempt))
                 continue
@@ -196,7 +241,7 @@ class AirwallexClient:
         assert resp is not None  # the loop always sets it or raises
         if resp.status_code < 300:
             data = _body_json(resp)
-            return data if isinstance(data, dict) else {}
+            return data if data is not None else {}
         body = _body_json(resp)
         if _is_duplicate(resp.status_code, body):
             recovered = self._recover_duplicate(
@@ -222,18 +267,61 @@ class AirwallexClient:
         )
 
     # -- connected accounts & onboarding ---------------------------------------
-    def create_connected_account(self, *, request_id: str, business_name: str, contact_name: str = "") -> dict:
-        return self._request(
-            "POST", "/connected_accounts/create",
-            json={"request_id": request_id, "business_name": business_name,
-                  "contact_name": contact_name},
-            request_id=request_id,
-            duplicate_item_path="/connected_accounts/{id}",
-            duplicate_collection="/connected_accounts",
-        )
+    def create_connected_account(self, *, request_id: str, business_name: str, contact_name: str = "",
+                                 ein: str = "", country_code: str = "US", email: str = "",
+                                 confirm_wait_seconds: float = 2.0) -> dict:
+        """Create AND activate an employer's connected account (Kit 6 flow).
+
+        1. ``POST /accounts/create`` (platform-scoped) -> ``acct_...`` CREATED
+        2. ``POST /accounts/{id}/update`` with an EIN in
+           ``account_details.business_details.business_identifiers`` (an
+           account cannot be edited after submit)
+        3. ``POST /accounts/{id}/submit`` (empty body)
+        4. ``POST /simulation/accounts/{id}/update_status``
+           ``{"next_status": "ACTIVE", "force": true}`` (sandbox)
+        5. ``GET /accounts/{id}`` — must report ACTIVE, else we raise.
+
+        Returns ``{"id", "status", "business_name", ...}``. If the employer
+        has no EIN on file, a clearly sandbox-only placeholder derived from
+        ``request_id`` is used (deterministic, so a retry sends the same one).
+        """
+        if not ein:
+            digits = "".join(c for c in str(int(uuid.uuid5(uuid.NAMESPACE_URL, request_id).int)) if c.isdigit())
+            ein = f"{digits[:2]}-{digits[2:9]}"
+        first, _, last = (contact_name or business_name).strip().partition(" ")
+        details: dict = {
+            "business_details": {
+                "business_name": business_name,
+                "operating_country": country_code,
+                "business_identifiers": [{"country_code": country_code, "number": ein, "type": "EIN"}],
+            },
+            "business_person_details": [{"first_name": first or business_name,
+                                         "last_name": last or first or business_name,
+                                         "roles": ["AUTHORISED_PERSON"]}],
+        }
+        create_payload: dict = {"account_details": details}
+        if email:
+            create_payload["primary_contact"] = {"email": email}
+        created = self._request("POST", "/accounts/create", json=create_payload)
+        account_id = created.get("id")
+        if not account_id:
+            raise AirwallexError("POST /accounts/create returned no account id.")
+        # Fill gaps: the update repeats the identifiers (full replacement lists).
+        self._request("POST", f"/accounts/{account_id}/update", json=create_payload)
+        self._request("POST", f"/accounts/{account_id}/submit", json={})
+        if confirm_wait_seconds:
+            self._sleep(confirm_wait_seconds)  # the guide: wait ~2s after submit
+        self._request("POST", f"/simulation/accounts/{account_id}/update_status",
+                      json={"next_status": "ACTIVE", "force": True})
+        confirmed = self._get(f"/accounts/{account_id}")
+        status = confirmed.get("status")
+        if status != "ACTIVE":
+            raise AirwallexError(
+                f"Connected account {account_id} is {status}, not ACTIVE after activation.")
+        return {**confirmed, "id": account_id, "status": "ACTIVE", "business_name": business_name}
 
     def get_connected_account(self, *, account_id: str) -> dict:
-        return self._get(f"/connected_accounts/{account_id}", on_behalf_of=account_id)
+        return self._get(f"/accounts/{account_id}")
 
     def create_hosted_onboarding_link(self, *, account_id: str, template: str, return_url: str = "") -> dict:
         """Start hosted onboarding: POST /hosted_flows/create.
@@ -267,7 +355,8 @@ class AirwallexClient:
     def get_balances(self, *, account_id: str | None = None) -> dict[str, Decimal]:
         data = self._request("GET", "/balances/current", on_behalf_of=account_id)
         out: dict[str, Decimal] = {}
-        for line in data.get("items", data if isinstance(data, list) else []):
+        lines = data if isinstance(data, list) else data.get("items", [])
+        for line in lines:
             out[line["currency"]] = round_money(to_decimal(line["available_amount"]))
         return out
 
@@ -383,18 +472,18 @@ class AirwallexClient:
 
     def create_charge(self, *, request_id: str, source_account_id: str, amount: object,
                       currency: str = "USD", reference: str = "") -> dict:
-        """Collect a fee from ONE employer's connected account.
+        """Collect the platform fee from ONE employer's connected account.
 
-        The charge is scoped to the source employer with ``x-on-behalf-of``
-        so it can only ever debit that employer's wallet. See
-        ``backend/docs/airwallex-fee-path.md`` for why the per-run fee uses
-        charges instead of ``application_fee_options`` on transfers.
+        Kit 6: ``POST /charges/create`` WITHOUT ``x-on-behalf-of`` (the
+        platform is the beneficiary); the employer is named only in
+        ``source``. See ``backend/docs/airwallex-fee-path.md``.
         """
         return self._request(
-            "POST", "/charges/create", on_behalf_of=source_account_id,
-            json={"request_id": request_id, "source_id": source_account_id,
+            "POST", "/charges/create",
+            json={"request_id": request_id, "source": source_account_id,
                   "amount": str(round_money(to_decimal(amount))), "currency": currency,
-                  "reason": "fee", "reference": reference},
+                  "reason": "professional_business_services",
+                  "reference": reference or "platform fee"},
             request_id=request_id,
             duplicate_item_path="/charges/{id}",
             duplicate_collection="/charges",

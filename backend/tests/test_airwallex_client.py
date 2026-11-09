@@ -98,16 +98,40 @@ def test_platform_balances_have_no_on_behalf_of():
 
 # -- connected accounts & onboarding --------------------------------------------
 
-def test_create_connected_account_is_platform_scoped():
-    client, calls = make_client(
-        {("POST", "/connected_accounts/create"): (201, load("connected_account_create.json"))})
+def test_create_connected_account_runs_kit6_activation_flow():
+    client, calls = make_client({
+        ("POST", "/accounts/create"): (201, load("connected_account_create.json")),
+        ("POST", f"/accounts/{ACCOUNT_ID}/update"): (200, load("connected_account_create.json")),
+        ("POST", f"/accounts/{ACCOUNT_ID}/submit"): (200, load("connected_account_create.json")),
+        ("POST", f"/simulation/accounts/{ACCOUNT_ID}/update_status"): (200, load("connected_account_active.json")),
+        ("GET", f"/accounts/{ACCOUNT_ID}"): (200, load("connected_account_active.json")),
+    })
     account = client.create_connected_account(
-        request_id="req-acct-1", business_name="Acme Manufacturing GmbH", contact_name="Ana Weber")
-    assert account["status"] == "CREATED"
-    call = only(calls, "/connected_accounts/create")
-    assert call["json"] == {"request_id": "req-acct-1", "business_name": "Acme Manufacturing GmbH",
-                            "contact_name": "Ana Weber"}
-    assert "x-on-behalf-of" not in call["headers"]
+        request_id="req-acct-1", business_name="Acme Manufacturing GmbH", contact_name="Ana Weber",
+        confirm_wait_seconds=0)
+    assert account["id"] == ACCOUNT_ID and account["status"] == "ACTIVE"
+    assert [(c["method"], c["path"].split("/api/v1")[-1]) for c in api_calls(calls)] == [
+        ("POST", "/accounts/create"), ("POST", f"/accounts/{ACCOUNT_ID}/update"),
+        ("POST", f"/accounts/{ACCOUNT_ID}/submit"),
+        ("POST", f"/simulation/accounts/{ACCOUNT_ID}/update_status"), ("GET", f"/accounts/{ACCOUNT_ID}")]
+    assert all("x-on-behalf-of" not in c["headers"] for c in api_calls(calls))
+    upd = only(calls, f"/accounts/{ACCOUNT_ID}/update")["json"]
+    ids = upd["account_details"]["business_details"]["business_identifiers"]
+    assert ids[0]["type"] == "EIN" and ids[0]["number"]
+    assert only(calls, f"/simulation/accounts/{ACCOUNT_ID}/update_status")["json"] == {
+        "next_status": "ACTIVE", "force": True}
+
+
+def test_create_connected_account_raises_if_not_active_after_activation():
+    client, _ = make_client({
+        ("POST", "/accounts/create"): (201, load("connected_account_create.json")),
+        ("POST", f"/accounts/{ACCOUNT_ID}/update"): (200, {}),
+        ("POST", f"/accounts/{ACCOUNT_ID}/submit"): (200, {}),
+        ("POST", f"/simulation/accounts/{ACCOUNT_ID}/update_status"): (200, {}),
+        ("GET", f"/accounts/{ACCOUNT_ID}"): (200, load("connected_account_create.json")),
+    })
+    with pytest.raises(AirwallexError, match="not ACTIVE"):
+        client.create_connected_account(request_id="r", business_name="Acme", confirm_wait_seconds=0)
 
 
 def test_hosted_onboarding_link_create_and_authorize():
@@ -225,11 +249,12 @@ def test_charge_is_scoped_to_the_source_employer():
     client, calls = make_client({("POST", "/charges/create"): (201, load("charge_create.json"))})
     charge = client.create_charge(request_id="req-ch-1", source_account_id=ACCOUNT_ID,
                                   amount=Decimal("149"), reference="payroll run fee")
-    assert charge["status"] == "SUCCEEDED"
+    assert charge["status"] in ("NEW", "SUCCEEDED", "SETTLED")
     call = only(calls, "/charges/create")
-    assert call["json"]["source_id"] == ACCOUNT_ID
+    assert call["json"]["source"] == ACCOUNT_ID and "source_id" not in call["json"]
+    assert call["json"]["reason"] == "professional_business_services"
     assert call["json"]["amount"] == "149.00"
-    assert call["headers"]["x-on-behalf-of"] == ACCOUNT_ID
+    assert "x-on-behalf-of" not in call["headers"]
 
 
 # -- duplicate request_id: fetch the original instead of failing ------------------
@@ -258,7 +283,7 @@ def test_charge_duplicate_error_code_returns_original():
                                   source_account_id=ACCOUNT_ID, amount=Decimal("149"))
     assert charge["id"] == CHARGE_ID
     get = only(calls, f"/charges/{CHARGE_ID}")
-    assert get["headers"]["x-on-behalf-of"] == ACCOUNT_ID
+    assert "x-on-behalf-of" not in get["headers"]  # platform-scoped charge
 
 
 def test_conversion_duplicate_409_returns_original():
@@ -339,3 +364,101 @@ def test_live_rate_provider_requires_an_account():
     provider = LiveFxRateProvider(object())
     with pytest.raises(LiveRateUnavailable, match="connected account"):
         provider.rates_for({"EUR"}, account_id=None, run_id="run-noacct")
+
+
+# -- v3 fixes: backoff, duplicate recovery safety, bare arrays -------------------
+
+def _scripted_client(responses, sleeps):
+    """Client whose responses (after login) replay ``responses`` in order."""
+    calls: list[httpx.Request] = []
+    it = iter(responses)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/authentication/login"):
+            return httpx.Response(200, json=load("auth_login.json"))
+        calls.append(request)
+        status, body, headers = next(it)
+        return httpx.Response(status, json=body, headers=headers)
+
+    settings = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                        airwallex_fee_config_retry_seconds=60, airwallex_rate_limit_retries=3)
+    client = AirwallexClient(settings, transport=httpx.MockTransport(handler))
+    client._sleep = sleeps.append  # type: ignore[method-assign]
+    return client, calls
+
+
+def test_fx_has_no_api_version_header_and_retries_unconfigured_fee_with_same_request_id():
+    sleeps: list[float] = []
+    client, calls = _scripted_client([
+        (400, {"code": "unconfigured_client_fee", "message": "x"}, {}),
+        (400, {"code": "unconfigured_client_fee", "message": "x"}, {}),
+        (201, load("fx_conversion_create.json"), {}),
+    ], sleeps)
+    client.create_fx_conversion(request_id="rid-1", on_behalf_of=ACCOUNT_ID, quote_id="q",
+                                buy_amount=Decimal("10"))
+    assert len(calls) == 3 and len(sleeps) == 2
+    assert {json.loads(c.content)["request_id"] for c in calls} == {"rid-1"}
+    assert all("x-api-version" not in c.headers for c in calls)
+
+
+def test_unconfigured_fee_retry_is_bounded():
+    sleeps: list[float] = []
+    client, _ = _scripted_client([(400, {"code": "unconfigured_client_fee"}, {})] * 40, sleeps)
+    with pytest.raises(AirwallexError) as exc:
+        client.create_fx_conversion(request_id="rid", on_behalf_of=ACCOUNT_ID, quote_id="q",
+                                    buy_amount=Decimal("10"))
+    assert exc.value.code == "unconfigured_client_fee"
+    assert sum(sleeps) <= 60
+
+
+def test_429_honours_retry_after_then_succeeds_and_is_bounded():
+    sleeps: list[float] = []
+    client, calls = _scripted_client([
+        (429, {"code": "too_many_requests"}, {"Retry-After": "2"}),
+        (201, load("fx_conversion_create.json"), {}),
+    ], sleeps)
+    client.create_fx_conversion(request_id="rid", on_behalf_of=ACCOUNT_ID, quote_id="q",
+                                buy_amount=Decimal("10"))
+    assert sleeps == [2.0] and len(calls) == 2
+    sleeps2: list[float] = []
+    client2, calls2 = _scripted_client([(429, {"code": "too_many_requests"}, {})] * 10, sleeps2)
+    with pytest.raises(AirwallexError) as exc:
+        client2.create_fx_conversion(request_id="rid", on_behalf_of=ACCOUNT_ID, quote_id="q",
+                                     buy_amount=Decimal("10"))
+    assert exc.value.status_code == 429 and len(calls2) == 4  # 1 + 3 retries
+
+
+def test_duplicate_recovery_rejects_list_item_with_other_request_id():
+    wrong = dict(load("transfer_create.json"), request_id="someone-elses-request")
+    client, _ = make_client({
+        ("POST", "/transfers/create"): (409, {"code": "duplicate_request_id"}),
+        ("GET", "/transfers"): (200, {"items": [wrong]}),
+    })
+    with pytest.raises(AirwallexError, match="Duplicate request_id"):
+        client.create_transfer(request_id="mine", on_behalf_of=ACCOUNT_ID, beneficiary_id="b",
+                               amount=Decimal("10"))
+
+
+def test_duplicate_recovery_picks_the_matching_list_item():
+    wrong = dict(load("transfer_create.json"), id="trf_wrong", request_id="other")
+    right = dict(load("transfer_create.json"), id="trf_right", request_id="mine")
+    client, _ = make_client({
+        ("POST", "/transfers/create"): (409, {"code": "duplicate_request_id"}),
+        ("GET", "/transfers"): (200, {"items": [wrong, right]}),
+    })
+    out = client.create_transfer(request_id="mine", on_behalf_of=ACCOUNT_ID, beneficiary_id="b",
+                                 amount=Decimal("10"))
+    assert out["id"] == "trf_right"
+
+
+def test_get_balances_accepts_bare_array_and_items_wrapper():
+    arr = load("balances_current.json")["items"]
+    client, _ = make_client({("GET", "/balances/current"): (200, arr)})
+    assert client.get_balances(account_id=ACCOUNT_ID) == {"USD": Decimal("13343.24"),
+                                                          "EUR": Decimal("0.00")}
+    client2, _ = make_client({("GET", "/balances/current"): (200, {"items": arr})})
+    assert client2.get_balances(account_id=ACCOUNT_ID)["USD"] == Decimal("13343.24")
+
+
+def test_default_base_url_is_sandbox():
+    assert Settings(_env_file=None).airwallex_base_url == "https://api.sandbox.airwallex.com/api/v1"

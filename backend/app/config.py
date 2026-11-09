@@ -37,7 +37,11 @@ class Settings(BaseSettings):
     # Airwallex sandbox
     airwallex_client_id: str | None = None
     airwallex_api_key: str | None = None
-    airwallex_base_url: str = "https://api-demo.airwallex.com/api/v1"
+    airwallex_base_url: str = "https://api.sandbox.airwallex.com/api/v1"
+    # Back-off knobs: 429 retries, and how long to keep retrying
+    # ``unconfigured_client_fee`` on a freshly activated account.
+    airwallex_rate_limit_retries: int = 5
+    airwallex_fee_config_retry_seconds: int = 180
     # Hosted onboarding (live mode only): template id issued by Airwallex for
     # the platform's hosted onboarding flow, and where the employer returns
     # afterwards. Without a template, sandbox activation proceeds directly
