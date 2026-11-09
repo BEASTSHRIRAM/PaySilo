@@ -198,12 +198,17 @@ class PlatformRuntime:
     def tap_keys_payload(self, s: Session) -> dict:
         keys = []
         for row in self.published_tap_keys(s):
+            try:
+                raw_key = base64.b64encode(public_key_raw(load_public_key_pem(row.public_key_pem))).decode("ascii")
+            except Exception:
+                logger.warning("Visa TAP: tap_keys row %s has an unusable public key; not published.", row.key_id)
+                continue
             keys.append({
                 "keyid": row.key_id,
                 "agent_id": row.agent_id,
                 "algorithm": row.algorithm,
                 "status": "retired" if row.retired_at is not None else "active",
-                "public_key": base64.b64encode(public_key_raw(load_public_key_pem(row.public_key_pem))).decode("ascii"),
+                "public_key": raw_key,
                 "public_key_pem": row.public_key_pem,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "retired_at": row.retired_at.isoformat() if row.retired_at else None,

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from ..config import BACKEND_DIR
+from .migrate import migrate
 from .models import Base
 from .postgres import install_postgres_guards
 
@@ -68,6 +69,7 @@ class Database:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
+        migrate(self.engine)  # additive: new columns on tables that already exist
         if self.is_postgres:
             with self.engine.begin() as conn:
                 install_postgres_guards(conn)
