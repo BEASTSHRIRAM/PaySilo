@@ -108,8 +108,10 @@ def test_create_connected_account_runs_kit6_activation_flow():
     })
     account = client.create_connected_account(
         request_id="req-acct-1", business_name="Acme Manufacturing GmbH", contact_name="Ana Weber",
-        confirm_wait_seconds=0)
+        email="ana.weber@acme.example", confirm_wait_seconds=0)
     assert account["id"] == ACCOUNT_ID and account["status"] == "ACTIVE"
+    # Live API requires primary_contact (400 field_required without it, seen on the sandbox).
+    assert only(calls, "/accounts/create")["json"]["primary_contact"] == {"email": "ana.weber@acme.example"}
     assert [(c["method"], c["path"].split("/api/v1")[-1]) for c in api_calls(calls)] == [
         ("POST", "/accounts/create"), ("POST", f"/accounts/{ACCOUNT_ID}/update"),
         ("POST", f"/accounts/{ACCOUNT_ID}/submit"),
@@ -134,7 +136,15 @@ def test_create_connected_account_raises_if_not_active_after_activation():
         ("GET", f"/accounts/{ACCOUNT_ID}"): (200, load("connected_account_create.json")),
     })
     with pytest.raises(AirwallexError, match="not ACTIVE"):
+        client.create_connected_account(request_id="r", business_name="Acme", email="a@acme.example",
+                                        confirm_wait_seconds=0)
+
+
+def test_create_connected_account_requires_a_contact_email_before_calling_airwallex():
+    client, calls = make_client({})
+    with pytest.raises(AirwallexError, match="contact email"):
         client.create_connected_account(request_id="r", business_name="Acme", confirm_wait_seconds=0)
+    assert api_calls(calls) == []  # failed fast: nothing was sent
 
 
 def test_hosted_onboarding_link_create_and_authorize():

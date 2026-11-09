@@ -217,3 +217,20 @@ def test_balances_and_history_survive_a_restart(tmp_path):
                                       "lines": [{"contractor_id": acme["contractors"][1]["id"]}]}).json()
         done = c.post(f"/runs/{fresh['id']}/decision", json={"decision": "approve"}).json()
         assert done["status"] == "SETTLED", done["error"]
+
+
+def test_airwallex_refusal_on_employer_creation_is_a_clear_502_and_saves_nothing(demo_client, monkeypatch):
+    from app.airwallex.client import AirwallexError
+
+    runtime = demo_client.app.state.runtime
+
+    def refuse(*_a, **_k):
+        raise AirwallexError("POST /accounts/create failed (HTTP 400, code=invalid_argument): "
+                             "This account cannot onboard business accounts")
+
+    monkeypatch.setattr(runtime.recorder.inner, "create_connected_account", refuse)
+    r = demo_client.post("/employers", json={"name": "Echo Ltd", "country": "GB",
+                                             "contact_email": "ops@echo.example"})
+    assert r.status_code == 502
+    assert "cannot onboard business accounts" in r.json()["detail"]
+    assert "Echo Ltd" not in [e["name"] for e in demo_client.get("/employers").json()]
