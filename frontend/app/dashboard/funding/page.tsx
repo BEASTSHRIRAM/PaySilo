@@ -18,6 +18,7 @@ import {
   type Assessment, type Employer, type Overview, type RunDetail, type RunSummary, type Session,
 } from "@/lib/api";
 import { AnimatedMoney } from "@/lib/gsap-anim";
+import { MONEY_MOVED_STATUSES } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
@@ -27,7 +28,8 @@ const num = (v: string | null | undefined): number => {
 };
 const has = (v: string | null | undefined): boolean => v !== null && v !== undefined && v !== "";
 
-const TERMINAL = new Set(["SETTLED", "FAILED", "REFUSED", "APPROVAL_REJECTED"]);
+// PARTIALLY_PAID stays non-terminal here: its held lines still need funding.
+const TERMINAL = new Set([...MONEY_MOVED_STATUSES].filter((s) => s !== "PARTIALLY_PAID").concat(["FAILED", "REFUSED", "APPROVAL_REJECTED"]));
 
 /*
  * Which run funds next? The employer's most recent run that is not in a

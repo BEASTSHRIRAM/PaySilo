@@ -2,6 +2,7 @@
 
 import { Check, RotateCcw, X } from "lucide-react";
 
+import { isMoneyMoved } from "@/lib/status";
 import { cn } from "@/lib/utils";
 
 /**
@@ -27,7 +28,7 @@ export function lifecycleFor(
   if (s === "SENT" || s === "PROCESSING" || s === "PROCESSED" || s === "IN_TRANSIT")
     return { stage: 1, terminal: null, held: false };
   // A settled run lifts any non-terminal line to Settled.
-  if ((runStatus || "").toUpperCase() === "SETTLED") return { stage: 2, terminal: null, held: false };
+  if (isMoneyMoved((runStatus || "").toUpperCase()) && s !== "HELD") return { stage: 2, terminal: null, held: false };
   return { stage: 0, terminal: null, held: s === "HELD" || s.includes("HOLD") };
 }
 

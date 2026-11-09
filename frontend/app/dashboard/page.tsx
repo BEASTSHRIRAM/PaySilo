@@ -19,7 +19,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { api, ApiError, type Employer, type Overview, type RunDetail, type RunSummary, type Session } from "@/lib/api";
 import { useDataChanged } from "@/lib/events";
 import { AnimatedNumber, Stagger } from "@/lib/gsap-anim";
-import { DECIDER_ROLES, runStatusInfo } from "@/lib/status";
+import { DECIDER_ROLES, isMoneyMoved, runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
@@ -35,7 +35,8 @@ const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something w
 const isInProgress = (r: RunSummary) => r.status === "RECEIVED" || r.status === "PRICED";
 const isPendingApproval = (r: RunSummary) => r.pending?.kind === "approval" || r.status === "RESERVED";
 const isHeld = (r: RunSummary) => r.status.startsWith("HELD") || r.status === "PARTIALLY_PAID" || r.pending?.kind === "escalation";
-const isSettled = (r: RunSummary) => r.status === "SETTLED";
+// Money moved (incl. partial payouts and post-payout follow-ups): the run fee was charged.
+const isSettled = (r: RunSummary) => isMoneyMoved(r.status);
 
 const STATUS_ORDER = [
   "RECEIVED", "PRICED", "RESERVED", "APPROVED", "SENT", "SETTLED",

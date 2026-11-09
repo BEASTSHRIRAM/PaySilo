@@ -41,7 +41,7 @@ from ...db.models import (
     SourceImportRow,
 )
 from ...money import money_str, round_money
-from ...services.runtime import PlatformRuntime
+from ...services.runtime import MONEY_MOVED, PlatformRuntime
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, get_settings, require_roles
 from ..schemas import RunDetailOut
 from ..serializers import run_detail_out
@@ -49,6 +49,9 @@ from .employers import load_employer
 from .runs import load_run
 
 router = APIRouter(tags=["bedata"])
+
+# Money moved and nothing is owed: a shortfall alert is only stale for these (PARTIALLY_PAID still owes held lines).
+_CLOSED_FULLY_PAID = MONEY_MOVED - {"PARTIALLY_PAID"}
 
 SUPPORTED_CURRENCIES = {"USD", "EUR", "GBP"}
 MAX_IMPORT_ROWS = 5_000
@@ -861,7 +864,7 @@ def list_exceptions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0
         owner = (emp.contact_name if emp and emp.contact_name else "Payroll operator")
         created = run.created_at.isoformat() if run.created_at else None
         if run.status in ("HELD_SHORTFALL", "HELD_BY_HUMAN") or (run.shortfall_usd and run.shortfall_usd > 0
-                                                                 and run.status not in ("SETTLED",)):
+                                                                 and run.status not in _CLOSED_FULLY_PAID):
             is_short = run.status == "HELD_SHORTFALL" or bool(run.shortfall_usd and run.shortfall_usd > 0)
             out.append({
                 "id": f"run:{run.id}:held", "type": "shortfall" if is_short else "held_run",
@@ -874,6 +877,19 @@ def list_exceptions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0
                 "next_action": ("Fund the employer's own wallet, then start a new run."
                                 if is_short else "Review the held run and decide."),
                 "evidence_label": f"Run {run.id} assessment", "created_at": created,
+            })
+        if run.status in ("SENT_FEE_FAILED", "SENT_UNRECONCILED"):
+            fee = run.status == "SENT_FEE_FAILED"
+            out.append({
+                "id": f"run:{run.id}:followup", "type": "post_payout_followup", "severity": "medium",
+                "employer_id": str(run.employer_id), "employer_name": ename, "run_id": str(run.id),
+                "title": f"{ename or 'Employer'} paid, but " + ("the run fee was not charged" if fee
+                                                                 else "the ledger does not match the wallet"),
+                "detail": run.error or "Contractors were paid; a follow-up is owed.",
+                "owner": owner,
+                "next_action": ("Charge the run fee before the next payroll." if fee
+                                else "Review reconciliation for this employer."),
+                "evidence_label": f"Run {run.id} evidence bundle", "created_at": created,
             })
         if run.status == "FAILED":
             out.append({

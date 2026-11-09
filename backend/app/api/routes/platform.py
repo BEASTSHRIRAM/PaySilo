@@ -10,7 +10,7 @@ from ...agents.demo import run_demo
 from ...agents.graph import AGENTS
 from ...config import Settings
 from ...db.models import Employer, LedgerTransaction, PayrollRun
-from ...services.runtime import PlatformRuntime
+from ...services.runtime import MONEY_MOVED, PlatformRuntime
 from ..deps import Tenant, current_tenant, get_db, get_runtime, get_settings
 from ..schemas import OrganizationOut, OverviewOut
 from ..serializers import employer_out
@@ -61,7 +61,7 @@ def overview(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get
         employers=[employer_out(db, runtime, e) for e in employers],
         platform_fees=runtime.platform_fees(db, org_id),
         runs_total=count(),
-        runs_settled=count(PayrollRun.status == "SETTLED"),
+        runs_settled=count(PayrollRun.status.in_(MONEY_MOVED)),  # money moved: incl. partial / post-payout follow-ups
         runs_waiting=count(PayrollRun.pending_interrupt.is_not(None)),
         mode="demo" if settings.demo_mode else "live",
     )

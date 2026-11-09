@@ -63,5 +63,16 @@ export function runStatusLabel(run: RunLike): string {
   return info.label;
 }
 
+/** Run statuses where contractor money has moved (mirrors the backend MONEY_MOVED set). */
+export const MONEY_MOVED_STATUSES = new Set([
+  "SETTLED", "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING",
+]);
+export const isMoneyMoved = (status: string | null | undefined): boolean => MONEY_MOVED_STATUSES.has(status ?? "");
+
+/** Statuses after which a run no longer changes without a new human action. */
+export const TERMINAL_RUN_STATUSES = new Set([
+  ...MONEY_MOVED_STATUSES, "FAILED", "REFUSED", "APPROVAL_REJECTED", "HELD_SHORTFALL", "HELD_BY_HUMAN",
+]);
+
 export const DECIDER_ROLES = ["owner", "admin", "approver"];
 export const EDITOR_ROLES = ["owner", "admin", "editor"];

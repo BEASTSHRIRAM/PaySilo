@@ -21,6 +21,7 @@ import {
   type EvidenceBundle, type RunDetail, type RunSummary,
 } from "@/lib/api";
 import { Stagger, TimelineReveal } from "@/lib/gsap-anim";
+import { isMoneyMoved, TERMINAL_RUN_STATUSES } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const AGENT_NAMES: Record<string, string> = {
@@ -62,8 +63,6 @@ function CheckRow({ item }: { item: CheckItem }) {
   );
 }
 
-/** Statuses after which a run no longer changes without a new human action. */
-const TERMINAL_RUN_STATUSES = new Set(["SETTLED", "FAILED", "REFUSED", "APPROVAL_REJECTED", "HELD_SHORTFALL", "HELD_BY_HUMAN"]);
 
 export default function ExecutionPage() {
   const { session } = useSession("/dashboard/execution");
@@ -160,7 +159,7 @@ export default function ExecutionPage() {
 
   const checklist: CheckItem[] = useMemo(() => {
     if (!detail || !line) return [];
-    const settled = detail.status === "SETTLED";
+    const settled = isMoneyMoved(detail.status);
     const evRun = rec(evidence?.run);
     const evLine = evidence?.pay_lines.find((p) => {
       const pos = p.position;
