@@ -19,7 +19,7 @@ from ..db import Database
 from ..security import LoginThrottle
 from ..services.runtime import PlatformRuntime
 from ..services.seed import seed_demo
-from .routes import auth, employers, platform, runs
+from .routes import auth, bedata, chat, employers, platform, runs, tap
 
 logger = logging.getLogger("paysilo")
 
@@ -52,6 +52,6 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     app.state.db = db
     app.state.runtime = runtime
     app.state.login_throttle = LoginThrottle()
-    for module in (platform, auth, employers, runs):
+    for module in (platform, auth, employers, runs, chat, tap, bedata):
         app.include_router(module.router)
     return app
