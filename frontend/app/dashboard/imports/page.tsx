@@ -542,6 +542,12 @@ export default function ImportsPage() {
                         {preview.error_count} row{preview.error_count === 1 ? " has" : "s have"} errors. The server may reject this commit — go back to Validation to see exactly which rows fail, or fix the file and re-import.
                       </p>
                     )}
+                    {(preview.needs_contractor_count ?? 0) > 0 && (
+                      <p role="alert" className="flex gap-2 rounded-2xl border-2 border-coral-600/60 bg-coral-500/10 px-4 py-3 text-sm font-bold text-coral-300">
+                        <TriangleAlert className="size-5 shrink-0" />
+                        {preview.needs_contractor_count} valid row{preview.needs_contractor_count === 1 ? " matches" : "s match"} no contractor of this employer. Add the contractor first; commit is refused until every valid row maps to an existing contractor.
+                      </p>
+                    )}
                     {preview.duplicate_count > 0 && (
                       <p className="flex gap-2 rounded-2xl border-2 border-sand-400/50 bg-sand-300/10 px-4 py-3 text-sm font-bold text-sand-200">
                         <Copy className="size-5 shrink-0" />
