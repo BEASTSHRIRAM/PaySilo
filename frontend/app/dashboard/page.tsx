@@ -294,7 +294,7 @@ export default function DashboardPage() {
     <div className="min-h-dvh pb-16">
       {session ? <AppBar session={session} /> : <div className="h-[76px]" />}
 
-      <main className="mx-auto mt-8 grid max-w-6xl gap-8 px-4 sm:px-6">
+      <main className="mx-auto mt-8 grid max-w-6xl grid-cols-[minmax(0,1fr)] gap-8 px-4 sm:px-6">
         {loading && (
           <div className="flex items-center justify-center gap-3 py-24 font-bold text-sage-400">
             <Loader2 className="size-5 animate-spin" /> Loading your silos…
