@@ -177,6 +177,25 @@ class PlatformRuntime:
                     logger.warning("Visa TAP: tap_keys row %s has an unusable public key; skipped.",
                                    row.key_id)
             self._hydrate(s)
+            self._seed_chain(s)
+
+    def _seed_chain(self, s: Session) -> None:
+        """Continue the settlement hash chain across restarts.
+
+        An in-process chain starts at genesis; seeding it with the last
+        persisted receipt keeps ``prev_hash`` / ``index`` continuous. Skipped
+        when the chain has no ``seed(prev_hash, index)`` or nothing is persisted.
+        """
+        seed = getattr(self.chain, "seed", None)
+        if not callable(seed):
+            return
+        chain_name = "mock" if isinstance(self.chain, MockSettlementChain) else "metal-l2"
+        last = s.scalar(select(SettlementReceipt).where(SettlementReceipt.chain == chain_name)
+                        .order_by(SettlementReceipt.chain_index.desc(), SettlementReceipt.created_at.desc())
+                        .limit(1))
+        if last is not None:
+            seed(prev_hash=last.receipt_hash, index=last.chain_index)
+            logger.info("Settlement chain %s seeded from receipt #%d", chain_name, last.chain_index)
 
     # ------------------------------------------------------------- Visa TAP
     @staticmethod

@@ -236,3 +236,38 @@ def test_second_run_for_same_employer_is_rejected_while_first_is_open(demo_clien
     # once the first is decided, a new run may start
     assert demo_client.post(f"/runs/{first.json()['id']}/decision", json={"decision": "hold"}).status_code == 200
     assert demo_client.post("/runs", json=body).status_code == 201
+
+
+# --------------------------------------------------------------------- 7. settlement chain continuity
+def test_runtime_seeds_the_settlement_chain_from_the_last_persisted_receipt(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from app.api import create_app
+    from app.config import Settings
+    from app.db import Database
+    from app.db.models import SettlementReceipt
+    from app.partners.metal import MockSettlementChain
+    from app.services.seed import DEMO_EMAIL, DEMO_PASSWORD
+
+    url = f"sqlite:///{(tmp_path / 'paysilo.db').as_posix()}"
+    settings = Settings(database_url=url, jwt_secret="chain-secret-" + "x" * 32)
+    with TestClient(create_app(settings, Database.from_url(url))) as c:
+        c.post("/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})
+        emp = {e["name"]: e for e in c.get("/employers").json()}["Acme Manufacturing GmbH"]
+        detail = c.get(f"/employers/{emp['id']}").json()
+        run = c.post("/runs", json={"employer_id": emp["id"],
+                                    "lines": [{"contractor_id": x["id"]} for x in detail["contractors"]]}).json()
+        assert c.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()["status"] == "SETTLED"
+
+    db = Database.from_url(url)
+    with db.sessionmaker() as s:
+        last = s.scalars(select(SettlementReceipt).order_by(SettlementReceipt.chain_index.desc())).first()
+        expected = (last.receipt_hash, last.chain_index)
+
+    seeded: list[tuple] = []
+    monkeypatch.setattr(MockSettlementChain, "seed",
+                        lambda self, prev_hash, index: seeded.append((prev_hash, index)), raising=False)
+    with TestClient(create_app(settings, Database.from_url(url))):
+        pass
+    assert seeded == [expected]
