@@ -77,6 +77,26 @@ CREATE TABLE employers (
 );
 CREATE INDEX ix_employers_organization_id ON employers (organization_id);
 
+CREATE TABLE invitations (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	email VARCHAR(254) NOT NULL, 
+	role VARCHAR(16) NOT NULL, 
+	token_hash VARCHAR(64) NOT NULL, 
+	invited_by_id UUID, 
+	status VARCHAR(16) NOT NULL, 
+	expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	accepted_at TIMESTAMP WITH TIME ZONE, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_invitation_role CHECK (role IN ('admin', 'approver', 'viewer')), 
+	CONSTRAINT ck_invitation_status CHECK (status IN ('PENDING', 'ACCEPTED', 'REVOKED')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	UNIQUE (token_hash), 
+	FOREIGN KEY(invited_by_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_invitations_organization_id ON invitations (organization_id);
+
 CREATE TABLE memberships (
 	id UUID NOT NULL, 
 	organization_id UUID NOT NULL, 
@@ -393,6 +413,7 @@ ALTER TABLE "tap_keys" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_threads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "employers" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "invitations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "memberships" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_messages" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_security_events" ENABLE ROW LEVEL SECURITY;

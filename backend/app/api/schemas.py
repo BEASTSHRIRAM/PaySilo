@@ -75,6 +75,32 @@ class LoginIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class ProfileIn(BaseModel):
+    full_name: str = Field(min_length=2, max_length=120)
+
+    @field_validator("full_name")
+    @classmethod
+    def _trim_name(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise ValueError("must contain at least 2 characters")
+        return value
+
+
+class PasswordIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=72)
+
+    @field_validator("new_password")
+    @classmethod
+    def _strong_enough(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("must be at most 72 bytes")
+        if not (re.search(r"[A-Za-z]", value) and re.search(r"\d", value)):
+            raise ValueError("must contain at least one letter and one number")
+        return value
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

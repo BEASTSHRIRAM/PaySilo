@@ -23,7 +23,7 @@ from ...security import (
 )
 from ...services.seed import DEMO_EMAIL, DEMO_ORG_NAME, DEMO_PASSWORD
 from ..deps import Tenant, current_tenant, get_db, get_settings
-from ..schemas import DemoCredentialsOut, LoginIn, OrganizationOut, SessionOut, SignupIn, UserOut
+from ..schemas import DemoCredentialsOut, LoginIn, OrganizationOut, PasswordIn, ProfileIn, SessionOut, SignupIn, UserOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -115,6 +115,23 @@ def logout(response: Response, settings: Settings = Depends(get_settings)) -> Re
 @router.get("/me", response_model=SessionOut)
 def me(tenant: Tenant = Depends(current_tenant)) -> SessionOut:
     return _session_out(tenant.user, tenant.organization, tenant.role)
+
+
+@router.patch("/me", response_model=SessionOut)
+def update_me(body: ProfileIn, tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> SessionOut:
+    tenant.user.full_name = body.full_name.strip()
+    db.commit()
+    db.refresh(tenant.user)
+    return _session_out(tenant.user, tenant.organization, tenant.role)
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(body: PasswordIn, tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
+    if not verify_password(body.current_password, tenant.user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
+    tenant.user.password_hash = hash_password(body.new_password)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/demo-credentials", response_model=DemoCredentialsOut)

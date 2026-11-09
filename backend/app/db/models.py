@@ -67,6 +67,7 @@ RUN_STATUSES = ("RECEIVED", "PRICED", "RESERVED", "APPROVED", "SENT", "SETTLED",
 PAY_LINE_STATUSES = ("PENDING", "PAID", "HELD", "FAILED")
 APPROVAL_KINDS = ("approval", "escalation")
 DECISIONS = ("approve", "hold")
+INVITATION_STATUSES = ("PENDING", "ACCEPTED", "REVOKED")
 
 
 class Base(DeclarativeBase):
@@ -129,6 +130,24 @@ class Membership(TimestampMixin, Base):
 
     organization: Mapped[Organization] = relationship(back_populates="memberships")
     user: Mapped[User] = relationship(back_populates="memberships")
+
+
+class Invitation(TimestampMixin, Base):
+    __tablename__ = "invitations"
+    __table_args__ = (
+        CheckConstraint(_in("role", ("admin", "approver", "viewer")), name="ck_invitation_role"),
+        CheckConstraint(_in("status", INVITATION_STATUSES), name="ck_invitation_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    invited_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # ---------------------------------------------------------------------------
