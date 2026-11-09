@@ -26,7 +26,7 @@ from .postgres import install_postgres_guards
 def normalise_url(url: str | None) -> str:
     if not url:
         return f"sqlite:///{(BACKEND_DIR / 'paysilo.db').as_posix()}"
-    for prefix in ("postgres://", "postgresql://"):
+    for prefix in ("postgresql+psycopg2://", "postgres://", "postgresql://"):
         if url.startswith(prefix):
             return "postgresql+psycopg://" + url[len(prefix):]
     return url

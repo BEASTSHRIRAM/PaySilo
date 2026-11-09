@@ -32,17 +32,51 @@ from langgraph.checkpoint.memory import MemorySaver
 logger = logging.getLogger(__name__)
 
 
+_POSTGRES_PREFIXES = ("postgresql+psycopg2://", "postgresql+psycopg://", "postgres://", "postgresql://")
+
+# Tables created by PostgresSaver.setup() in ``public``. They hold full graph
+# state, i.e. pay lines with IBANs, so Supabase's REST roles must not read them.
+CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations")
+
+
 def _postgres_dsn(database_url: str) -> str:
     """Convert a SQLAlchemy-style Postgres URL to a plain psycopg DSN."""
-    url = database_url
-    for prefix in ("postgresql+psycopg://", "postgres://", "postgresql://"):
-        if url.startswith(prefix):
-            return "postgresql://" + url[len(prefix):]
-    return url
+    for prefix in _POSTGRES_PREFIXES:
+        if database_url.startswith(prefix):
+            return "postgresql://" + database_url[len(prefix):]
+    return database_url
 
 
 def is_postgres_url(database_url: str | None) -> bool:
-    return bool(database_url) and database_url.startswith(("postgres://", "postgresql://", "postgresql+psycopg://"))
+    return bool(database_url) and database_url.startswith(_POSTGRES_PREFIXES)
+
+
+def checkpoint_rls_sql() -> list[str]:
+    """Idempotent RLS statements for the checkpoint tables (no policies = deny anon/authenticated)."""
+    return [f'ALTER TABLE IF EXISTS public."{t}" ENABLE ROW LEVEL SECURITY' for t in CHECKPOINT_TABLES]
+
+
+def enable_checkpoint_rls(conn) -> None:
+    for statement in checkpoint_rls_sql():
+        conn.execute(statement)
+
+
+def _make_pool(dsn: str):
+    """A health-checked psycopg pool: dead connections (Supabase idle timeouts,
+    pooler restarts) are replaced instead of failing every later run.
+
+    autocommit + dict rows are what PostgresSaver requires; prepare_threshold
+    None keeps psycopg off server-side prepared statements, which Supabase's
+    PgBouncer transaction pooler rejects.
+    """
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    return ConnectionPool(
+        conninfo=dsn, min_size=1, max_size=5, open=True,
+        kwargs={"autocommit": True, "prepare_threshold": None, "row_factory": dict_row},
+        check=ConnectionPool.check_connection,
+    )
 
 
 def build_checkpointer(*, database_url: str | None = None, checkpoint_path: str | None = None):
@@ -60,16 +94,14 @@ def build_checkpointer(*, database_url: str | None = None, checkpoint_path: str 
         return saver
 
     if is_postgres_url(database_url):
-        import psycopg
         from langgraph.checkpoint.postgres import PostgresSaver
 
-        # autocommit + prepare_threshold=0: the checkpointer manages its own
-        # transactions, and Supabase's PgBouncer pooler rejects server-side
-        # prepared statements. The connection is held for the process life.
-        conn = psycopg.connect(_postgres_dsn(database_url), autocommit=True, prepare_threshold=0)
-        saver = PostgresSaver(conn)
+        pool = _make_pool(_postgres_dsn(database_url))
+        saver = PostgresSaver(pool)
         saver.setup()
-        logger.info("LangGraph checkpointer: PostgresSaver on DATABASE_URL (durable)")
+        with pool.connection() as conn:
+            enable_checkpoint_rls(conn)
+        logger.info("LangGraph checkpointer: PostgresSaver on DATABASE_URL (pooled, RLS enabled, durable)")
         return saver
 
     logger.warning("LangGraph checkpointer: MemorySaver — paused runs will NOT survive a restart. "
