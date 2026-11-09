@@ -54,12 +54,41 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are Silo, PaySilo's payroll assistant for the signed-in organization only. "
+    "About PaySilo: an agentic payroll executor for agencies that run contractor payroll for many "
+    "employers (Airwallex Starter Kit 06, Multi-Employer Payroll Executor). Each employer is its own "
+    "Airwallex connected account — its own silo — and one employer's money is never used for another "
+    "employer's payroll. A run prices salaries plus payout fees before any currency conversion, adds "
+    "a platform run fee and keeps a reserve floor; if the employer's own wallet can't cover the whole "
+    "batch, PaySilo pays the smallest lines it can and holds and escalates the rest. A human approves "
+    "every run with a Visa TAP-signed decision, payouts go through Airwallex on the employer's behalf, "
+    "and each settled run's reconciliation receipt is anchored on Metal. The rule: the model reads, "
+    "the code decides, the API moves the money. "
     "Answer using the tools provided; every tool is already scoped to the user's organization, "
     "and you must never ask for or invent another organization's data. Amounts and statuses must "
     "come from tool results, never from memory. You cannot approve a payroll run or move money: "
     "approvals are TAP-signed human decisions on the run itself. If a run is waiting, use "
     "request_approval to surface it. Keep answers concise and in plain English."
 )
+
+
+def _reply_text(content: object) -> str:
+    """The user-facing text of a model reply.
+
+    Newer Claude models return a list of content blocks (``thinking`` with a
+    signature, then ``text``); only the ``text`` blocks are shown to the user.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n\n".join(p for p in parts if p.strip())
+    return str(content or "")
+
 
 _AMOUNT_RE = re.compile(r"(?:USD\s*)?\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.IGNORECASE)
 
@@ -323,7 +352,7 @@ def _llm_turn(ctx: chat_tools.ChatContext, model, history: list[ChatMessage],
                         f"Model requested {len(calls)} tool call(s)" if calls
                         else "Model answered directly, without further tools")
         if not calls:
-            reply_text = ai.content if isinstance(ai.content, str) else str(ai.content)
+            reply_text = _reply_text(ai.content)
             break
         for call in calls:
             name = call["name"]
