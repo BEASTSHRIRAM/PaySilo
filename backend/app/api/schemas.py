@@ -378,3 +378,118 @@ class OverviewOut(BaseModel):
     runs_settled: int
     runs_waiting: int
     mode: str
+
+
+# ---------------------------------------------------------------- benefits (Visa VIC)
+class VicStatusOut(BaseModel):
+    mode: str
+    credential_ref: str
+    test_card: bool
+    tx_limit_usd: str | None
+    cli_available: bool
+
+
+class BenefitBudgetOut(BaseModel):
+    id: uuid.UUID
+    employer_id: uuid.UUID
+    employer_name: str
+    currency: str
+    monthly_cap: str
+    per_tx_limit: str | None
+    spent_this_period: str
+    remaining: str
+    period: str
+    enabled: bool
+    locked: bool
+    lock_reason: str | None
+
+
+class BenefitBudgetIn(BaseModel):
+    currency: str = CurrencyCode
+    monthly_cap: str
+    per_tx_limit: str | None = None
+    enabled: bool
+
+    @field_validator("currency")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        return v.upper()
+
+    @field_validator("monthly_cap")
+    @classmethod
+    def _cap(cls, v: str) -> str:
+        return _money(v)
+
+    @field_validator("per_tx_limit")
+    @classmethod
+    def _limit(cls, v: str | None) -> str | None:
+        return _money(v) if v not in (None, "") else None
+
+
+class BenefitRequestIn(BaseModel):
+    employer_id: uuid.UUID
+    contractor_id: uuid.UUID | None = None
+    contractor_name: str | None = Field(default=None, max_length=120)
+    merchant: str = Field(min_length=1, max_length=200)
+    item: str = Field(min_length=1, max_length=300)
+    amount: str
+    currency: str = CurrencyCode
+
+    @field_validator("currency")
+    @classmethod
+    def _upper(cls, v: str) -> str:
+        return v.upper()
+
+    @field_validator("merchant", "item", "contractor_name")
+    @classmethod
+    def _strip(cls, v: str | None) -> str | None:
+        v = v.strip() if isinstance(v, str) else v
+        return v or None
+
+    @field_validator("amount")
+    @classmethod
+    def _amount(cls, v: str) -> str:
+        return _money(v)
+
+
+class BenefitPurchaseOut(BaseModel):
+    id: uuid.UUID
+    request_id: uuid.UUID
+    employer_id: uuid.UUID
+    attempt_no: int
+    mode: str
+    credential_ref: str
+    provider_ref: str | None
+    status: str
+    failure_code: str | None
+    failure_detail: str | None
+    amount: str
+    currency: str
+    journal_txn_id: int | None
+    created_at: datetime
+
+
+class BenefitRequestOut(BaseModel):
+    id: uuid.UUID
+    employer_id: uuid.UUID
+    employer_name: str
+    contractor_id: str | None
+    contractor_name: str
+    merchant: str
+    item: str
+    amount: str
+    currency: str
+    status: str
+    requested_by_email: str
+    decided_by_email: str | None
+    decided_at: str | None
+    deny_reason: str | None
+    approval_expires_at: str | None
+    approval_hash: str | None
+    created_at: datetime
+    latest_purchase: BenefitPurchaseOut | None
+
+
+class BenefitDecisionIn(BaseModel):
+    decision: Literal["approve", "deny"]
+    reason: str | None = Field(default=None, max_length=2000)

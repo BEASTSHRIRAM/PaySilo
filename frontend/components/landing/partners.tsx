@@ -2,7 +2,7 @@ import { LottieAnimation } from "@/components/brand/lottie";
 
 const PARTNERS = [
   { name: "Airwallex", job: "Connected accounts, FX, payouts, charges" },
-  { name: "Visa TAP", job: "Signed approvals & payout instructions" },
+  { name: "Visa VIC", job: "Agent-purchased employer benefits via Airi" },
   { name: "Metal", job: "Reconciliation receipts anchored" },
   { name: "Claude", job: "The Intake Agent's reader" },
   { name: "AWS Bedrock AgentCore", job: "Agent runtime" },

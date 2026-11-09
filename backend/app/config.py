@@ -97,6 +97,14 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
+    # Visa VIC via Airi CLI (Silo Benefits). Until VIC_CREDENTIAL is set,
+    # benefits run in honest SIMULATED mode with the test card. When a
+    # credential IS set, the Airi CLI must also be available — the live
+    # adapter fails closed and never falls back to simulation.
+    vic_credential: str | None = None
+    airi_cli_path: str | None = None
+    vic_test_card: bool = True
+
     @property
     def demo_mode(self) -> bool:
         """Demo mode = explicitly requested, or no Airwallex keys present."""

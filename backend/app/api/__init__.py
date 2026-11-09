@@ -19,7 +19,7 @@ from ..db import Database
 from ..security import LoginThrottle
 from ..services.runtime import PlatformRuntime
 from ..services.seed import seed_demo
-from .routes import auth, bedata, chat, employers, platform, runs, tap, team
+from .routes import auth, bedata, benefits, chat, employers, platform, runs, tap, team
 
 logger = logging.getLogger("paysilo")
 
@@ -47,11 +47,12 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                   description="Multi-Employer Payroll Executor — the model reads, the code decides, "
                               "the API moves the money.")
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
-                       allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Content-Type", "Authorization"])
+                       allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                       allow_headers=["Content-Type", "Authorization"])
     app.state.settings = settings
     app.state.db = db
     app.state.runtime = runtime
     app.state.login_throttle = LoginThrottle()
-    for module in (platform, auth, employers, runs, chat, tap, bedata, team):
+    for module in (platform, auth, employers, runs, chat, tap, bedata, team, benefits):
         app.include_router(module.router)
     return app

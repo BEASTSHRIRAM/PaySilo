@@ -58,6 +58,7 @@ from ..db.models import (
 from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
 from ..partners.metal import MetalL2SettlementChain, MockSettlementChain
+from ..partners.vic import build_vic_adapter
 from ..partners.tap import load_public_key_pem, public_key_raw
 from ..partners.tap_signing import (
     TapSigner,
@@ -141,6 +142,18 @@ class PlatformRuntime:
                         settings.metal_registry_address)
         else:
             self.chain = MockSettlementChain()
+        self.vic = build_vic_adapter(settings)
+        if settings.vic_credential:
+            if self.vic.cli_available:
+                logger.info("Visa VIC: live Airi adapter configured (credential %s, test_card=%s).",
+                            self.vic.credential_ref, self.vic.test_card)
+            else:
+                logger.warning(
+                    "Visa VIC: VIC_CREDENTIAL is set but the Airi CLI is not available "
+                    "(set AIRI_CLI_PATH) — benefit purchases will fail closed, never simulate.")
+        else:
+            logger.info("Visa VIC: no VIC_CREDENTIAL set — benefits run in SIMULATED mode (%s).",
+                        self.vic.credential_ref)
         self.services = Services(airwallex=self.recorder, ledger=self.ledger, chain=self.chain,
                                  usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer)
         self.checkpointer = build_checkpointer(database_url=settings.database_url,
@@ -363,6 +376,27 @@ class PlatformRuntime:
             .group_by(LedgerEntry.currency)
         ).all()
         return {ccy: money_str(total) for ccy, total in rows if total and Decimal(total) != 0}
+
+    def post_employer_journal(self, s: Session, employer: Employer,
+                              entries: list[tuple[str, object]], memo: str) -> LedgerTransaction:
+        """Post one balanced journal for ONE employer and persist it directly.
+
+        Unlike :meth:`_flush_ledger` (which infers ``run_id`` from memo
+        UUIDs for graph-driven postings), this writes the DB row itself,
+        with ``run_id=None`` — for non-run postings such as benefit
+        purchases, whose accounts (``benefits_*``) never touch ``cash:``.
+        """
+        with self.lock:
+            txn = self.ledger.post(entries, memo=memo)
+            row = LedgerTransaction(
+                organization_id=employer.organization_id, employer_id=employer.id, run_id=None,
+                memo=memo[:200],
+                entries=[LedgerEntry(account=e.account, namespace=_namespace(e.account),
+                                     currency=_currency(e.account), amount=e.amount) for e in txn.entries])
+            s.add(row)
+            s.flush()
+            self._ledger_synced = len(self.ledger.transactions)
+            return row
 
     def platform_fees(self, s: Session, organization_id: uuid.UUID) -> dict[str, str]:
         rows = s.execute(

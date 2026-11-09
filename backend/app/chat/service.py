@@ -67,7 +67,10 @@ SYSTEM_PROMPT = (
     "and you must never ask for or invent another organization's data. Amounts and statuses must "
     "come from tool results, never from memory. You cannot approve a payroll run or move money: "
     "approvals are TAP-signed human decisions on the run itself. If a run is waiting, use "
-    "request_approval to surface it. Keep answers concise and in plain English."
+    "request_approval to surface it. For Silo Benefits, read_benefits is read-only and "
+    "propose_benefit_purchase only creates a REQUESTED benefit request for a human approver "
+    "in the Benefits screen: you cannot approve or purchase benefits, and must never imply "
+    "that you did. Keep answers concise and in plain English."
 )
 
 
@@ -96,7 +99,10 @@ _HELP_INTRO = (
     "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
     "(including exactly why a payroll is held), show a run's timeline, start a run — which "
     "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
-    "own wallet. I cannot approve a run or move money between employers. "
+    "own wallet. I can also read Silo Benefits budgets and recent benefit requests, and "
+    "propose a benefit purchase — which only creates a request that a human must approve "
+    "in the Benefits screen. I cannot approve a run, approve or buy a benefit, or move "
+    "money between employers. "
 )
 
 
@@ -250,7 +256,8 @@ def build_llm_tools(ctx: chat_tools.ChatContext) -> tuple[list, dict]:
         wrappers[name] = call
         lc_tools.append(StructuredTool.from_function(
             func=call, name=name, args_schema=_args_schema(name, fn),
-            description=f"{chat_tools.TOOL_LABELS[name]}. Scoped to the signed-in organization."))
+            description=chat_tools.TOOL_DESCRIPTIONS.get(
+                name, f"{chat_tools.TOOL_LABELS[name]}. Scoped to the signed-in organization.")))
     return lc_tools, wrappers
 
 
@@ -263,6 +270,80 @@ def _employer_ref_in(ctx: chat_tools.ChatContext, message: str) -> str | None:
         if e.name.casefold() in message.casefold() or e.name.split()[0].casefold() in message.casefold():
             return e.name
     return None
+
+
+_BENEFIT_CCY_RE = re.compile(r"\b(USD|EUR|GBP|INR|AUD|CAD)\b", re.IGNORECASE)
+_BENEFIT_MERCHANT_RE = re.compile(r"\b(?:on|from|via)\s+(.+?)\s*[.!?]?\s*$", re.IGNORECASE)
+_BENEFIT_AMOUNT_STRIP_RE = re.compile(
+    r"(?:USD|EUR|GBP|INR|US\$|\$|€|£)?\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?\s*(?:USD|EUR|GBP|INR)?",
+    re.IGNORECASE)
+_BENEFIT_WORKER_COLON_RE = re.compile(
+    r"\bfor\s+([A-Z][\wÀ-ÿ'’\-]+(?:\s+[A-Z][\wÀ-ÿ'’\-]+){0,3})\s*(?=[:,])")
+
+
+def _contractor_ref_in(ctx: chat_tools.ChatContext,
+                       message: str) -> tuple[str | None, str | None]:
+    """Match a worker's full name in the message against org data.
+
+    Returns ``(employer_name, contractor_name)``; the employer is only set
+    when the worker belongs to exactly one employer in the organization.
+    """
+    matches: list[tuple[str, str]] = []
+    for e in chat_tools.employers(ctx):
+        for c in e.contractors:
+            if c.is_active and c.full_name.casefold() in message.casefold():
+                matches.append((e.name, c.full_name))
+    if not matches:
+        return None, None
+    if len({name for _emp, name in matches}) == 1 and len({emp for emp, _n in matches}) == 1:
+        return matches[0]
+    return None, matches[0][1]
+
+
+def _benefit_request_args(ctx: chat_tools.ChatContext, message: str,
+                          employer_ref: str | None) -> dict:
+    """Pragmatically extract a benefit-request proposal from a message.
+
+    Mirrors how the fallback parses run instructions: names are matched
+    against org data, the amount/currency come from regexes, and the
+    merchant is the phrase after "on"/"from". Anything missing stays
+    ``None`` — the tool then asks a clarifying question instead of the
+    fallback inventing values.
+    """
+    matched_employer, contractor_name = _contractor_ref_in(ctx, message)
+    if contractor_name is None:
+        m = _BENEFIT_WORKER_COLON_RE.search(message)
+        contractor_name = m.group(1).strip() if m else None
+    employer = employer_ref or matched_employer
+
+    amount_match = _AMOUNT_RE.search(message)
+    amount = amount_match.group(1).replace(",", "") if amount_match else None
+    ccy_match = _BENEFIT_CCY_RE.search(message)
+    currency = ccy_match.group(1).upper() if ccy_match else ("USD" if "$" in message else None)
+
+    # The item lives after the colon ("... for Lena Fischer: a 149 USD
+    # Python course on Coursera") or, without one, in the whole message
+    # with the routing words and the worker's name removed.
+    segment = message.split(":", 1)[1] if ":" in message else message
+    merchant = None
+    merchant_match = _BENEFIT_MERCHANT_RE.search(segment)
+    if merchant_match:
+        merchant = merchant_match.group(1).strip(" .!?")
+        segment = segment[:merchant_match.start()]
+    item_text = _BENEFIT_AMOUNT_STRIP_RE.sub("", segment, count=1)
+    if contractor_name:
+        item_text = re.sub(re.escape(contractor_name), "", item_text, flags=re.IGNORECASE)
+    if ":" not in message:
+        item_text = re.sub(
+            r"\b(please|request|buy|order|get|book|purchase|benefit|benefits|for|a|an|the)\b",
+            "", item_text, flags=re.IGNORECASE)
+    item_text = " ".join(item_text.split()).strip(" ,.!?")
+    # Drop a leading article left behind by removing the amount ("a Python course").
+    while item_text.casefold().startswith(("a ", "an ", "the ")):
+        item_text = item_text.split(" ", 1)[1]
+    item = item_text or None
+    return {"employer": employer, "contractor": contractor_name, "merchant": merchant,
+            "item": item, "amount": amount, "currency": currency}
 
 
 def fallback_plan(ctx: chat_tools.ChatContext, message: str,
@@ -279,6 +360,18 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
     employer_ref = _employer_ref_in(ctx, message) or context.get("employer_name")
     run_ref = context.get("run_id")
 
+    if "benefit" in text:
+        _emp_match, worker_match = _contractor_ref_in(ctx, message)
+        is_proposal = (
+            any(w in text for w in ("request a benefit", "request benefit", "buy", "purchase", "order"))
+            or (worker_match is not None and _AMOUNT_RE.search(message) is not None)
+            or ("benefit" in text and " for " in text and ":" in message))
+        if is_proposal:
+            return ([("propose_benefit_purchase", _benefit_request_args(ctx, message, employer_ref))],
+                    "Matched the propose-a-benefit intent (creates a REQUESTED request only — "
+                    "a human approver decides in the Benefits screen; chat cannot approve or buy)", None)
+        return ([("read_benefits", {"employer": employer_ref})],
+                "Matched the Silo Benefits read intent (budgets, payroll lock and recent requests)", None)
     if any(w in text for w in ("timeline", "what happened", "history of", "events")):
         return ([("get_run_timeline", {"run_id": run_ref, "employer": employer_ref})],
                 "Matched the run-timeline intent", None)

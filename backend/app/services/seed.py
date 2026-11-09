@@ -13,8 +13,9 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import Contractor, Employer, Membership, Organization, User
+from ..db.models import BenefitBudget, BenefitRequest, Contractor, Employer, Membership, Organization, User
 from ..security import hash_password
+from .benefits import BenefitError, create_request, current_period, decide_request, execute_purchase
 from .runtime import PlatformRuntime
 
 logger = logging.getLogger(__name__)
@@ -99,5 +100,77 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
         if spec["funding_usd"] > 0:
             runtime.fund(s, emp, spec["funding_usd"], reference="seed")
         logger.info("Seeded demo employer %s", emp.name)
+
+    _seed_benefits(s, runtime, org, user)
     s.commit()
     return org
+
+
+# Demo benefits (Silo Benefits / Visa VIC): budgets + three requests, one
+# of them already purchased in SIMULATED mode. Idempotent even when the
+# employers already exist — budgets key on (employer, currency) and
+# requests on (org, employer, merchant, item).
+_BENEFIT_BUDGETS: list[tuple[str, Decimal, bool]] = [
+    ("Acme Manufacturing GmbH", Decimal("500.00"), True),
+    ("Borealis Labs AB", Decimal("500.00"), True),
+    ("Cobalt Retail LLC", Decimal("250.00"), False),
+]
+
+_BENEFIT_REQUESTS: list[dict] = [
+    {"employer": "Acme Manufacturing GmbH", "contractor": "Lena Fischer", "merchant": "Coursera",
+     "item": "Advanced Python for Data Engineering (specialization)", "amount": Decimal("149.00"),
+     "purchase": False},
+    {"employer": "Acme Manufacturing GmbH", "contractor": "Tomas Rivera", "merchant": "O'Reilly Media",
+     "item": "Platform Engineering book bundle", "amount": Decimal("59.00"), "purchase": True},
+    {"employer": "Borealis Labs AB", "contractor": "Ingrid Solberg", "merchant": "LinkedIn Learning",
+     "item": "Payroll compliance fundamentals (course)", "amount": Decimal("120.00"), "purchase": False},
+]
+
+
+def _seed_benefits(s: Session, runtime: PlatformRuntime, org: Organization, user: User) -> None:
+    employers: dict[str, Employer] = {}
+    for name, cap, enabled in _BENEFIT_BUDGETS:
+        emp = s.scalar(select(Employer).where(Employer.organization_id == org.id, Employer.name == name))
+        if emp is None:
+            continue
+        employers[name] = emp
+        budget = s.scalar(select(BenefitBudget).where(BenefitBudget.employer_id == emp.id,
+                                                      BenefitBudget.currency == "USD"))
+        if budget is None:
+            s.add(BenefitBudget(organization_id=org.id, employer_id=emp.id, currency="USD",
+                                monthly_cap=cap, per_tx_limit=None, spent_this_period=Decimal("0.00"),
+                                period=current_period(), enabled=enabled))
+            s.flush()
+
+    for spec in _BENEFIT_REQUESTS:
+        emp = employers.get(spec["employer"]) or s.scalar(
+            select(Employer).where(Employer.organization_id == org.id, Employer.name == spec["employer"]))
+        if emp is None:
+            continue
+        existing = s.scalar(select(BenefitRequest).where(
+            BenefitRequest.organization_id == org.id, BenefitRequest.employer_id == emp.id,
+            BenefitRequest.merchant == spec["merchant"], BenefitRequest.item == spec["item"]))
+        if existing is not None and (not spec["purchase"] or existing.status == "PURCHASED"):
+            continue
+        contractor = s.scalar(select(Contractor).where(Contractor.employer_id == emp.id,
+                                                       Contractor.full_name == spec["contractor"]))
+        req = existing
+        if req is None:
+            req = create_request(
+                s, organization_id=org.id, employer=emp, contractor=contractor,
+                contractor_name=spec["contractor"], merchant=spec["merchant"], item=spec["item"],
+                amount=spec["amount"], currency="USD",
+                requested_by_id=user.id, requested_by_email=user.email)
+        if spec["purchase"]:
+            # Driven through the service like a real purchase. A refusal
+            # (e.g. VIC configured but its CLI missing) is logged, never
+            # fatal: the request stays behind, honestly APPROVED.
+            try:
+                if req.status == "REQUESTED":
+                    decide_request(s, request=req, decision="approve", user=user)
+                if req.status in ("APPROVED", "FAILED"):
+                    execute_purchase(s, runtime, request=req, user=user)
+            except BenefitError as exc:
+                logger.warning("Seeded benefit purchase %s / %s was not completed: %s",
+                               spec["merchant"], spec["item"], exc)
+    s.flush()

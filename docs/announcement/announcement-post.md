@@ -26,7 +26,7 @@ only), routing, and idempotent execution. Our rule: **the model reads,
 the code decides, the API moves the money.**
 
 And the API moves money only on a human decision. Every run pauses at
-a LangGraph interrupt; resuming requires a Visa TAP-signed approval
+a LangGraph interrupt; resuming requires a signed human approval
 over the exact run, amounts and beneficiaries. The chat assistant,
 Silo, can start a run and explain it — it has no approve tool and no
 transfer tool, by design. When a run settles, the ledger reconciles
@@ -50,8 +50,7 @@ until the live chain is configured. We would rather label that clearly
 than hide it.
 
 Partner tools, each with one concrete job: **Airwallex** (connected
-accounts, FX and payouts), **Visa TAP** (signed approvals and payout
-instructions), **Metal** (receipt anchoring), **Claude** (intake
+accounts, FX and payouts), **Visa VIC** (agent-purchased employer benefits via Airi), TAP-style signed approvals, **Metal** (receipt anchoring), **Claude** (intake
 reading), and **AWS Bedrock AgentCore** (agent deployment runtime).
 
 — Team STATIC

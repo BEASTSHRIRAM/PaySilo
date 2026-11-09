@@ -541,3 +541,119 @@ class SourceImportRow(Base):
     business_key: Mapped[str | None] = mapped_column(String(500))
 
     source_import: Mapped[SourceImport] = relationship(back_populates="rows")
+
+
+# ---------------------------------------------------------------------------
+# Silo Benefits — employer-funded benefits via Visa VIC (guide §6.5,
+# invariant 13). Appended at the END of this module (additive only).
+# Benefits have their own budget, separate from wage funds and reserves:
+# a benefit purchase can never touch an employer's cash accounts.
+# ---------------------------------------------------------------------------
+
+BENEFIT_REQUEST_STATUSES = ("REQUESTED", "APPROVED", "DENIED", "PURCHASED", "FAILED")
+BENEFIT_PURCHASE_STATUSES = ("SUCCEEDED", "FAILED")
+VIC_MODES = ("SIMULATED", "VIC")
+
+
+class BenefitBudget(TimestampMixin, Base):
+    """One employer's benefit budget in one currency.
+
+    Separate from payroll: ``spent_this_period`` is tracked here and in
+    ``benefits_*`` ledger accounts only — never against ``cash:``.
+    """
+
+    __tablename__ = "benefit_budgets"
+    __table_args__ = (
+        UniqueConstraint("employer_id", "currency", name="uq_benefit_budget_employer_ccy"),
+        CheckConstraint("monthly_cap > 0", name="ck_benefit_budget_cap_positive"),
+        CheckConstraint("spent_this_period >= 0", name="ck_benefit_budget_spent_nonneg"),
+        CheckConstraint("per_tx_limit IS NULL OR per_tx_limit > 0", name="ck_benefit_budget_per_tx_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    monthly_cap: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    per_tx_limit: Mapped[Decimal | None] = mapped_column(Money)
+    spent_this_period: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    period: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class BenefitRequest(TimestampMixin, Base):
+    """One requested benefit purchase, bound to an exact approval snapshot.
+
+    The human approves the exact merchant / item / amount / currency.
+    ``approval_hash`` is the hash of that snapshot plus its expiry; any
+    change to the snapshot invalidates the approval (checked again at
+    purchase time in the benefits service).
+    """
+
+    __tablename__ = "benefit_requests"
+    __table_args__ = (
+        CheckConstraint(_in("status", BENEFIT_REQUEST_STATUSES), name="ck_benefit_request_status"),
+        CheckConstraint("amount > 0", name="ck_benefit_request_amount_positive"),
+        Index("ix_benefit_requests_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    contractor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contractors.id", ondelete="SET NULL"))
+    contractor_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    merchant: Mapped[str] = mapped_column(String(200), nullable=False)
+    item: Mapped[str] = mapped_column(String(300), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="REQUESTED")
+    requested_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    requested_by_email: Mapped[str] = mapped_column(String(254), nullable=False)
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_by_email: Mapped[str | None] = mapped_column(String(254))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deny_reason: Mapped[str | None] = mapped_column(Text)
+    approval_hash: Mapped[str | None] = mapped_column(String(64))
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+
+
+class BenefitPurchase(TimestampMixin, Base):
+    """One purchase attempt for an approved benefit request. Append-only.
+
+    These rows, together with ``decided_by`` / ``decided_at`` on the
+    request, are the benefits audit trail (AgentEvent is run-scoped and
+    cannot be used here). Only masked credential references are stored —
+    never a raw card number.
+    """
+
+    __tablename__ = "benefit_purchases"
+    __table_args__ = (
+        CheckConstraint(_in("status", BENEFIT_PURCHASE_STATUSES), name="ck_benefit_purchase_status"),
+        CheckConstraint(_in("mode", VIC_MODES), name="ck_benefit_purchase_mode"),
+        CheckConstraint("amount > 0", name="ck_benefit_purchase_amount_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("benefit_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)  # SIMULATED | VIC
+    credential_ref: Mapped[str] = mapped_column(String(80), nullable=False)  # masked ref only
+    provider_ref: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(10), nullable=False)  # SUCCEEDED | FAILED
+    failure_code: Mapped[str | None] = mapped_column(String(40))
+    failure_detail: Mapped[str | None] = mapped_column(Text)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    journal_txn_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_transactions.id", ondelete="SET NULL"))

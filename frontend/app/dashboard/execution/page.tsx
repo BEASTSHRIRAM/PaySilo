@@ -203,7 +203,7 @@ export default function ExecutionPage() {
 
     return [
       { label: "Funding confirmed", state: funding, detail: funding === "done" ? "The employer's silo covered this run before execution." : funding === "missing" ? "The run was held for a shortfall — funding is not confirmed." : "Waiting on the balance and policy check." },
-      { label: "TAP approval verified", state: tap, detail: tap === "done" ? "A human approval carries a verified TAP signature." : tap === "missing" ? "An approval exists but no verified TAP signature was reported." : "No approval has been recorded for this run yet." },
+      { label: "Signed approval verified", state: tap, detail: tap === "done" ? "A human approval carries a verified signature." : tap === "missing" ? "An approval exists but no verified signature was reported." : "No approval has been recorded for this run yet." },
       { label: "Provider reference present", state: provider, detail: providerRef ? `Airwallex reference ${providerRef}` : "No provider transfer reference reported for this payment yet." },
       { label: "Journal posted", state: journal, detail: journal === "done" ? `${journalIds.length} journal transaction${journalIds.length === 1 ? "" : "s"} linked to this run.` : journal === "unknown" ? "Needs the evidence bundle, which is not available for this run." : journal === "missing" ? "The run settled but no journal transaction is linked in the evidence bundle." : "The journal entry posts when the run settles." },
       { label: "Metal anchor", state: metal, detail: metalHash ? `Anchored on chain: ${metalHash.slice(0, 18)}…` : mode ? `No anchor hash reported yet (mode: ${mode}).` : "No anchor hash reported for this run yet." },
@@ -352,7 +352,7 @@ export default function ExecutionPage() {
                       </ul>
                       <p className="mt-3 flex items-start gap-2 text-xs font-semibold text-sage-500">
                         <Anchor className="mt-0.5 size-3.5 shrink-0" />
-                        Checklist sources: run assessment, TAP approvals, provider references, and the run's evidence bundle. Anything not reported shows as pending or no data — never as verified.
+                        Checklist sources: run assessment, signed approvals, provider references, and the run's evidence bundle. Anything not reported shows as pending or no data — never as verified.
                       </p>
                     </Card>
                   )}

@@ -1,4 +1,4 @@
--- PaySilo schema (generated from app/db/models.py — do not edit by hand).
+-- PaySilo schema (generated from app/db/models.py â€” do not edit by hand).
 -- Regenerate: uv run python -m app.db.export_schema > db/schema.sql
 
 CREATE TABLE organizations (
@@ -110,6 +110,28 @@ CREATE TABLE memberships (
 	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX ix_memberships_user_id ON memberships (user_id);
+
+CREATE TABLE benefit_budgets (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	currency VARCHAR(3) NOT NULL, 
+	monthly_cap NUMERIC(19, 2) NOT NULL, 
+	per_tx_limit NUMERIC(19, 2), 
+	spent_this_period NUMERIC(19, 2) NOT NULL, 
+	period VARCHAR(7) NOT NULL, 
+	enabled BOOLEAN NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_benefit_budget_employer_ccy UNIQUE (employer_id, currency), 
+	CONSTRAINT ck_benefit_budget_cap_positive CHECK (monthly_cap > 0), 
+	CONSTRAINT ck_benefit_budget_spent_nonneg CHECK (spent_this_period >= 0), 
+	CONSTRAINT ck_benefit_budget_per_tx_positive CHECK (per_tx_limit IS NULL OR per_tx_limit > 0), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_benefit_budgets_employer_id ON benefit_budgets (employer_id);
+CREATE INDEX ix_benefit_budgets_organization_id ON benefit_budgets (organization_id);
 
 CREATE TABLE chat_messages (
 	id BIGSERIAL NOT NULL, 
@@ -254,6 +276,40 @@ CREATE TABLE approvals (
 );
 CREATE INDEX ix_approvals_run_id ON approvals (run_id);
 
+CREATE TABLE benefit_requests (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	contractor_id UUID, 
+	contractor_name VARCHAR(120) NOT NULL, 
+	merchant VARCHAR(200) NOT NULL, 
+	item VARCHAR(300) NOT NULL, 
+	amount NUMERIC(19, 2) NOT NULL, 
+	currency VARCHAR(3) NOT NULL, 
+	status VARCHAR(12) NOT NULL, 
+	requested_by_id UUID, 
+	requested_by_email VARCHAR(254) NOT NULL, 
+	decided_by_id UUID, 
+	decided_by_email VARCHAR(254), 
+	decided_at TIMESTAMP WITH TIME ZONE, 
+	deny_reason TEXT, 
+	approval_hash VARCHAR(64), 
+	approval_expires_at TIMESTAMP WITH TIME ZONE, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_benefit_request_status CHECK (status IN ('REQUESTED', 'APPROVED', 'DENIED', 'PURCHASED', 'FAILED')), 
+	CONSTRAINT ck_benefit_request_amount_positive CHECK (amount > 0), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(contractor_id) REFERENCES contractors (id) ON DELETE SET NULL, 
+	FOREIGN KEY(requested_by_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(decided_by_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_benefit_requests_employer_id ON benefit_requests (employer_id);
+CREATE INDEX ix_benefit_requests_org_employer ON benefit_requests (organization_id, employer_id);
+CREATE INDEX ix_benefit_requests_organization_id ON benefit_requests (organization_id);
+
 CREATE TABLE ledger_transactions (
 	id BIGSERIAL NOT NULL, 
 	organization_id UUID NOT NULL, 
@@ -337,6 +393,37 @@ CREATE INDEX ix_source_imports_employer_id ON source_imports (employer_id);
 CREATE INDEX ix_source_imports_org_employer ON source_imports (organization_id, employer_id);
 CREATE INDEX ix_source_imports_organization_id ON source_imports (organization_id);
 
+CREATE TABLE benefit_purchases (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	request_id UUID NOT NULL, 
+	attempt_no INTEGER NOT NULL, 
+	idempotency_key VARCHAR(80) NOT NULL, 
+	mode VARCHAR(10) NOT NULL, 
+	credential_ref VARCHAR(80) NOT NULL, 
+	provider_ref VARCHAR(80), 
+	status VARCHAR(10) NOT NULL, 
+	failure_code VARCHAR(40), 
+	failure_detail TEXT, 
+	amount NUMERIC(19, 2) NOT NULL, 
+	currency VARCHAR(3) NOT NULL, 
+	journal_txn_id BIGINT, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_benefit_purchase_status CHECK (status IN ('SUCCEEDED', 'FAILED')), 
+	CONSTRAINT ck_benefit_purchase_mode CHECK (mode IN ('SIMULATED', 'VIC')), 
+	CONSTRAINT ck_benefit_purchase_amount_positive CHECK (amount > 0), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(request_id) REFERENCES benefit_requests (id) ON DELETE CASCADE, 
+	UNIQUE (idempotency_key), 
+	FOREIGN KEY(journal_txn_id) REFERENCES ledger_transactions (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_benefit_purchases_employer_id ON benefit_purchases (employer_id);
+CREATE INDEX ix_benefit_purchases_organization_id ON benefit_purchases (organization_id);
+CREATE INDEX ix_benefit_purchases_request_id ON benefit_purchases (request_id);
+
 CREATE TABLE ledger_entries (
 	id BIGSERIAL NOT NULL, 
 	transaction_id BIGINT NOT NULL, 
@@ -415,6 +502,7 @@ ALTER TABLE "chat_threads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "employers" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "invitations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "memberships" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "benefit_budgets" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_messages" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_security_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "contractors" ENABLE ROW LEVEL SECURITY;
@@ -422,9 +510,11 @@ ALTER TABLE "payroll_runs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "agent_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "airwallex_requests" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "approvals" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "benefit_requests" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_transactions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "benefit_purchases" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_entries" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_import_rows" ENABLE ROW LEVEL SECURITY;

@@ -162,8 +162,8 @@ function ReceiptView() {
                 )}
                 <span>
                   {data.verification.tap_verified
-                    ? "Approved and signed by the employer — TAP signature verified."
-                    : "This payment's approval does not carry a verified TAP signature."}
+                    ? "Approved and signed by the employer — approval signature verified."
+                    : "This payment's approval does not carry a verified approval signature."}
                 </span>
               </li>
               <li className="flex items-start gap-2.5">

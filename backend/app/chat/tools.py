@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..db.models import Employer, PayrollRun
-from ..money import to_decimal
+from ..money import money_str, to_decimal
 from ..services.runtime import PlatformRuntime, RuntimeConflict
 
 EDITOR_ROLES = {"owner", "admin"}
@@ -340,6 +340,262 @@ def request_approval(ctx: ChatContext, run_id: str | None = None, employer: str 
         approval=payload, data={"run_id": str(run.id), "status": run.status})
 
 
+# ---------------------------------------------------------------------------
+# Silo Benefits tools (read + propose only — deliberately NO approve/buy)
+# ---------------------------------------------------------------------------
+
+def _fmt_money(currency: str, value: object) -> str:
+    return f"{currency} {to_decimal(str(value)):,.2f}"
+
+
+def _vic_mode(ctx: ChatContext) -> str:
+    """The Visa VIC mode from the runtime (``runtime.vic.mode``).
+
+    The runtime exposes ``vic`` with ``.mode`` / ``.credential_ref``; older
+    runtimes may not have it yet, in which case purchases are SIMULATED.
+    """
+    vic = getattr(ctx.runtime, "vic", None)
+    mode = getattr(vic, "mode", None) if vic is not None else None
+    return str(mode).strip().upper() if mode else "SIMULATED"
+
+
+def _resolve_contractor(emp: Employer, ref: str | None):
+    """Resolve a worker by name among one employer's *active* contractors.
+
+    Returns ``(contractor, candidates)``: ``contractor`` is set only on an
+    unambiguous match; ``candidates`` lists the partial matches when the
+    reference is ambiguous (empty when nothing matched). Never guesses.
+    """
+    active = [c for c in emp.contractors if c.is_active]
+    if not ref or not ref.strip():
+        return None, []
+    cleaned = ref.strip()
+    lowered = cleaned.casefold()
+    exact = [c for c in active if c.full_name.casefold() == lowered]
+    if len(exact) == 1:
+        return exact[0], exact
+    if len(exact) > 1:
+        return None, exact
+    partial = [c for c in active
+               if lowered in c.full_name.casefold()
+               or cleaned.split()[0].casefold() == c.full_name.split()[0].casefold()
+               or (len(cleaned.split()) == 1
+                   and cleaned.casefold() == c.full_name.split()[-1].casefold())]
+    if len(partial) == 1:
+        return partial[0], partial
+    return None, partial
+
+
+def read_benefits(ctx: ChatContext, employer: str | None = None) -> ToolResult:
+    """Read-only Silo Benefits view: budgets, payroll lock, recent requests."""
+    try:
+        from ..db.models import BenefitBudget, BenefitRequest
+        from ..services import benefits as benefits_service
+    except ImportError:
+        return ToolResult(
+            "Silo Benefits is not available in this deployment yet, so I cannot read "
+            "benefit budgets or requests. No purchase has been made.",
+            data={"benefits": [], "available": False})
+    emp = resolve_employer(ctx, employer)
+    if employer and emp is None:
+        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}.",
+                          data={"employer": employer, "found": False})
+    targets = [emp] if emp else employers(ctx)
+    mode = _vic_mode(ctx)
+    lines = [f"Benefit purchases run via Visa VIC and are currently in {mode} mode."]
+    entries: list[dict] = []
+    for e in targets:
+        budgets = list(ctx.db.scalars(
+            select(BenefitBudget).where(BenefitBudget.employer_id == e.id)
+            .order_by(BenefitBudget.created_at)))
+        try:
+            held = bool(benefits_service.employer_payroll_held(ctx.db, e.id))
+        except Exception:
+            held = False
+        requests = list(ctx.db.scalars(
+            select(BenefitRequest).where(BenefitRequest.employer_id == e.id)
+            .order_by(BenefitRequest.created_at.desc()).limit(5)))
+        entry: dict = {
+            "employer_id": str(e.id), "employer_name": e.name, "payroll_held": held,
+            "budgets": [{"currency": b.currency, "monthly_cap": money_str(b.monthly_cap),
+                         "spent_this_period": money_str(b.spent_this_period),
+                         "remaining": money_str(to_decimal(str(b.monthly_cap))
+                                                - to_decimal(str(b.spent_this_period))),
+                         "per_tx_limit": money_str(b.per_tx_limit) if b.per_tx_limit is not None else None,
+                         "period": b.period, "enabled": bool(b.enabled)} for b in budgets],
+            "recent_requests": [{"contractor_name": r.contractor_name, "merchant": r.merchant,
+                                 "item": r.item, "amount": money_str(r.amount),
+                                 "currency": r.currency, "status": r.status} for r in requests],
+        }
+        entries.append(entry)
+        if budgets:
+            for b in budgets:
+                remaining = to_decimal(str(b.monthly_cap)) - to_decimal(str(b.spent_this_period))
+                per_tx = _fmt_money(b.currency, b.per_tx_limit) if b.per_tx_limit is not None else "US$200.00"
+                period = f" for {b.period}" if b.period else ""
+                lines.append(
+                    f"{e.name}: benefits budget {b.currency} — monthly cap {_fmt_money(b.currency, b.monthly_cap)}, "
+                    f"spent this period {_fmt_money(b.currency, b.spent_this_period)}, "
+                    f"remaining {_fmt_money(b.currency, remaining)}{period} "
+                    f"({'enabled' if b.enabled else 'disabled'}). "
+                    f"Per-transaction limit: {per_tx} — while the published Airwallex test card "
+                    "backs VIC, the per-transaction limit is US$200.00.")
+        else:
+            lines.append(f"{e.name}: no Silo Benefits budget is configured.")
+        if held:
+            lines.append(f"{e.name}: locked — payroll held; wages are funded first, so benefit "
+                         "purchases for this employer are locked until payroll is funded.")
+        if requests:
+            lines.append(f"Most recent benefit requests for {e.name}:")
+            for r in requests:
+                lines.append(f"- {r.contractor_name}: {r.item} from {r.merchant} — "
+                             f"{_fmt_money(r.currency, r.amount)} — {r.status}")
+        else:
+            lines.append(f"No benefit requests yet for {e.name}.")
+    return ToolResult("\n".join(lines),
+                      data={"benefits": entries, "vic_mode": mode, "available": True})
+
+
+def propose_benefit_purchase(ctx: ChatContext, employer: str | None = None,
+                             contractor: str | None = None, merchant: str | None = None,
+                             item: str | None = None, amount: str | None = None,
+                             currency: str | None = None) -> ToolResult:
+    """Create a REQUESTED BenefitRequest. This NEVER approves or purchases."""
+    if ctx.role not in EDITOR_ROLES:
+        return ToolResult(f"Your role ({ctx.role}) cannot request benefit purchases.",
+                          data={"created": False})
+    try:
+        from ..db.models import BenefitBudget
+        from ..services import benefits as benefits_service
+        from ..services.benefits import BenefitError
+    except ImportError:
+        return ToolResult(
+            "Silo Benefits is not available in this deployment yet, so I could not create "
+            "that request. Nothing has been purchased.",
+            data={"created": False, "available": False})
+
+    emp = resolve_employer(ctx, employer) if employer else resolve_employer(ctx, None)
+    if employer and emp is None:
+        return ToolResult(f"I cannot find an employer named '{employer}' in {ctx.organization_name}. "
+                          "I have not created a benefit request. Nothing has been purchased.",
+                          data={"created": False, "employer": employer, "found": False})
+    worker = None
+    if emp is None and contractor:
+        # No employer named: infer it only when the worker belongs to
+        # exactly one employer in this organization — otherwise refuse.
+        matches: list[tuple[Employer, object]] = []
+        for candidate_emp in employers(ctx):
+            found, _cands = _resolve_contractor(candidate_emp, contractor)
+            if found is not None:
+                matches.append((candidate_emp, found))
+        if len(matches) == 1:
+            emp, worker = matches[0]
+        elif len(matches) > 1:
+            owners = ", ".join(f"{c.full_name} ({e.name})" for e, c in matches)
+            return ToolResult(
+                f"'{contractor}' works for more than one employer here ({owners}), so I will not "
+                "guess which employer's benefit budget to use. Tell me the employer as well. "
+                "I have not created a benefit request. Nothing has been purchased.",
+                data={"created": False, "ambiguous_contractor": contractor})
+        else:
+            everyone = "; ".join(
+                f"{e.name}: " + (", ".join(c.full_name for c in e.contractors if c.is_active) or "no active workers")
+                for e in employers(ctx))
+            return ToolResult(
+                f"I cannot find a worker named '{contractor}' in {ctx.organization_name}. "
+                f"Workers I can request benefits for are — {everyone}. "
+                "I have not created a benefit request. Nothing has been purchased.",
+                data={"created": False, "contractor": contractor, "found": False})
+    if emp is None:
+        names = ", ".join(e.name for e in employers(ctx)) or "none"
+        return ToolResult(
+            f"Which employer is this benefit for? Name one of this organization's employers ({names}) "
+            "and the worker it is for. I have not created a benefit request. Nothing has been purchased.",
+            data={"created": False})
+
+    active_names = ", ".join(c.full_name for c in emp.contractors if c.is_active) or "no active workers"
+    if worker is None:
+        if not contractor:
+            return ToolResult(
+                f"Who is this benefit for? {emp.name}'s active workers are: {active_names}. "
+                "I have not created a benefit request. Nothing has been purchased.",
+                data={"created": False, "employer_name": emp.name})
+        worker, candidates = _resolve_contractor(emp, contractor)
+        if worker is None and candidates:
+            matched = ", ".join(c.full_name for c in candidates)
+            return ToolResult(
+                f"'{contractor}' matches more than one of {emp.name}'s workers ({matched}), so I will "
+                f"not guess. Please use the full name — {emp.name}'s active workers are: {active_names}. "
+                "I have not created a benefit request. Nothing has been purchased.",
+                data={"created": False, "employer_name": emp.name, "ambiguous_contractor": contractor})
+        if worker is None:
+            return ToolResult(
+                f"I cannot find a worker named '{contractor}' among {emp.name}'s active workers: "
+                f"{active_names}. I have not created a benefit request. Nothing has been purchased.",
+                data={"created": False, "employer_name": emp.name, "contractor": contractor, "found": False})
+
+    missing: list[str] = []
+    if not merchant or not merchant.strip():
+        missing.append("the merchant (where it would be bought)")
+    if not item or not item.strip():
+        missing.append("the item")
+    value: Decimal | None = None
+    if amount:
+        try:
+            value = to_decimal(str(amount))
+        except Exception:
+            value = None
+    if value is None or value <= 0:
+        missing.append("a positive amount")
+    if missing:
+        return ToolResult(
+            f"To create that benefit request I still need: {', '.join(missing)}. For example: "
+            f"'Request a benefit for {worker.full_name}: a 149 USD Python course on Coursera'. "
+            "I have not created a benefit request. Nothing has been purchased.",
+            data={"created": False, "employer_name": emp.name,
+                  "contractor_name": worker.full_name, "missing": missing})
+
+    chosen_currency = (currency or "").strip().upper()
+    currency_defaulted = not chosen_currency
+    if currency_defaulted:
+        budget = ctx.db.scalar(select(BenefitBudget).where(BenefitBudget.employer_id == emp.id)
+                               .order_by(BenefitBudget.created_at))
+        chosen_currency = budget.currency if budget is not None else "USD"
+    try:
+        request = benefits_service.create_request(
+            ctx.db, organization_id=ctx.organization_id, employer=emp, contractor=worker,
+            contractor_name=worker.full_name, merchant=merchant.strip(), item=item.strip(),
+            amount=value, currency=chosen_currency,
+            requested_by_id=ctx.user_id, requested_by_email=ctx.user_email)
+    except BenefitError as exc:
+        code = getattr(exc, "code", "benefit_error")
+        detail = getattr(exc, "detail", None) or str(exc)
+        return ToolResult(
+            f"That benefit request could not be created ({code}): {detail} "
+            "Nothing has been purchased.",
+            data={"created": False, "employer_name": emp.name,
+                  "contractor_name": worker.full_name, "error_code": code})
+    request_id = str(request.id) if getattr(request, "id", None) is not None else None
+    status = getattr(request, "status", "REQUESTED")
+    ctx.db.commit()
+    currency_note = (f"the employer's budget currency" if currency_defaulted else "as specified")
+    text = (
+        f"Created a Silo Benefits request for {worker.full_name} at {emp.name}: {item.strip()} "
+        f"from {merchant.strip()} for {_fmt_money(chosen_currency, value)} "
+        f"(currency {chosen_currency} — {currency_note}). The request is {status} and is now "
+        "awaiting human approval in the Benefits screen — a human approver must approve it there. "
+        "Nothing has been purchased, and I cannot approve or buy benefits: money moves only when "
+        f"a human approves and buys in the Benefits screen, and any purchase then runs via Visa VIC "
+        f"(currently in {_vic_mode(ctx)} mode)."
+    )
+    return ToolResult(text, data={
+        "created": True, "request_id": request_id, "status": status,
+        "employer_name": emp.name, "contractor_name": worker.full_name,
+        "merchant": merchant.strip(), "item": item.strip(),
+        "amount": money_str(value), "currency": chosen_currency,
+        "currency_defaulted": currency_defaulted})
+
+
 # Registry used by the LLM path: name -> (function, label, description).
 TOOL_LABELS = {
     "list_employers": "Listing employers",
@@ -350,6 +606,25 @@ TOOL_LABELS = {
     "start_payroll_run": "Starting a payroll run",
     "demo_fund_employer": "Funding an employer wallet (demo)",
     "request_approval": "Requesting a human approval",
+    "read_benefits": "Reading Silo Benefits budgets and requests",
+    "propose_benefit_purchase": "Proposing a benefit purchase (human approval required)",
+}
+
+# Fuller descriptions for the tools whose limits the model must never blur.
+# Used by the LLM path when present; every other tool keeps the label-based
+# description in service.py.
+TOOL_DESCRIPTIONS = {
+    "read_benefits": (
+        "Reading Silo Benefits budgets and requests. Read-only and scoped to the signed-in "
+        "organization: per-employer benefit budget (monthly cap, spent, remaining, per-transaction "
+        "limit), whether payroll is held for that employer, and the most recent benefit requests. "
+        "Benefit purchases run via Visa VIC. This tool cannot buy, approve or change anything."),
+    "propose_benefit_purchase": (
+        "Proposing a benefit purchase (human approval required). Scoped to the signed-in "
+        "organization. This creates a benefit request in REQUESTED status for a human approver "
+        "in the Benefits screen — it does NOT approve the request and does NOT purchase or buy "
+        "anything, and there is no tool that can. Never tell the user that you approved, bought "
+        "or purchased a benefit; say the request was created and now awaits human approval."),
 }
 
 TOOL_FUNCTIONS = {
@@ -361,4 +636,6 @@ TOOL_FUNCTIONS = {
     "start_payroll_run": start_payroll_run,
     "demo_fund_employer": demo_fund_employer,
     "request_approval": request_approval,
+    "read_benefits": read_benefits,
+    "propose_benefit_purchase": propose_benefit_purchase,
 }
