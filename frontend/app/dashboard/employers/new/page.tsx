@@ -13,6 +13,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api, ApiError, type EmployerDetail, type Session } from "@/lib/api";
+import { EDITOR_ROLES } from "@/lib/status";
 
 export default function NewEmployerPage() {
   const router = useRouter();
@@ -35,11 +36,12 @@ export default function NewEmployerPage() {
     })();
   }, [router]);
 
+  const canEdit = !session || EDITOR_ROLES.includes(session.role);
   const valid = form.name.trim().length >= 2 && /^[A-Za-z]{2}$/.test(form.country.trim());
 
   async function submit(ev: React.FormEvent) {
     ev.preventDefault();
-    if (!valid) return;
+    if (!valid || !canEdit) return;
     setSaving(true);
     setError(null);
     setFieldErrors({});
@@ -105,6 +107,14 @@ export default function NewEmployerPage() {
             <Button asChild className="mt-2">
               <Link href={`/dashboard/employers/${created.id}`}>Open {created.name}</Link>
             </Button>
+          </Card>
+        ) : !canEdit ? (
+          <Card className="p-8 text-center">
+            <h1 className="font-display text-2xl font-semibold text-sand-100">Adding employers needs an editor</h1>
+            <p className="mx-auto mt-2 max-w-md text-sage-300">
+              Your role ({session?.role}) is read-only here. Ask an owner or admin to add the employer, or to change your role.
+            </p>
+            <Button asChild className="mt-4"><Link href="/dashboard">Back to the dashboard</Link></Button>
           </Card>
         ) : (
           <>

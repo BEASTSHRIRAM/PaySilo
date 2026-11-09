@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   ArrowUp, Loader2, MessageCircle, Plus, RotateCcw, Square, WifiOff, X,
 } from "lucide-react";
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import {
   api, ApiError, streamChat, type ChatContext,
 } from "@/lib/api";
+import { DECIDER_ROLES } from "@/lib/status";
 import { MarkdownText } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
 import { ApprovalCard, type ApprovalCardState } from "./approval-card";
@@ -102,7 +103,7 @@ function applyToolResult(tools: ToolCardState[], tool: string, summary: string, 
 }
 
 function applyLegacyTool(tools: ToolCardState[], name: string, label: string, status: string): ToolCardState[] {
-  const nextStatus = status === "error" ? "error" : status === "running" || status === "started" ? "running" : "done";
+  const nextStatus = status === "error" ? "error" : status === "running" || status === "started" || status === "start" ? "running" : "done";
   const existing = tools.find((t) => t.tool === name && t.label === label && t.status === "running");
   if (existing) {
     return tools.map((t) => (t === existing ? { ...t, status: nextStatus as ToolCardState["status"] } : t));
@@ -195,7 +196,6 @@ function normaliseApprovals(raw: unknown): ApprovalCardState[] {
       employer_id: strOf(rec.employer_id),
       employer_name: strOf(rec.employer_name),
       summary: strOf(rec.summary),
-      state: "pending" as const,
     }];
   });
 }
@@ -222,10 +222,48 @@ function normaliseMessages(raw: unknown): ChatMessage[] {
   });
 }
 
+/**
+ * Runs still waiting on a decision are not part of any stored message, so a
+ * reloaded thread would silently drop them. Re-surface each one as an
+ * approval card (which fetches the run's live state) at the end of the thread.
+ */
+async function withPendingRuns(history: ChatMessage[]): Promise<ChatMessage[]> {
+  try {
+    const shown = new Set(history.flatMap((m) => m.approvals.map((a) => a.run_id)));
+    const waiting = (await api.runs())
+      .filter((r) => r.pending && r.resumable && !shown.has(r.id))
+      .slice(0, 5);
+    if (waiting.length === 0) return history;
+    return [
+      ...history,
+      {
+        id: nextId++,
+        role: "assistant",
+        text: waiting.length === 1 ? "One run is still waiting for a decision." : `${waiting.length} runs are still waiting for a decision.`,
+        thinking: [],
+        tools: [],
+        approvals: waiting.map((r) => ({
+          run_id: r.id,
+          employer_id: r.employer_id,
+          employer_name: r.employer_name,
+          summary: r.pending?.message ?? "",
+        })),
+      },
+    ];
+  } catch {
+    return history;
+  }
+}
+
 // ------------------------------------------------------------------ panel
-export function SiloChatPanel() {
+export function SiloChatPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const pathname = usePathname() ?? "/dashboard";
-  const [open, setOpen] = useState(false);
+  const router = useRouter();
+  const [role, setRole] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const streamSeq = useRef(0);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const wasOpenRef = useRef(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -267,22 +305,56 @@ export function SiloChatPanel() {
     };
   }, [employerId, runId]);
 
+  const goLogin = useCallback(() => {
+    router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+  }, [router, pathname]);
+
+  // A failed load is "offline" only when the network itself failed.
+  const handleLoadFailure = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.status === 401) {
+      goLogin();
+      return;
+    }
+    if (err instanceof ApiError && err.status === 0) {
+      setOffline(true);
+      setLoadError(null);
+    } else {
+      setOffline(false);
+      setLoadError(errMsg(err));
+    }
+  }, [goLogin]);
+
+  useEffect(() => {
+    let alive = true;
+    api.me().then((me) => { if (alive) setRole(me.role); }).catch(() => { /* role stays unknown: no approve buttons */ });
+    return () => { alive = false; };
+  }, []);
+
+  // Stop any in-flight stream when the panel unmounts.
+  useEffect(() => () => {
+    streamSeq.current += 1;
+    abortRef.current?.abort();
+  }, []);
+
   const loadHistory = useCallback(async () => {
     try {
       const list = normaliseThreads(await api.chatThreads());
       setThreads(list);
       setOffline(false);
+      setLoadError(null);
       if (list.length > 0) {
         const latest = list[0];
         setThreadId(latest.id);
         const history = normaliseMessages(await api.chatMessages(latest.id));
-        setMessages(history);
+        setMessages(await withPendingRuns(history));
+      } else {
+        setMessages(await withPendingRuns([]));
       }
-    } catch {
-      setOffline(true);
+    } catch (err) {
+      handleLoadFailure(err);
     }
     setHistoryLoaded(true);
-  }, []);
+  }, [handleLoadFailure]);
 
   useEffect(() => {
     if (open && !historyLoaded) void loadHistory();
@@ -295,24 +367,34 @@ export function SiloChatPanel() {
     if (el && stickRef.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, open]);
 
+  // Focus moves into the panel on open and back to the trigger on close.
   useEffect(() => {
-    if (open) inputRef.current?.focus();
-  }, [open ]);
+    if (open) {
+      inputRef.current?.focus();
+    } else if (wasOpenRef.current) {
+      triggerRef.current?.focus();
+    }
+    wasOpenRef.current = open;
+  }, [open]);
 
   async function openThread(id: string) {
+    streamSeq.current += 1;
     abortRef.current?.abort();
     setSending(false);
     setThreadId(id);
     stickRef.current = true;
     try {
-      setMessages(normaliseMessages(await api.chatMessages(id)));
+      const history = normaliseMessages(await api.chatMessages(id));
+      setMessages(await withPendingRuns(history));
       setOffline(false);
-    } catch {
-      setOffline(true);
+      setLoadError(null);
+    } catch (err) {
+      handleLoadFailure(err);
     }
   }
 
   function newChat() {
+    streamSeq.current += 1;
     abortRef.current?.abort();
     setThreadId(null);
     setMessages([]);
@@ -322,6 +404,7 @@ export function SiloChatPanel() {
   }
 
   function stop() {
+    streamSeq.current += 1;
     abortRef.current?.abort();
     setSending(false);
     setMessages((prev) =>
@@ -356,6 +439,8 @@ export function SiloChatPanel() {
       lastSentRef.current = text;
       const controller = new AbortController();
       abortRef.current = controller;
+      const seq = ++streamSeq.current;
+      let finished = false;
       try {
         await streamChat(
           { ...(activeThreadId ? { thread_id: activeThreadId } : {}), message: text, context },
@@ -391,11 +476,12 @@ export function SiloChatPanel() {
               case "approval":
                 patchMessage(assistantId, (m) => ({
                   ...m,
-                  approvals: [...m.approvals, { ...event.approval, state: "pending" }],
+                  approvals: [...m.approvals, event.approval],
                 }));
                 break;
               case "done":
-                if (event.thread_id) {
+                finished = true;
+                if (event.thread_id && streamSeq.current === seq) {
                   setThreadId(event.thread_id);
                   setThreads((prev) =>
                     prev.some((t) => t.id === event.thread_id)
@@ -406,6 +492,7 @@ export function SiloChatPanel() {
                 patchMessage(assistantId, (m) => ({ ...m, streaming: false, thinking: finishThinking(m.thinking) }));
                 break;
               case "error":
+                finished = true;
                 patchMessage(assistantId, (m) => ({
                   ...m,
                   error: true,
@@ -418,32 +505,40 @@ export function SiloChatPanel() {
           },
           controller.signal,
         );
+        // The stream closed. Without a `done` the turn was cut off: say so
+        // instead of presenting a half answer as complete.
         patchMessage(assistantId, (m) => ({
           ...m,
           streaming: false,
           thinking: finishThinking(m.thinking),
-          tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: "done" as const } : t)),
-          text: m.text || (m.tools.length === 0 && m.approvals.length === 0 && !m.error ? "Done." : m.text),
+          tools: m.tools.map((t) => (t.status === "running" ? { ...t, status: (finished ? "done" : "error") as ToolCardState["status"] } : t)),
+          ...(finished
+            ? { text: m.text || (m.tools.length === 0 && m.approvals.length === 0 && !m.error ? "Done." : m.text) }
+            : { error: true, text: m.text ? `${m.text}\n\n_The connection closed before Silo finished._` : "The connection closed before Silo finished." }),
         }));
       } catch (err) {
         if ((err as { name?: string })?.name === "AbortError") return;
-        const unreachable = err instanceof ApiError && (err.status === 0 || err.status === 404);
-        if (unreachable) setOffline(true);
+        if (err instanceof ApiError && err.status === 401) {
+          goLogin();
+          return;
+        }
+        const network = err instanceof ApiError && err.status === 0;
+        if (network) setOffline(true);
         patchMessage(assistantId, (m) => ({
           ...m,
           streaming: false,
           error: true,
           thinking: finishThinking(m.thinking),
-          text: m.text || (unreachable ? "Silo chat is not available right now." : errMsg(err)),
+          text: m.text || (network ? "Can't reach Silo chat right now." : err instanceof ApiError && err.status === 404 ? "Silo chat is not available on this server." : errMsg(err)),
         }));
       } finally {
-        setSending(false);
+        if (streamSeq.current === seq) setSending(false);
       }
     },
     // `context` is rebuilt from the pathname on every render; the values
     // it carries are stable per route, which is what the stream needs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pathname, employerId, runId],
+    [pathname, employerId, runId, goLogin],
   );
 
   async function send(ev?: React.FormEvent) {
@@ -471,28 +566,6 @@ export function SiloChatPanel() {
     void dispatch(text, threadId);
   }
 
-  async function decideApproval(msgId: number, card: ApprovalCardState, decision: "approve" | "hold") {
-    patchMessage(msgId, (m) => ({
-      ...m,
-      approvals: m.approvals.map((a) => (a === card ? { ...a, state: "busy" as const, error: undefined } : a)),
-    }));
-    try {
-      // The human clicks; the decision goes through the same endpoint as the run panel.
-      await api.decide(card.run_id, decision);
-      patchMessage(msgId, (m) => ({
-        ...m,
-        approvals: m.approvals.map((a) => (a.run_id === card.run_id ? { ...a, state: decision } : a)),
-      }));
-    } catch (err) {
-      patchMessage(msgId, (m) => ({
-        ...m,
-        approvals: m.approvals.map((a) =>
-          a.run_id === card.run_id ? { ...a, state: "pending" as const, error: errMsg(err) } : a,
-        ),
-      }));
-    }
-  }
-
   const suggestions = [
     `Check the balance for ${contextName ?? "an employer"}`,
     "Explain the most recent payroll run",
@@ -502,10 +575,11 @@ export function SiloChatPanel() {
   if (!open) {
     return (
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => onOpenChange(true)}
         aria-label="Open Silo chat"
-        className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full border-2 border-sage-600/60 bg-ink-800 py-2 pl-2 pr-4 shadow-2xl transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/60"
+        className="fixed bottom-4 right-4 z-40 flex items-center gap-2 rounded-full border-2 border-sage-600/60 bg-ink-800 py-1.5 pl-1.5 pr-3 shadow-2xl sm:bottom-5 sm:right-5 sm:py-2 sm:pl-2 sm:pr-4 transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/60"
       >
         <span className="grid size-10 place-items-center overflow-hidden rounded-full bg-sand-200">
           <LottieAnimation name="silo-wave" className="size-10" label="Silo" />
@@ -520,7 +594,13 @@ export function SiloChatPanel() {
   return (
     <aside
       aria-label="Silo chat"
-      className="fixed inset-0 z-50 flex flex-col border-ink-700 bg-ink-900 shadow-2xl sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[420px] sm:max-w-full sm:border-l-2"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onOpenChange(false);
+        }
+      }}
+      className="fixed inset-0 z-50 flex flex-col border-ink-700 bg-ink-900 shadow-2xl sm:inset-y-0 sm:left-auto sm:right-0 sm:w-[420px] sm:max-w-full sm:border-l-2 xl:shadow-none"
     >
       <header className="flex items-center gap-3 border-b-2 border-ink-700 px-4 py-3">
         <span className="grid size-11 shrink-0 place-items-center overflow-hidden rounded-full bg-sand-200">
@@ -535,7 +615,7 @@ export function SiloChatPanel() {
         </Button>
         <button
           type="button"
-          onClick={() => setOpen(false)}
+          onClick={() => onOpenChange(false)}
           aria-label="Close Silo chat"
           className="rounded-full p-2 text-sage-300 transition-colors hover:bg-ink-700 hover:text-sand-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sage-400/60"
         >
@@ -571,12 +651,14 @@ export function SiloChatPanel() {
         }}
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4 [scrollbar-color:theme(colors.ink.600)_transparent] [scrollbar-width:thin]"
       >
-        {offline && messages.length === 0 ? (
+        {(offline || loadError) && messages.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center" role="status">
             <WifiOff className="size-8 text-sage-500" />
-            <p className="font-bold text-sand-100">Silo chat is offline</p>
+            <p className="font-bold text-sand-100">{offline ? "Silo chat is offline" : "Could not load the chat"}</p>
             <p className="max-w-64 text-sm leading-relaxed text-sage-300">
-              The chat service is not reachable yet. The rest of the dashboard works as normal.
+              {offline
+                ? "PaySilo's backend is not reachable. The rest of the dashboard may be affected too."
+                : loadError}
             </p>
             <Button type="button" variant="outline" size="sm" onClick={() => { setHistoryLoaded(false); void loadHistory(); }}>
               Try again
@@ -606,7 +688,7 @@ export function SiloChatPanel() {
             </div>
           </div>
         ) : (
-          <ul className="grid gap-5">
+          <ul className="grid gap-5" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation with Silo">
             {messages.map((m) => (
               <li key={m.id} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
                 {m.role === "user" ? (
@@ -642,7 +724,7 @@ export function SiloChatPanel() {
                       <ApprovalCard
                         key={`${card.run_id}-${ci}`}
                         card={card}
-                        onDecide={(c, d) => void decideApproval(m.id, c, d)}
+                        canDecide={role !== null && DECIDER_ROLES.includes(role)}
                       />
                     ))}
                     {m.error && !m.streaming && (
@@ -683,7 +765,7 @@ export function SiloChatPanel() {
             el.style.height = `${Math.min(el.scrollHeight, 112)}px`;
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault();
               void send();
             }

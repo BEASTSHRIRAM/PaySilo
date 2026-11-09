@@ -18,9 +18,10 @@ import {
   type Contractor, type ContractorIn, type EmployerDetail, type RunSummary, type Session,
 } from "@/lib/api";
 import { AnimatedMoney, Stagger } from "@/lib/gsap-anim";
+import { useDataChanged } from "@/lib/events";
+import { runStatusInfo, EDITOR_ROLES } from "@/lib/status";
 import { formatMoney } from "@/lib/utils";
 
-const EDITORS = ["owner", "admin", "editor"];
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
 
 interface FundingEvent { amount: string; currency: string; at: Date }
@@ -46,7 +47,7 @@ export default function EmployerPage() {
   const [fundAmount, setFundAmount] = useState("");
   const [funding, setFunding] = useState(false);
   const [starting, setStarting] = useState(false);
-  const canEdit = !!session && EDITORS.includes(session.role);
+  const canEdit = !!session && EDITOR_ROLES.includes(session.role);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -77,6 +78,12 @@ export default function EmployerPage() {
     void load();
     void loadRuns();
   }, [load, loadRuns]);
+
+  // A decision made elsewhere (e.g. the chat panel) refreshes balances and run history.
+  useDataChanged(() => {
+    void load();
+    void loadRuns();
+  });
 
   async function fund(ev: React.FormEvent) {
     ev.preventDefault();
@@ -258,7 +265,7 @@ export default function EmployerPage() {
                             <span className="block truncate font-bold text-sand-100">{r.period_label ?? "Payroll run"}</span>
                             <span className="block text-xs font-semibold text-sage-500">{new Date(r.created_at).toLocaleString()}</span>
                           </span>
-                          <Badge tone={toneForStatus(r.status)}>{r.status.replaceAll("_", " ")}</Badge>
+                          <Badge tone={runStatusInfo(r).tone}>{runStatusInfo(r).label}</Badge>
                           <span className="font-display font-semibold tabular-nums text-sand-100 md:text-right">
                             {r.required_usd ? formatMoney(r.required_usd) : "—"}
                           </span>
@@ -387,8 +394,13 @@ function ContractorsSection({
           </Button>
         )}
       </div>
+      {!canEdit && (
+        <p className="mb-4 rounded-2xl border-2 border-ink-700 bg-ink-900/50 px-4 py-3 text-sm font-semibold text-sage-300">
+          Your role is read-only here. Ask an owner or admin to add or deactivate contractors.
+        </p>
+      )}
 
-      {showForm && (
+      {canEdit && showForm && (
         <Card className="mb-4 p-5">
           <form onSubmit={(e) => void submit(e)} className="grid gap-4" noValidate>
             {formError && <PageError message={formError} />}

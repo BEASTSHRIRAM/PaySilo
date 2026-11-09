@@ -8,13 +8,14 @@ import { ArrowLeft, RefreshCw, ShieldCheck, ShieldAlert } from "lucide-react";
 import { AppBar } from "@/components/dashboard/app-bar";
 import { RunPanel } from "@/components/dashboard/run-panel";
 import { SectionError, SectionLoading } from "@/components/dashboard/states";
-import { Badge, toneForStatus } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api, ApiError, type RunDetail, type Session } from "@/lib/api";
 import { TimelineReveal } from "@/lib/gsap-anim";
+import { useDataChanged } from "@/lib/events";
+import { runStatusInfo, DECIDER_ROLES } from "@/lib/status";
 
-const DECIDERS = ["owner", "admin", "approver"];
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
 
 export default function RunPage() {
@@ -58,7 +59,12 @@ export default function RunPage() {
     }
   }
 
-  const canDecide = !!session && DECIDERS.includes(session.role);
+  // A decision made elsewhere (e.g. the chat panel) re-fetches this run.
+  useDataChanged(() => {
+    api.run(id).then(setRun).catch(() => { /* keep what is shown */ });
+  });
+
+  const canDecide = !!session && DECIDER_ROLES.includes(session.role);
 
   return (
     <div className="min-h-dvh pb-16">
@@ -98,8 +104,13 @@ export default function RunPage() {
                   {run.source ? ` · via ${run.source}` : ""}
                 </p>
               </div>
-              <Badge tone={toneForStatus(run.status)}>{run.status.replaceAll("_", " ")}</Badge>
+              <Badge tone={runStatusInfo(run).tone}>{runStatusInfo(run).label}</Badge>
             </section>
+            {runStatusInfo(run).detail && (
+              <p role="status" className="-mt-4 rounded-2xl border-2 border-sand-400/50 bg-sand-300/10 px-4 py-3 text-sm font-bold text-sand-200">
+                {runStatusInfo(run).detail}
+              </p>
+            )}
 
             <Card className="p-5 sm:p-6">
               <RunPanel key={run.id} run={run} canDecide={canDecide} onChange={setRun} />
@@ -175,9 +186,13 @@ export default function RunPage() {
                       <dd className="break-all font-semibold text-sand-200">{run.receipt.payload_hash}</dd>
                     </div>
                   </dl>
-                  <p className="mt-3 text-xs font-semibold text-sage-500">
-                    The API does not return a block-explorer URL for Metal receipts yet, so no explorer link is shown rather than guessing one.
-                  </p>
+                  {run.receipt.explorer_url && (
+                    <p className="mt-3 text-sm font-bold">
+                      <a className="text-sand-100 underline underline-offset-4 hover:text-sage-300" href={run.receipt.explorer_url} target="_blank" rel="noreferrer">
+                        View on block explorer
+                      </a>
+                    </p>
+                  )}
                 </Card>
               ) : (
                 <Card className="p-5">

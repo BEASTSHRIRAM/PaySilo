@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { Check, Loader2, PauseCircle } from "lucide-react";
 
-import { Badge, toneForStatus } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type RunDetail } from "@/lib/api";
+import { notifyDataChanged } from "@/lib/events";
+import { runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const AGENT_NAMES: Record<string, string> = {
@@ -21,12 +23,15 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
   const [busy, setBusy] = useState<"approve" | "hold" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const a = run.assessment;
+  const info = runStatusInfo(run);
+  const heldLines = run.pay_lines.filter((l) => l.status === "HELD");
 
   async function decide(decision: "approve" | "hold") {
     setBusy(decision);
     setError(null);
     try {
       onChange(await api.decide(run.id, decision));
+      notifyDataChanged({ runId: run.id });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not record the decision.");
     } finally {
@@ -41,8 +46,11 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
           <p className="text-sm font-bold text-sage-400">Payroll run</p>
           <h3 className="font-display text-2xl font-semibold text-sand-100">{run.employer_name}</h3>
         </div>
-        <Badge tone={toneForStatus(run.status)}>{run.status.replaceAll("_", " ")}</Badge>
+        <Badge tone={info.tone}>{info.label}</Badge>
       </div>
+      {info.detail && (
+        <p role="status" className="rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">{info.detail}</p>
+      )}
 
       {run.explanation && <p className="rounded-3xl bg-ink-950/40 p-4 text-[15px] leading-relaxed text-sand-200">{run.explanation}</p>}
       {run.error && <p className="rounded-3xl border-2 border-coral-600/50 bg-coral-500/10 p-4 text-sm font-bold text-coral-300">{run.error}</p>}
@@ -63,10 +71,18 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
         </dl>
       )}
 
+      {heldLines.length > 0 && (
+        <p className="rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">
+          {heldLines.length} of {run.pay_lines.length} line{run.pay_lines.length === 1 ? "" : "s"} held, not paid:{" "}
+          {heldLines.map((l) => `${l.beneficiary_name} (${formatMoney(l.amount, l.currency)})`).join(", ")}.
+          Held lines move only after the employer is funded and a person approves again.
+        </p>
+      )}
+
       {run.pay_lines.length > 0 && (
         <ul className="divide-y-2 divide-ink-700 overflow-hidden rounded-3xl border-2 border-ink-700">
           {run.pay_lines.map((l) => (
-            <li key={l.position} className="flex items-center justify-between gap-3 bg-ink-900/40 px-4 py-3">
+            <li key={l.position} className={cn("flex items-center justify-between gap-3 px-4 py-3", l.status === "HELD" ? "bg-sand-300/10" : "bg-ink-900/40")}>
               <div>
                 <p className="font-bold text-sand-100">{l.beneficiary_name}</p>
                 <p className="text-xs font-semibold text-sage-500">

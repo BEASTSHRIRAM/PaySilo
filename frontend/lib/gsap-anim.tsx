@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import gsap from "gsap";
 
 import { formatMoney } from "@/lib/utils";
@@ -9,72 +9,58 @@ export function prefersReducedMotion(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-/** Counts a money value up from zero on mount (instant under reduced motion). */
-export function AnimatedMoney({ value, currency = "USD", className }: { value: string; currency?: string; className?: string }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const target = Number(value);
+/**
+ * Tweens a number from its previous value (or from 0 on first mount) to
+ * `target`, returning the value to display. Instant under reduced motion.
+ */
+function useCountTween(target: number, duration: number): number {
+  const [display, setDisplay] = useState(target);
+  const fromRef = useRef<number | null>(null);
+  const shownRef = useRef(target);
 
   useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (!Number.isFinite(target) || prefersReducedMotion()) {
-      el.textContent = formatMoney(value, currency);
+    const first = fromRef.current === null;
+    const from = first ? 0 : shownRef.current;
+    fromRef.current = target;
+    if (!Number.isFinite(target) || prefersReducedMotion() || from === target) {
+      shownRef.current = target;
+      setDisplay(target);
       return;
     }
-    const state = { v: 0 };
+    const state = { v: from };
     const tween = gsap.to(state, {
       v: target,
-      duration: 0.9,
+      duration,
       ease: "power2.out",
       onUpdate: () => {
-        el.textContent = formatMoney(state.v.toFixed(2), currency);
+        shownRef.current = state.v;
+        setDisplay(state.v);
       },
       onComplete: () => {
-        el.textContent = formatMoney(value, currency);
+        shownRef.current = target;
+        setDisplay(target);
       },
     });
     return () => {
       tween.kill();
     };
-  }, [target, value, currency]);
+  }, [target, duration]);
 
-  return (
-    <span ref={ref} className={className}>
-      {formatMoney(value, currency)}
-    </span>
-  );
+  return display;
 }
 
-/** Counts an integer up from zero on mount (instant under reduced motion). */
+/** Counts a money value from zero on mount, then from the previous value on change (instant under reduced motion). */
+export function AnimatedMoney({ value, currency = "USD", className }: { value: string; currency?: string; className?: string }) {
+  const target = Number(value);
+  const shown = useCountTween(target, 0.9);
+  const text = Number.isFinite(target) && shown !== target ? formatMoney(shown.toFixed(2), currency) : formatMoney(value, currency);
+  return <span className={className}>{text}</span>;
+}
+
+/** Counts an integer from zero on mount, then from the previous value on change (instant under reduced motion). */
 export function AnimatedNumber({ value, className }: { value: number; className?: string }) {
-  const ref = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (prefersReducedMotion()) {
-      el.textContent = String(value);
-      return;
-    }
-    const state = { v: 0 };
-    const tween = gsap.to(state, {
-      v: value,
-      duration: 0.8,
-      ease: "power2.out",
-      onUpdate: () => {
-        el.textContent = String(Math.round(state.v));
-      },
-    });
-    return () => {
-      tween.kill();
-    };
-  }, [value]);
-
-  return (
-    <span ref={ref} className={className}>
-      {value}
-    </span>
-  );
+  const shown = useCountTween(value, 0.8);
+  return <span className={className}>{Math.round(shown)}</span>;
 }
 
 /** Staggers its direct children in on mount. A no-op under reduced motion. */
