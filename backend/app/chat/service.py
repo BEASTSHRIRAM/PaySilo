@@ -33,8 +33,10 @@ Conversation history is persisted per user and org (``chat_threads`` /
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
+import typing
 import uuid
 from collections.abc import Iterator
 
@@ -173,10 +175,54 @@ def _tool_result_event(name: str, result: chat_tools.ToolResult) -> dict:
 _TRACE_TYPES = ("thinking", "tool_start", "tool_result")
 
 
+def _tool_params(fn) -> dict[str, inspect.Parameter]:
+    """The tool's real, model-facing parameters: its signature minus the injected ``ctx``."""
+    return {n: p for i, (n, p) in enumerate(inspect.signature(fn).parameters.items())
+            if i > 0 and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+
+
 def _run_tool(ctx: chat_tools.ChatContext, name: str, kwargs: dict) -> chat_tools.ToolResult:
-    fn = chat_tools.TOOL_FUNCTIONS[name]
-    allowed = {k: v for k, v in kwargs.items() if k in fn.__code__.co_varnames}
+    fn = chat_tools.TOOL_FUNCTIONS.get(name)
+    if fn is None:
+        known = ", ".join(sorted(chat_tools.TOOL_FUNCTIONS))
+        return chat_tools.ToolResult(f"I do not have a tool called '{name}'. Available tools: {known}.",
+                                     data={"error": "unknown_tool", "tool": name})
+    params = _tool_params(fn)  # unknown / injected arguments are dropped, never passed through
+    allowed = {k: v for k, v in (kwargs or {}).items() if k in params}
     return fn(ctx, **allowed)
+
+
+def _args_schema(name: str, fn):
+    """An explicit pydantic args model so the LLM sees the tool's real parameters."""
+    from pydantic import create_model
+
+    hints = typing.get_type_hints(fn)
+    fields = {n: (hints.get(n, str | None),
+                  p.default if p.default is not inspect.Parameter.empty else ...)
+              for n, p in _tool_params(fn).items()}
+    return create_model(f"{name}_args", **fields)
+
+
+def build_llm_tools(ctx: chat_tools.ChatContext) -> tuple[list, dict]:
+    """LangChain tools (one per org-scoped chat tool) + a name -> callable map; ``.last`` holds the result."""
+    from langchain_core.tools import StructuredTool
+
+    def wrap(name):
+        def _call(**kwargs):
+            result = _run_tool(ctx, name, kwargs)
+            _call.last = result  # type: ignore[attr-defined]
+            return result.text
+        _call.last = None  # type: ignore[attr-defined]
+        return _call
+
+    lc_tools, wrappers = [], {}
+    for name, fn in chat_tools.TOOL_FUNCTIONS.items():
+        call = wrap(name)
+        wrappers[name] = call
+        lc_tools.append(StructuredTool.from_function(
+            func=call, name=name, args_schema=_args_schema(name, fn),
+            description=f"{chat_tools.TOOL_LABELS[name]}. Scoped to the signed-in organization."))
+    return lc_tools, wrappers
 
 
 # ---------------------------------------------------------------------------
@@ -258,22 +304,7 @@ def fallback_turn(ctx: chat_tools.ChatContext, message: str,
 def _llm_turn(ctx: chat_tools.ChatContext, model, history: list[ChatMessage],
               message: str) -> Iterator[dict]:
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-    from langchain_core.tools import StructuredTool
-
-    def wrap(name):
-        def _call(**kwargs):
-            result = _run_tool(ctx, name, kwargs)
-            _call.last = result  # type: ignore[attr-defined]
-            return result.text
-        _call.last = None  # type: ignore[attr-defined]
-        return _call
-
-    lc_tools, wrappers = [], {}
-    for name, fn in chat_tools.TOOL_FUNCTIONS.items():
-        call = wrap(name)
-        wrappers[name] = call
-        lc_tools.append(StructuredTool.from_function(
-            func=call, name=name, description=f"{chat_tools.TOOL_LABELS[name]}. Scoped to the signed-in organization."))
+    lc_tools, wrappers = build_llm_tools(ctx)
     bound = model.bind_tools(lc_tools)
     messages = [SystemMessage(SYSTEM_PROMPT)]
     for h in history[-20:]:
@@ -298,8 +329,12 @@ def _llm_turn(ctx: chat_tools.ChatContext, model, history: list[ChatMessage],
             name = call["name"]
             args = call.get("args", {})
             yield _tool_start_event(name, args)
-            result_text = wrappers[name](**args)
-            result = wrappers[name].last
+            if name in wrappers:
+                result_text = wrappers[name](**(args or {}))
+                result = wrappers[name].last
+            else:  # the model named a tool that does not exist: tell it, don't crash the turn
+                result = _run_tool(ctx, name, args)
+                result_text = result.text
             yield _tool_result_event(name, result)
             if result and result.approval:
                 yield {"type": "approval", **result.approval}
