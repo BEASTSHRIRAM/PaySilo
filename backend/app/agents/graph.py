@@ -79,6 +79,14 @@ AGENTS: dict[str, dict[str, str]] = {
                "job": "Anchors a hash of the reconciliation receipt on the settlement chain (Metal)."},
 }
 
+# Airwallex rejects tiny FX quotes (amount_below_limit), so top-ups are at least this.
+MIN_FX_TOP_UP = Decimal("10.00")
+
+def _is_insufficient_balance(exc: BaseException) -> bool:
+    """Airwallex: HTTP 400 code=balance_insufficient; simulator: 'Insufficient funds'."""
+    return getattr(exc, "code", None) == "balance_insufficient" or "insufficient" in str(exc).lower()
+
+
 PAYOUT_ERRORS: tuple[type[BaseException], ...] = (Exception,)
 
 
@@ -453,6 +461,36 @@ def build_graph(services: Services, checkpointer=None):
                 _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
                 return {"status": "HELD_SHORTFALL", "error": msg, "balances": balances_str(acct),
                         "audit": audit, "events": events}
+        # Payout fees actually charged so far in this run, per (currency, method). Real fees
+        # drift with the FX rate (live sandbox: EUR 13.38-13.39 per SWIFT payout vs the
+        # Kit 6 schedule's 12.85), so later payouts expect the fee Airwallex really charges.
+        observed_fees: dict[tuple[str, str], Decimal] = {}
+
+        def top_up_for(i: int, line: dict) -> None:
+            """After Airwallex refuses a payout for insufficient balance, top up the
+            payout currency from the employer's OWN USD (same silo) so it can be retried.
+            Real fees drift above the priced fee (live: ~EUR 13.38 vs 12.85 per SWIFT)."""
+            ccy, method = line["currency"], line.get("method", "SWIFT")
+            fee_est = max(PAYROLL_POLICY.payout_fee(ccy, method), observed_fees.get((ccy, method), Decimal("0")))
+            need = round_money(to_decimal(line["amount"]) + fee_est)
+            have = awx.balance_of(ccy, account_id=acct)
+            top_up = max(round_money(need - have), MIN_FX_TOP_UP)
+            quote = awx.create_fx_quote(
+                request_id=request_id_for(run_id, f"fx-topup-quote-{ccy}-{i}"), on_behalf_of=acct,
+                sell_currency="USD", buy_currency=ccy, buy_amount=top_up)
+            conversion = awx.create_fx_conversion(
+                request_id=request_id_for(run_id, f"fx-topup-{ccy}-{i}"), on_behalf_of=acct,
+                quote_id=quote["id"], buy_amount=top_up, sell_currency="USD", buy_currency=ccy)
+            sell = round_money(to_decimal(str(conversion["sell_amount"])))
+            ledger.post([(f"{key}:cash:USD", -sell), (f"{key}:fx_clearing:USD", sell),
+                         (f"{key}:fx_clearing:{ccy}", -top_up), (f"{key}:cash:{ccy}", top_up)],
+                        memo=f"{run_id} FX top-up USD->{ccy} before payout {i}")
+            _log(state, "execute",
+                 f"Airwallex's actual payout fees exceeded the priced fee, leaving {ccy} {money_str(have)} for "
+                 f"{line['name']}'s payout (needs ~{ccy} {money_str(need)}). Topped up {ccy} {money_str(top_up)} "
+                 f"from this employer's own USD {money_str(sell)} — no other employer's money involved.",
+                 "warning", audit, events)
+
         try:
             # 1. Convert exactly the priced amount per currency, on the employer's behalf.
             for req in a["by_currency"]:
@@ -493,15 +531,28 @@ def build_graph(services: Services, checkpointer=None):
                     country_code=line.get("country_code", "DE"), iban=line.get("iban", ""),
                     swift_code=line.get("swift_code", ""), account_number=line.get("account_number", ""),
                     routing_code=line.get("routing_code", ""))
-                transfer = awx.create_transfer(
-                    request_id=request_id_for(run_id, f"pay-{i}"), on_behalf_of=acct,
-                    beneficiary_id=bene["id"], amount=to_decimal(line["amount"]),
-                    currency=line["currency"], method=line.get("method", "SWIFT"))
+                def send_transfer() -> dict:
+                    return awx.create_transfer(
+                        request_id=request_id_for(run_id, f"pay-{i}"), on_behalf_of=acct,
+                        beneficiary_id=bene["id"], amount=to_decimal(line["amount"]),
+                        currency=line["currency"], method=line.get("method", "SWIFT"))
+                try:
+                    transfer = send_transfer()
+                except Exception as exc:
+                    # Payout-first: a replayed (already sent) payout never triggers a top-up.
+                    # Only a real "insufficient balance" refusal does, then the same request_id
+                    # is retried once (live-verified: Airwallex accepts the retry).
+                    if line["currency"] == "USD" or not _is_insufficient_balance(exc):
+                        raise
+                    top_up_for(i, line)
+                    transfer = send_transfer()
                 paid = awx.transition_transfer(
                     request_id=request_id_for(run_id, f"pay-{i}-transition"), on_behalf_of=acct,
                     transfer_id=transfer["id"], target_status="PAID")
                 fee = round_money(to_decimal(str(transfer.get("fee_amount", "0"))))
                 amount, ccy = to_decimal(line["amount"]), line["currency"]
+                method_key = (ccy, line.get("method", "SWIFT"))
+                observed_fees[method_key] = max(observed_fees.get(method_key, Decimal("0")), fee)
                 # Post per payout so a mid-batch failure leaves the ledger matching the wallet.
                 ledger.post([(f"{key}:cash:{ccy}", -(amount + fee)),
                              (f"external:payees:{ccy}", amount),
