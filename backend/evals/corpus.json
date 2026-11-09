@@ -1,0 +1,451 @@
+[
+  {
+    "id": "email-01-clean-two-contractors",
+    "kind": "email",
+    "input": "Hi team,\n\nPlease run this month's payroll.\n\nemployer: Acme Manufacturing GmbH\nfund USD 20000\npay Lena Fischer EUR 3400\npay Tomas Rivera EUR 2600\n\nThanks,\nAna",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "20000",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-02-single-large",
+    "kind": "email",
+    "input": "employer: Borealis Labs AB\nfund USD 5000\npay Ingrid Solberg EUR 6000",
+    "expected": {
+      "employer_name": "Borealis Labs AB",
+      "funding_usd": "5000",
+      "pay_lines": [
+        {
+          "name": "Ingrid Solberg",
+          "amount": "6000",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "text-03-no-funding-line",
+    "kind": "text",
+    "input": "employer: Cobalt Retail LLC\npay Sam Lee USD 1800",
+    "expected": {
+      "employer_name": "Cobalt Retail LLC",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Sam Lee",
+          "amount": "1800",
+          "currency": "USD"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-04-comma-amounts",
+    "kind": "email",
+    "input": "Hi,\n\nemployer: Cobalt Retail LLC\nfund USD 25000\npay Sam Lee USD 1,800\npay Priya Shah GBP 2,450.75\n\nRegards",
+    "expected": {
+      "employer_name": "Cobalt Retail LLC",
+      "funding_usd": "25000",
+      "pay_lines": [
+        {
+          "name": "Sam Lee",
+          "amount": "1800",
+          "currency": "USD"
+        },
+        {
+          "name": "Priya Shah",
+          "amount": "2450.75",
+          "currency": "GBP"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-05-shouting-and-spaces",
+    "kind": "email",
+    "input": "EMPLOYER: Acme Manufacturing GmbH\nFUND USD 20000\nPAY   Lena Fischer   EUR   3400\nPay Tomas Rivera EUR 2600",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "20000",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "text-06-trailing-notes",
+    "kind": "text",
+    "input": "employer: Acme Manufacturing GmbH\npay Lena Fischer EUR 3400 (monthly salary)",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-07-multi-currency",
+    "kind": "email",
+    "input": "employer: Delta Foods BV\nfund USD 30000\npay Joris de Vries EUR 1000\npay Sam Lee USD 500\npay Priya Shah GBP 400",
+    "expected": {
+      "employer_name": "Delta Foods BV",
+      "funding_usd": "30000",
+      "pay_lines": [
+        {
+          "name": "Joris de Vries",
+          "amount": "1000",
+          "currency": "EUR"
+        },
+        {
+          "name": "Sam Lee",
+          "amount": "500",
+          "currency": "USD"
+        },
+        {
+          "name": "Priya Shah",
+          "amount": "400",
+          "currency": "GBP"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-08-cents",
+    "kind": "email",
+    "input": "employer: Borealis Labs AB\npay Ingrid Solberg EUR 1234.56",
+    "expected": {
+      "employer_name": "Borealis Labs AB",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Ingrid Solberg",
+          "amount": "1234.56",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "text-09-hyphen-apostrophe-names",
+    "kind": "text",
+    "input": "employer: Echo Travel Ltd\npay Mary-Jane O'Brien EUR 2100",
+    "expected": {
+      "employer_name": "Echo Travel Ltd",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Mary-Jane O'Brien",
+          "amount": "2100",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-10-prose-around",
+    "kind": "email",
+    "input": "Hello everyone,\n\nHope you are well. Attaching payroll for this cycle below. Please process before Friday.\n\nemployer: Acme Manufacturing GmbH\nfund USD 20000\npay Lena Fischer EUR 3400\npay Tomas Rivera EUR 2600\n\nDo let me know if anything is unclear.\nBest wishes,\nAna Weber\nOperations",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "20000",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "text-11-cobalt-funded",
+    "kind": "text",
+    "input": "employer: Cobalt Retail LLC\nfund USD 10000\npay Sam Lee USD 1800",
+    "expected": {
+      "employer_name": "Cobalt Retail LLC",
+      "funding_usd": "10000",
+      "pay_lines": [
+        {
+          "name": "Sam Lee",
+          "amount": "1800",
+          "currency": "USD"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-12-three-contractors",
+    "kind": "email",
+    "input": "employer: Borealis Labs AB\nfund USD 15000\npay Ingrid Solberg EUR 6000\npay Astrid Lund EUR 2800\npay Karl Jensen EUR 3100",
+    "expected": {
+      "employer_name": "Borealis Labs AB",
+      "funding_usd": "15000",
+      "pay_lines": [
+        {
+          "name": "Ingrid Solberg",
+          "amount": "6000",
+          "currency": "EUR"
+        },
+        {
+          "name": "Astrid Lund",
+          "amount": "2800",
+          "currency": "EUR"
+        },
+        {
+          "name": "Karl Jensen",
+          "amount": "3100",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "text-13-big-and-trailing-dot",
+    "kind": "text",
+    "input": "employer: Acme Manufacturing GmbH\npay Lena Fischer EUR 3400.\npay Tomas Rivera EUR 12,000",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "12000",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-14-all-lowercase",
+    "kind": "email",
+    "input": "employer: acme manufacturing gmbh\nfund usd 20000\npay lena fischer eur 3400\npay tomas rivera eur 2600",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "20000",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "csv-15-plain-csv",
+    "kind": "csv",
+    "input": "name,currency,amount\nLena Fischer,EUR,3400\nTomas Rivera,EUR,2600",
+    "expected": {
+      "employer_name": "Unknown Employer",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "csv-16-semicolon-csv",
+    "kind": "csv",
+    "input": "Lena Fischer; EUR; 3400\nTomas Rivera; EUR; 2600",
+    "expected": {
+      "employer_name": "Unknown Employer",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-17-polite-prefix",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\nPlease pay Lena Fischer EUR 3400 this month",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-18-amount-before-currency",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\npay Tomas Rivera 2600 EUR",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-19-dash-employer-header",
+    "kind": "email",
+    "input": "Employer - Borealis Labs AB\nfund USD 5000\npay Ingrid Solberg EUR 6000",
+    "expected": {
+      "employer_name": "Borealis Labs AB",
+      "funding_usd": "5000",
+      "pay_lines": [
+        {
+          "name": "Ingrid Solberg",
+          "amount": "6000",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-20-prose-funding",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\nWe funded the wallet with USD 20000 yesterday.\npay Lena Fischer EUR 3400",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "20000",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-21-european-decimal",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\npay Lena Fischer EUR 3.400,50",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400.50",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-22-amount-in-words",
+    "kind": "email",
+    "input": "employer: Borealis Labs AB\npay Ingrid Solberg EUR six thousand",
+    "expected": {
+      "employer_name": "Borealis Labs AB",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Ingrid Solberg",
+          "amount": "6000",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-23-title-in-name",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\npay Dr. Lena Fischer EUR 3400",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        }
+      ]
+    }
+  },
+  {
+    "id": "email-24-bullet-list",
+    "kind": "email",
+    "input": "employer: Acme Manufacturing GmbH\nPayments:\n- pay Lena Fischer EUR 3400\n- pay Tomas Rivera EUR 2600",
+    "expected": {
+      "employer_name": "Acme Manufacturing GmbH",
+      "funding_usd": "0",
+      "pay_lines": [
+        {
+          "name": "Lena Fischer",
+          "amount": "3400",
+          "currency": "EUR"
+        },
+        {
+          "name": "Tomas Rivera",
+          "amount": "2600",
+          "currency": "EUR"
+        }
+      ]
+    }
+  }
+]

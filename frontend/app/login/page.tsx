@@ -132,7 +132,7 @@ function LoginForm() {
             Use demo account
           </Button>
           <p className="mt-3 text-center text-sm text-sage-500">
-            Signs you in as Vertex Payroll Services, with Acme, Borealis and Cobalt ready to go.
+            Signs you in as Vertex Payroll Services, with Acme, Borealis, Cobalt and Delta ready to go.
           </p>
         </div>
       )}

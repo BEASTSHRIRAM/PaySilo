@@ -186,6 +186,65 @@ def assess_payroll(
     )
 
 
+@dataclass(frozen=True)
+class PartialPayoutPlan:
+    """Which pay lines a short employer's OWN wallet can still fund.
+
+    ``paid`` / ``held`` are indices into the contractor list given to
+    :func:`plan_partial_payout`. ``assessment`` prices only the paid lines
+    (fee-first, with the run fee and reserve floor); ``full`` is the
+    assessment of the whole batch, kept for the exact shortfall.
+    """
+
+    paid: tuple[int, ...]
+    held: tuple[int, ...]
+    assessment: PayrollAssessment
+    full: PayrollAssessment
+
+
+def plan_partial_payout(
+    contractors: list[ContractorPayroll],
+    usd_value: dict[str, Decimal],
+    employer_balance: dict[str, Decimal],
+    policy: PayrollPolicy = PAYROLL_POLICY,
+) -> PartialPayoutPlan | None:
+    """Kit 6 shortfall rule: pay what the employer's own balance supports.
+
+    Smallest lines first, by USD-equivalent (amount + that line's payout
+    fee). Lines are added greedily while ``payroll_usd + run fee + reserve
+    floor <= available``; the rest are held. Returns ``None`` when the whole
+    batch is affordable (nothing to split) or when not even the smallest
+    line fits (hold everything). Only ``employer_balance`` is consulted.
+    """
+    full = assess_payroll(contractors, usd_value, employer_balance, policy)
+    if full.can_run or not contractors:
+        return None
+    cost: dict[int, Decimal] = {}
+    for i, c in enumerate(contractors):
+        ccy = c.currency.upper()
+        line_total = to_decimal(c.amount) + policy.payout_fee(ccy, c.method)
+        cost[i] = line_total * _rate(usd_value, ccy, "for payroll")
+    order = sorted(range(len(contractors)), key=lambda i: (cost[i], i))
+    budget = full.available_usd - policy.platform_fee_per_run_usd - policy.reserve_floor_usd
+    chosen: list[int] = []
+    spent = Decimal("0")
+    for i in order:
+        if spent + cost[i] > budget:
+            break
+        chosen.append(i)
+        spent += cost[i]
+    # Per-currency rounding can differ by a cent from the sum of line costs:
+    # verify with the real assessment and drop the largest line until it fits.
+    while chosen:
+        paid = sorted(chosen)
+        assessment = assess_payroll([contractors[i] for i in paid], usd_value, employer_balance, policy)
+        if assessment.can_run:
+            held = tuple(i for i in range(len(contractors)) if i not in paid)
+            return PartialPayoutPlan(paid=tuple(paid), held=held, assessment=assessment, full=full)
+        chosen.pop()
+    return None
+
+
 def cross_tenant_guard(short_employer: str, other_employer: str) -> str:
     """Tenant isolation message recorded when a cross-tenant draw is refused.
 

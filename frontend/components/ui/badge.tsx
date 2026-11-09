@@ -32,6 +32,10 @@ export function toneForStatus(status: string | null | undefined): BadgeProps["to
     case "SETTLED":
     case "ACTIVE":
       return "success";
+    case "PARTIALLY_PAID":
+    case "SENT_FEE_FAILED":
+    case "SENT_UNRECONCILED":
+    case "ATTEST_PENDING":
     case "HELD_SHORTFALL":
     case "HELD_BY_HUMAN":
     case "RESERVED":

@@ -1,4 +1,4 @@
-"""Demo organization: Vertex Payroll Services and its three clients.
+"""Demo organization: Vertex Payroll Services and its four clients.
 
 Seeded on startup when ``SEED_DEMO=true`` and ``APP_ENV`` is not ``live``.
 Idempotent: nothing is created twice. Funding goes through the runtime, so
@@ -50,6 +50,18 @@ DEMO_EMPLOYERS: list[dict] = [
         "contractors": [
             {"full_name": "Sam Lee", "country": "US", "currency": "USD", "payout_method": "LOCAL",
              "account_number": "000123456789", "routing_code": "021000021", "default_amount": Decimal("1800")},
+        ],
+    },
+    # Kit 6 shortfall story: USD 5,000 pays the smaller EUR line (plus its EUR 12.85 SWIFT fee, the USD 149
+    # run fee and the USD 1,000 reserve) but not both, and not the larger line alone -> smallest-first partial.
+    {
+        "name": "Delta Studios BV", "country": "NL", "contact_name": "Daan de Vries",
+        "contact_email": "daan@deltastudios.example", "funding_usd": Decimal("5000"),
+        "contractors": [
+            {"full_name": "Noor van Dijk", "country": "NL", "currency": "EUR", "payout_method": "SWIFT",
+             "iban": "NL91ABNA0417164300", "swift_code": "ABNANL2AXXX", "default_amount": Decimal("2200")},
+            {"full_name": "Pieter Jansen", "country": "NL", "currency": "EUR", "payout_method": "SWIFT",
+             "iban": "NL02ABNA0123456789", "swift_code": "INGBNL2AXXX", "default_amount": Decimal("3600")},
         ],
     },
 ]

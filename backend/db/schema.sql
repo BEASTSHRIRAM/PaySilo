@@ -22,6 +22,9 @@ CREATE TABLE tap_keys (
 	key_id VARCHAR(80) NOT NULL, 
 	agent_id VARCHAR(80) NOT NULL, 
 	public_key_pem TEXT NOT NULL, 
+	algorithm VARCHAR(20) NOT NULL, 
+	retired_at TIMESTAMP WITH TIME ZONE, 
+	expires_at TIMESTAMP WITH TIME ZONE, 
 	revoked_at TIMESTAMP WITH TIME ZONE, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (key_id)
@@ -38,6 +41,21 @@ CREATE TABLE users (
 	PRIMARY KEY (id), 
 	UNIQUE (email)
 );
+
+CREATE TABLE chat_threads (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	user_id UUID NOT NULL, 
+	title VARCHAR(200) NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_chat_threads_organization_id ON chat_threads (organization_id);
+CREATE INDEX ix_chat_threads_user_id ON chat_threads (user_id);
+CREATE INDEX ix_chat_threads_user_updated ON chat_threads (user_id, updated_at);
 
 CREATE TABLE employers (
 	id UUID NOT NULL, 
@@ -72,6 +90,34 @@ CREATE TABLE memberships (
 	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX ix_memberships_user_id ON memberships (user_id);
+
+CREATE TABLE chat_messages (
+	id BIGSERIAL NOT NULL, 
+	thread_id UUID NOT NULL, 
+	role VARCHAR(16) NOT NULL, 
+	content TEXT NOT NULL, 
+	trace JSONB, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_chat_message_role CHECK (role IN ('user', 'assistant', 'system', 'tool')), 
+	FOREIGN KEY(thread_id) REFERENCES chat_threads (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_chat_messages_thread_id ON chat_messages (thread_id);
+
+CREATE TABLE chat_security_events (
+	id BIGSERIAL NOT NULL, 
+	organization_id UUID NOT NULL, 
+	user_id UUID, 
+	thread_id UUID, 
+	kind VARCHAR(40) NOT NULL, 
+	detail TEXT NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(thread_id) REFERENCES chat_threads (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_chat_security_events_organization_id ON chat_security_events (organization_id);
 
 CREATE TABLE contractors (
 	id UUID NOT NULL, 
@@ -122,7 +168,7 @@ CREATE TABLE payroll_runs (
 	settled_at TIMESTAMP WITH TIME ZONE, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
-	CONSTRAINT ck_run_status CHECK (status IN ('RECEIVED', 'PRICED', 'RESERVED', 'APPROVED', 'SENT', 'SETTLED', 'HELD_SHORTFALL', 'HELD_BY_HUMAN', 'APPROVAL_REJECTED', 'REFUSED', 'FAILED')), 
+	CONSTRAINT ck_run_status CHECK (status IN ('RECEIVED', 'PRICED', 'RESERVED', 'APPROVED', 'SENT', 'SETTLED', 'HELD_SHORTFALL', 'HELD_BY_HUMAN', 'APPROVAL_REJECTED', 'REFUSED', 'FAILED', 'PARTIALLY_PAID', 'SENT_FEE_FAILED', 'SENT_UNRECONCILED', 'ATTEST_PENDING')), 
 	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
 	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
 	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL
@@ -247,6 +293,30 @@ CREATE TABLE settlement_receipts (
 );
 CREATE INDEX ix_settlement_receipts_organization_id ON settlement_receipts (organization_id);
 
+CREATE TABLE source_imports (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	created_by_id UUID, 
+	filename VARCHAR(255) NOT NULL, 
+	content_hash VARCHAR(64) NOT NULL, 
+	content TEXT NOT NULL, 
+	mapping JSONB, 
+	status VARCHAR(16) NOT NULL, 
+	run_id UUID, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_source_import_employer_hash UNIQUE (employer_id, content_hash), 
+	CONSTRAINT ck_source_import_status CHECK (status IN ('PREVIEWED', 'COMMITTED')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(run_id) REFERENCES payroll_runs (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_source_imports_employer_id ON source_imports (employer_id);
+CREATE INDEX ix_source_imports_org_employer ON source_imports (organization_id, employer_id);
+CREATE INDEX ix_source_imports_organization_id ON source_imports (organization_id);
+
 CREATE TABLE ledger_entries (
 	id BIGSERIAL NOT NULL, 
 	transaction_id BIGINT NOT NULL, 
@@ -260,6 +330,20 @@ CREATE TABLE ledger_entries (
 );
 CREATE INDEX ix_ledger_entries_account ON ledger_entries (account);
 CREATE INDEX ix_ledger_entries_transaction_id ON ledger_entries (transaction_id);
+
+CREATE TABLE source_import_rows (
+	id BIGSERIAL NOT NULL, 
+	import_id UUID NOT NULL, 
+	row_number INTEGER NOT NULL, 
+	status VARCHAR(12) NOT NULL, 
+	errors JSONB, 
+	data JSONB, 
+	business_key VARCHAR(500), 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_source_import_row_status CHECK (status IN ('ok', 'error', 'duplicate')), 
+	FOREIGN KEY(import_id) REFERENCES source_imports (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_source_import_rows_import ON source_import_rows (import_id);
 
 -- Ledger guards: one employer per transaction, balanced per currency, append-only.
 CREATE OR REPLACE FUNCTION paysilo_check_ledger_transaction() RETURNS trigger AS $$
@@ -307,8 +391,11 @@ CREATE TRIGGER trg_paysilo_ledger_entries_append_only
 ALTER TABLE "organizations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "tap_keys" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_threads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "employers" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "memberships" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_messages" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_security_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "contractors" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "payroll_runs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "agent_events" ENABLE ROW LEVEL SECURITY;
@@ -317,4 +404,6 @@ ALTER TABLE "approvals" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_transactions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_entries" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "source_import_rows" ENABLE ROW LEVEL SECURITY;

@@ -1,0 +1,1 @@
+{"code":"duplicate_request_id","details":{"source_id":"trf_8e5b1a4d6c9f4e2b7d30","source_type":"transfer_id"},"message":"request_id 'fixture-transfer-request-id' has been used in the past. Please use a different request_id for this request."}

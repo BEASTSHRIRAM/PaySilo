@@ -37,11 +37,38 @@ class Settings(BaseSettings):
     # Airwallex sandbox
     airwallex_client_id: str | None = None
     airwallex_api_key: str | None = None
-    airwallex_base_url: str = "https://api-demo.airwallex.com/api/v1"
+    airwallex_base_url: str = "https://api.sandbox.airwallex.com/api/v1"
+    # Back-off knobs: 429 retries, and how long to keep retrying
+    # ``unconfigured_client_fee`` on a freshly activated account.
+    airwallex_rate_limit_retries: int = 5
+    airwallex_fee_config_retry_seconds: int = 180
+    # Hosted onboarding (live mode only): template id issued by Airwallex for
+    # the platform's hosted onboarding flow, and where the employer returns
+    # afterwards. Without a template, sandbox activation proceeds directly
+    # through the simulation status endpoint.
+    airwallex_hosted_onboarding_template: str | None = None
+    airwallex_onboarding_return_url: str | None = None
 
     # Claude — intake/explanation LLM only
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-5-5"
+
+    # LangGraph checkpointer: a file path (SQLite) for durable paused runs.
+    # When unset, a Postgres DATABASE_URL gives PostgresSaver; otherwise the
+    # in-memory fallback is used and paused runs do not survive a restart.
+    checkpoint_path: str | None = None
+
+    # Silo chat LLM (provider-agnostic). The selected provider's key decides
+    # whether the real model is used; with no key the chat falls back to a
+    # deterministic responder over the same tools.
+    llm_provider: Literal["anthropic", "openai", "groq", "meta"] = "anthropic"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    meta_api_key: str | None = None
+    meta_model: str = "llama-3.3-70b-instruct"
+    meta_base_url: str = "https://api.llama.com/v1"
 
     # Database: any SQLAlchemy URL. Supabase: paste the Postgres connection
     # string. Unset -> a local SQLite file so the demo needs nothing.
@@ -55,10 +82,20 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     seed_demo: bool = True
 
+    # Visa TAP signing key. TAP_PRIVATE_KEY accepts PEM text or base64
+    # (base64-encoded PEM, or a base64 raw 32-byte Ed25519 seed). When set,
+    # the same key — and a stable, public-key-derived keyid — is used in
+    # every process, so signatures survive restarts. When unset, an
+    # ephemeral per-process dev key is generated and logged as such.
+    tap_private_key: str | None = None
+    tap_key_id: str | None = None  # optional explicit keyid override
+    tap_agent_id: str = "paysilo-agent"
+
     # Metal L2 testnet attestation (fails closed until all three are set)
     metal_rpc_url: str | None = None
     metal_private_key: str | None = None
     metal_registry_address: str | None = None
+    metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
     @property
     def demo_mode(self) -> bool:

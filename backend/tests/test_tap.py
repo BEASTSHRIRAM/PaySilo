@@ -1,16 +1,44 @@
+import base64
 import time
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.partners.tap import (
+    TAP_ALGORITHM,
     TapAgentRegistry,
     TapReplayGuard,
+    derive_key_id,
     generate_tap_agent,
+    load_tap_agent,
     sign_request,
     verify_request,
+)
+from app.partners.tap_signing import (
+    TapSigner,
+    registry_from_tap_key_rows,
+    signer_from_key_material,
+    verify_stored_approval,
 )
 
 AUTHORITY = "api-demo.airwallex.com"
 PATH = "/api/v1/transfers/create"
 BODY = '{"employer":"Acme Manufacturing GmbH","amount":"3400.00","currency":"EUR"}'
+
+
+def _private_pem(private: Ed25519PrivateKey) -> str:
+    return private.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode("ascii")
+
+
+def _raw_seed_b64(private: Ed25519PrivateKey) -> str:
+    return base64.b64encode(private.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+        serialization.NoEncryption())).decode("ascii")
 
 
 def _setup():
@@ -79,3 +107,328 @@ def test_covered_digest_without_body_fails_closed():
                             registry=registry, body=None)
     assert result.valid is False
     assert result.code == "missing_body"
+
+
+# ---------------------------------------------------------------------------
+# Persistent keys from TAP_PRIVATE_KEY (Issue #8)
+# ---------------------------------------------------------------------------
+
+def test_load_tap_agent_accepts_pem_base64_pem_and_raw_seed():
+    private = Ed25519PrivateKey.generate()
+    pem = _private_pem(private)
+    for material in (pem, base64.b64encode(pem.encode()).decode(), _raw_seed_b64(private)):
+        key = load_tap_agent("paysilo-agent", material)
+        assert key.public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) == \
+            private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
+def test_load_tap_agent_rejects_garbage():
+    with pytest.raises(ValueError):
+        load_tap_agent("paysilo-agent", "not-a-key!!")
+    with pytest.raises(ValueError):
+        load_tap_agent("paysilo-agent", "   ")
+
+
+def test_env_key_restart_persistence_same_keyid_and_verifies():
+    """Simulated restart: a fresh signer/registry built from the same
+    TAP_PRIVATE_KEY material must verify signatures made before the restart."""
+    private = Ed25519PrivateKey.generate()
+    material = base64.b64encode(_private_pem(private).encode()).decode()
+
+    before = signer_from_key_material("paysilo-agent", material)
+    envelope = before.sign_approval(
+        run_id="run-1", employer_key="emp_acme", decision="approve",
+        assessment={"required_usd": "6754.88", "total_required": "6025.70", "payroll_currency": "EUR"},
+        pay_lines=[{"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"}],
+        decided_by="ops@example.com")
+
+    after = signer_from_key_material("paysilo-agent", material)  # "restarted" process state
+    assert after.key.key_id == before.key.key_id
+    assert after.key.key_id == derive_key_id("paysilo-agent", private.public_key())
+    result = after.verify(envelope, {
+        "type": "payroll.approval", "run_id": "run-1", "employer": "emp_acme", "decision": "approve",
+        "decided_by": "ops@example.com", "required_usd": "6754.88", "total_required": "6025.70",
+        "payroll_currency": "EUR",
+        "pay_lines": [{"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"}]})
+    assert result.valid is True and result.key_id == after.key.key_id
+
+
+def test_settings_read_tap_private_key_from_env(monkeypatch):
+    monkeypatch.setenv("TAP_PRIVATE_KEY", _raw_seed_b64(Ed25519PrivateKey.generate()))
+    from app.config import Settings
+
+    settings = Settings()
+    assert settings.tap_private_key is not None
+    key = load_tap_agent(settings.tap_agent_id, settings.tap_private_key,
+                         key_id=settings.tap_key_id)
+    assert key.key_id.startswith("paysilo-agent-")
+
+
+# ---------------------------------------------------------------------------
+# Key rotation (Issue #8)
+# ---------------------------------------------------------------------------
+
+def test_key_rotation_old_signatures_still_verify():
+    class Row:  # minimal tap_keys row stand-in
+        def __init__(self, key):
+            self.key_id, self.agent_id, self.public_key_pem = key.key_id, key.agent_id, key.public_key_pem()
+
+    old_signer = TapSigner(key=generate_tap_agent("paysilo-agent", key_id="paysilo-agent-old"))
+    envelope = old_signer.sign_payout(
+        run_id="run-9", employer_key="emp_acme", account_id="acct_1", index=0,
+        line={"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"})
+
+    # Rotation: a new active key signs from now on; the registry is rebuilt
+    # from the tap_keys table, which still holds the retired key.
+    new_signer = TapSigner(key=generate_tap_agent("paysilo-agent", key_id="paysilo-agent-new"))
+    registry = registry_from_tap_key_rows([Row(old_signer.key), Row(new_signer.key)])
+    assert registry.key_ids() == ["paysilo-agent-new", "paysilo-agent-old"]
+
+    result = verify_request(
+        method="POST", authority="agent.paysilo.app", path=envelope.path, headers=envelope.headers,
+        registry=registry, body=envelope.body)
+    assert result.valid is True and result.key_id == "paysilo-agent-old"
+
+    fresh = new_signer.sign_payout(
+        run_id="run-9", employer_key="emp_acme", account_id="acct_1", index=0,
+        line={"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"})
+    assert 'keyid="paysilo-agent-new"' in fresh.headers["Signature-Input"]
+    assert verify_request(method="POST", authority="agent.paysilo.app", path=fresh.path,
+                          headers=fresh.headers, registry=registry, body=fresh.body).valid is True
+
+
+# ---------------------------------------------------------------------------
+# Stored-approval verification from DB-shaped rows (Issue #8)
+# ---------------------------------------------------------------------------
+
+class _Row:
+    def __init__(self, key):
+        self.key_id, self.agent_id, self.public_key_pem = key.key_id, key.agent_id, key.public_key_pem()
+
+
+class _ApprovalRow:
+    def __init__(self, envelope, run_id):
+        self.run_id = run_id
+        self.signed_body = envelope.body
+        self.tap_signature_input = envelope.headers["Signature-Input"]
+        self.tap_signature = envelope.headers["Signature"]
+        self.created_at = datetime.now(UTC)
+
+
+def _stored_approval():
+    signer = TapSigner(key=generate_tap_agent("paysilo-agent", key_id="paysilo-agent-stored"))
+    run_id = uuid.uuid4()
+    envelope = signer.sign_approval(
+        run_id=str(run_id), employer_key="emp_acme", decision="approve",
+        assessment={"required_usd": "6754.88", "total_required": "6025.70", "payroll_currency": "EUR"},
+        pay_lines=[{"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"}],
+        decided_by="ops@example.com")
+    return signer, _ApprovalRow(envelope, run_id)
+
+
+def test_verify_stored_approval_from_db_rows():
+    signer, approval = _stored_approval()
+    registry = registry_from_tap_key_rows([_Row(signer.key)])
+    result = verify_stored_approval(approval, registry)
+    assert result.valid is True and result.code == "ok" and result.key_id == "paysilo-agent-stored"
+
+
+def test_verify_stored_approval_tampered_body_rejected():
+    signer, approval = _stored_approval()
+    approval.signed_body = approval.signed_body.replace("3400.00", "9999.00")
+    result = verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)]))
+    assert result.valid is False
+    assert result.code in {"digest_mismatch", "bad_signature"}
+
+
+def test_verify_stored_approval_missing_signature():
+    signer, approval = _stored_approval()
+    approval.tap_signature = None
+    result = verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)]))
+    assert result.valid is False and result.code == "missing_signature"
+
+
+def test_verify_stored_approval_unknown_key_rejected():
+    _, approval = _stored_approval()
+    other = generate_tap_agent("paysilo-agent", key_id="paysilo-agent-other")
+    result = verify_stored_approval(approval, registry_from_tap_key_rows([_Row(other)]))
+    assert result.valid is False and result.code == "unregistered_agent"
+    assert TAP_ALGORITHM == "ed25519"
+
+
+# ---------------------------------------------------------------------------
+# API: /.well-known/tap-keys + POST /tap/verify (Issue #8)
+# ---------------------------------------------------------------------------
+
+def _settled_run_with_approval(client) -> dict:
+    from app.services.seed import DEMO_EMAIL, DEMO_PASSWORD
+
+    client.post("/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})
+    employers = {e["name"]: e for e in client.get("/employers").json()}
+    acme = client.get(f"/employers/{employers['Acme Manufacturing GmbH']['id']}").json()
+    run = client.post("/runs", json={"employer_id": acme["id"],
+                                     "lines": [{"contractor_id": c["id"]} for c in acme["contractors"]]}).json()
+    return client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
+
+
+def test_well_known_tap_keys_publishes_active_key(demo_client):
+    body = demo_client.get("/.well-known/tap-keys").json()
+    assert len(body["keys"]) == 1
+    key = body["keys"][0]
+    assert key["algorithm"] == "ed25519" and key["status"] == "active"
+    assert key["keyid"] and key["public_key"] and "BEGIN PUBLIC KEY" in key["public_key_pem"]
+
+
+def test_tap_verify_endpoint_verifies_stored_approval(demo_client):
+    done = _settled_run_with_approval(demo_client)
+    by_run = demo_client.post("/tap/verify", json={"run_id": done["id"]})
+    assert by_run.status_code == 200, by_run.text
+    result = by_run.json()
+    assert result["verified"] is True and result["code"] == "ok"
+    assert result["keyid"] == done["approvals"][0]["tap_key_id"]
+    assert result["run_id"] == done["id"]
+
+
+def test_tap_verify_requires_auth(client):
+    assert client.post("/tap/verify", json={"run_id": str(uuid.uuid4())}).status_code == 401
+
+
+def test_tap_verify_requires_exactly_one_id(demo_client):
+    both = demo_client.post("/tap/verify", json={"run_id": str(uuid.uuid4()),
+                                                 "approval_id": str(uuid.uuid4())})
+    assert both.status_code == 422
+    neither = demo_client.post("/tap/verify", json={})
+    assert neither.status_code == 422
+
+
+def test_tap_verify_other_tenant_gets_404(demo_client):
+    done = _settled_run_with_approval(demo_client)
+    demo_client.post("/auth/logout")
+    demo_client.post("/auth/signup", json={
+        "organization": {"name": "Other Org", "country": "gb", "base_currency": "usd"},
+        "admin": {"full_name": "Olive Other", "email": "olive@other.io", "password": "Other2026x"}})
+    r = demo_client.post("/tap/verify", json={"run_id": done["id"]})
+    assert r.status_code == 404  # tenant isolation: not a verification result
+
+
+# ---------------------------------------------------------------------------
+# v3: key lifecycle, freshness at created time, run-body comparison
+# ---------------------------------------------------------------------------
+
+def test_live_mode_refuses_ephemeral_tap_key():
+    from app.config import Settings
+    from app.partners.tap_signing import TapKeyError, signer_for_settings
+
+    live = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                    tap_private_key=None, _env_file=None)
+    assert live.demo_mode is False
+    with pytest.raises(TapKeyError, match="TAP_PRIVATE_KEY is required"):
+        signer_for_settings(live)
+    demo = Settings(app_env="demo", tap_private_key=None, _env_file=None)
+    signer, persistent = signer_for_settings(demo)
+    assert persistent is False and signer.key.key_id
+
+
+def test_live_mode_with_key_is_persistent_and_bad_key_error_hides_material():
+    from app.config import Settings
+    from app.partners.tap_signing import TapKeyError, signer_for_settings
+
+    raw = Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+    ok = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                  tap_private_key=base64.b64encode(raw).decode(), _env_file=None)
+    assert signer_for_settings(ok)[1] is True
+    bad = Settings(app_env="live", airwallex_client_id="c", airwallex_api_key="k",
+                   tap_private_key="not-a-key!!", _env_file=None)
+    with pytest.raises(TapKeyError) as exc:
+        signer_for_settings(bad)
+    assert "not-a-key" not in str(exc.value)
+
+
+def _session():
+    from app.db import Database
+
+    db = Database.from_url("sqlite://")
+    db.create_schema()
+    return db.sessionmaker()
+
+
+def test_register_active_key_retires_superseded_and_rejects_key_id_reuse():
+    from app.db.models import TapKey
+    from app.partners.tap_signing import TapKeyError, register_active_key
+
+    old = generate_tap_agent("paysilo-agent", key_id="k-old")
+    new = generate_tap_agent("paysilo-agent", key_id="k-new")
+    impostor = generate_tap_agent("paysilo-agent", key_id="k-old")
+    with _session() as s:
+        register_active_key(s, old)
+        s.commit()
+        register_active_key(s, new)
+        s.commit()
+        assert s.get(TapKey, "k-old").retired_at is not None
+        assert s.get(TapKey, "k-new").retired_at is None
+        with pytest.raises(TapKeyError, match="different public key"):
+            register_active_key(s, impostor)
+        # same key again is fine (restart) and re-activates, retiring the other.
+        register_active_key(s, old)
+        s.commit()
+        assert s.get(TapKey, "k-old").retired_at is None
+        assert s.get(TapKey, "k-new").retired_at is not None
+
+
+def test_registry_skips_revoked_and_expired_rows():
+    from datetime import timedelta
+
+    good = generate_tap_agent("a", key_id="good")
+    revoked = generate_tap_agent("a", key_id="revoked")
+    expired = generate_tap_agent("a", key_id="expired")
+    rows = [_Row(good), _Row(revoked), _Row(expired)]
+    rows[1].revoked_at = datetime.now(UTC)
+    rows[2].expires_at = datetime.now(UTC) - timedelta(days=1)
+    registry = registry_from_tap_key_rows(rows)
+    assert registry.key_ids() == ["good"]
+
+
+def test_stored_approval_freshness_uses_signature_created_not_insert_time():
+    signer = TapSigner(key=generate_tap_agent("paysilo-agent", key_id="paysilo-agent-stored"))
+    run_id = uuid.uuid4()
+    env = signer.sign_approval(
+        run_id=str(run_id), employer_key="e", decision="approve",
+        assessment={"required_usd": "1.00", "total_required": "1.00", "payroll_currency": "USD"},
+        pay_lines=[{"name": "A", "amount": "1.00", "currency": "USD"}], decided_by="x@y.z")
+    approval = _ApprovalRow(env, run_id)
+    # A bogus insert time years later must not make a valid signature "expired"
+    approval.created_at = datetime(2035, 1, 1, tzinfo=UTC)
+    assert verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)])).valid is True
+    approval.created_at = None
+    assert verify_stored_approval(approval, registry_from_tap_key_rows([_Row(signer.key)])).valid is True
+
+
+def test_compare_signed_body_to_run():
+    from app.partners.tap_signing import compare_signed_body_to_run
+
+    signer, approval = _stored_approval()
+    assessment = {"required_usd": "6754.88", "total_required": "6025.70", "payroll_currency": "EUR"}
+    lines = [{"name": "Lena Fischer", "amount": "3400.00", "currency": "EUR", "method": "SWIFT"}]
+    run_id = str(approval.run_id)
+    assert compare_signed_body_to_run(approval.signed_body, run_id=run_id, assessment=assessment,
+                                      pay_lines=lines) is None
+    assert "pay line 1" in compare_signed_body_to_run(
+        approval.signed_body, run_id=run_id, assessment=assessment,
+        pay_lines=[{**lines[0], "amount": "3500.00"}])
+    assert "required_usd" in compare_signed_body_to_run(
+        approval.signed_body, run_id=run_id, assessment={**assessment, "required_usd": "1.00"}, pay_lines=lines)
+    assert compare_signed_body_to_run(approval.signed_body, run_id=run_id, assessment=assessment,
+                                      pay_lines=lines + lines)
+
+
+def test_tap_verify_endpoint_flags_run_that_changed_after_signing(demo_client):
+    from app.db.models import PayLine
+
+    done = _settled_run_with_approval(demo_client)
+    with demo_client.app.state.db.sessionmaker() as s:
+        line = s.query(PayLine).filter(PayLine.run_id == uuid.UUID(done["id"])).first()
+        line.amount = line.amount + 1
+        s.commit()
+    result = demo_client.post("/tap/verify", json={"run_id": done["id"]}).json()
+    assert result["verified"] is False and result["code"] == "run_mismatch"

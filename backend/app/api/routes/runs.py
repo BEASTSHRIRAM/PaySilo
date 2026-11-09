@@ -64,9 +64,13 @@ def start_run(body: RunIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES))
                 raise HTTPException(422,
                                     f"No amount given for {contractor.full_name} and no default amount on file.")
             pay_lines.append(runtime.contractor_line(contractor, amount))
-    run = runtime.start_run(db, org=tenant.organization, user=tenant.user, employer=employer, pay_lines=pay_lines,
-                            raw_input=body.instruction if not body.lines else None,
-                            source="manual" if body.lines else "text", period_label=body.period_label)
+    try:
+        run = runtime.start_run(db, org=tenant.organization, user=tenant.user, employer=employer,
+                                pay_lines=pay_lines, raw_input=body.instruction if not body.lines else None,
+                                source="manual" if body.lines else "text", period_label=body.period_label)
+    except RuntimeConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run.id))
 

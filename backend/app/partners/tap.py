@@ -14,6 +14,7 @@ be redirected to another employer.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import re
 import time
@@ -27,12 +28,41 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 TAP_TAG = "agent-payer-auth"
+TAP_ALGORITHM = "ed25519"
 DEFAULT_TTL_SECONDS = 300
 DEFAULT_SKEW_SECONDS = 60
 
 
 def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
+
+
+def public_key_pem(public_key: Ed25519PublicKey) -> str:
+    return public_key.public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode("ascii")
+
+
+def public_key_raw(public_key: Ed25519PublicKey) -> bytes:
+    return public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
+def load_public_key_pem(pem: str) -> Ed25519PublicKey:
+    key = serialization.load_pem_public_key(pem.encode("ascii"))
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("TAP public key is not an Ed25519 key.")
+    return key
+
+
+def derive_key_id(agent_id: str, public_key: Ed25519PublicKey) -> str:
+    """Stable keyid for a persistent key: ``<agent_id>-<sha256(pubkey)[:16]>``.
+
+    Derived from the public key only, so the same ``TAP_PRIVATE_KEY``
+    produces the same keyid in every process and across restarts — that is
+    what makes signatures survive a backend restart.
+    """
+    fingerprint = hashlib.sha256(public_key_raw(public_key)).hexdigest()[:16]
+    return f"{agent_id}-{fingerprint}"
 
 
 @dataclass
@@ -43,9 +73,11 @@ class TapAgentKey:
     public_key: Ed25519PublicKey
 
     def public_key_pem(self) -> str:
-        return self.public_key.public_bytes(
-            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
-        ).decode("ascii")
+        return public_key_pem(self.public_key)
+
+    def public_key_b64(self) -> str:
+        """Raw 32-byte Ed25519 public key, base64 — the compact published form."""
+        return _b64(public_key_raw(self.public_key))
 
 
 def generate_tap_agent(agent_id: str, key_id: str | None = None) -> TapAgentKey:
@@ -58,6 +90,57 @@ def generate_tap_agent(agent_id: str, key_id: str | None = None) -> TapAgentKey:
     )
 
 
+def _load_private_key_bytes(data: bytes) -> Ed25519PrivateKey:
+    """Load an Ed25519 private key from PEM, DER, or a raw 32-byte seed."""
+    if b"-----BEGIN" in data:
+        key = serialization.load_pem_private_key(data, password=None)
+    elif len(data) == 32:
+        return Ed25519PrivateKey.from_private_bytes(data)
+    else:
+        try:
+            key = serialization.load_der_private_key(data, password=None)
+        except ValueError:
+            key = serialization.load_pem_private_key(data, password=None)
+    if not isinstance(key, Ed25519PrivateKey):
+        raise ValueError("TAP_PRIVATE_KEY is not an Ed25519 private key.")
+    return key
+
+
+def load_tap_agent(agent_id: str, private_key_material: str, key_id: str | None = None) -> TapAgentKey:
+    """Build a :class:`TapAgentKey` from ``TAP_PRIVATE_KEY`` material.
+
+    Accepted forms (so any secret manager can supply it):
+
+    - PEM text (``-----BEGIN PRIVATE KEY-----`` …), possibly with literal
+      ``\\n`` escapes instead of real newlines;
+    - base64 of that PEM text;
+    - base64 of the raw 32-byte Ed25519 seed (or of DER private-key bytes).
+
+    The keyid defaults to :func:`derive_key_id`, so it is stable across
+    restarts for the same key material.
+    """
+    material = private_key_material.strip()
+    if not material:
+        raise ValueError("TAP_PRIVATE_KEY is empty.")
+    if "-----BEGIN" in material:
+        raw = material.replace("\\n", "\n").encode("ascii")
+    else:
+        try:
+            raw = base64.b64decode(material, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                "TAP_PRIVATE_KEY must be PEM text, base64-encoded PEM, or a base64 raw Ed25519 seed."
+            ) from exc
+    private = _load_private_key_bytes(raw)
+    public = private.public_key()
+    return TapAgentKey(
+        agent_id=agent_id,
+        key_id=key_id or derive_key_id(agent_id, public),
+        private_key=private,
+        public_key=public,
+    )
+
+
 def content_digest(body: str) -> str:
     """RFC 9421 ``Content-Digest`` value binding a request body (sha-256)."""
     return f"sha-256=:{_b64(hashlib.sha256(body.encode('utf-8')).digest())}:"
@@ -65,15 +148,29 @@ def content_digest(body: str) -> str:
 
 @dataclass
 class TapAgentRegistry:
-    """keyId -> public key, standing in for Visa's Agent Registry."""
+    """keyId -> public key, standing in for Visa's Agent Registry.
+
+    Holds every key PaySilo has ever signed with that is still verifiable:
+    the active key plus retired keys loaded from the ``tap_keys`` table, so
+    signatures made before a rotation keep verifying.
+    """
 
     _agents: dict[str, tuple[str, Ed25519PublicKey]] = field(default_factory=dict)
 
     def register(self, key: TapAgentKey) -> None:
         self._agents[key.key_id] = (key.agent_id, key.public_key)
 
+    def register_public(self, *, key_id: str, agent_id: str, public_key: Ed25519PublicKey) -> None:
+        self._agents[key_id] = (agent_id, public_key)
+
+    def register_pem(self, *, key_id: str, agent_id: str, pem: str) -> None:
+        self.register_public(key_id=key_id, agent_id=agent_id, public_key=load_public_key_pem(pem))
+
     def lookup(self, key_id: str) -> tuple[str, Ed25519PublicKey] | None:
         return self._agents.get(key_id)
+
+    def key_ids(self) -> list[str]:
+        return sorted(self._agents)
 
 
 @dataclass
@@ -139,6 +236,7 @@ class TapVerifyResult:
     valid: bool
     code: str = "ok"
     agent_id: str | None = None
+    key_id: str | None = None
     nonce: str | None = None
     detail: str = ""
 
@@ -235,4 +333,4 @@ def verify_request(*, method: str, authority: str, path: str, headers: dict[str,
     if replay_guard is not None and not replay_guard.record(nonce):
         return TapVerifyResult(False, "replayed", detail=f"Nonce {nonce} was already used; replay refused.")
 
-    return TapVerifyResult(True, "ok", agent_id=agent_id, nonce=nonce)
+    return TapVerifyResult(True, "ok", agent_id=agent_id, key_id=key_id, nonce=nonce)

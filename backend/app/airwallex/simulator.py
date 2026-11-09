@@ -94,6 +94,24 @@ class AirwallexSimulator:
 
         return self._once(request_id, _create)
 
+    def get_connected_account(self, *, account_id: str) -> dict:
+        acct = self._account(account_id)
+        return {"id": account_id, "business_name": acct["name"], "status": acct["status"]}
+
+    def create_hosted_onboarding_link(self, *, account_id: str, template: str, return_url: str = "") -> dict:
+        self._account(account_id)
+        # Demo mode needs no onboarding: simulator accounts start ACTIVE.
+        return {"id": f"hosted_{account_id}", "account_id": account_id,
+                "status": "NOT_REQUIRED", "url": ""}
+
+    def authorize_hosted_onboarding_link(self, *, flow_id: str) -> dict:
+        return {"id": flow_id, "status": "NOT_REQUIRED", "url": ""}
+
+    def activate_connected_account(self, *, account_id: str) -> dict:
+        acct = self._account(account_id)
+        acct["status"] = "ACTIVE"
+        return {"id": account_id, "business_name": acct["name"], "status": "ACTIVE"}
+
     def restore_account(self, account_id: str, *, business_name: str,
                         balances: dict[str, Decimal] | None = None) -> None:
         """Rehydrate an account (e.g. from the persisted ledger after a restart)."""

@@ -1,0 +1,1 @@
+{"code":"request_id_duplicate","details":{"source_id":"chg_2d6a9c4f7b1e4a8d0c36","source_type":"charge_id"},"message":"request_id 'fixture-charge-request-id' has been used in the past. Please use a different request_id for this request."}

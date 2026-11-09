@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ...agents.demo import run_demo
 from ...agents.graph import AGENTS
 from ...config import Settings
-from ...db.models import Employer, PayrollRun
-from ...services.runtime import PlatformRuntime
+from ...db.models import Employer, LedgerTransaction, PayrollRun
+from ...services.runtime import MONEY_MOVED, PlatformRuntime
 from ..deps import Tenant, current_tenant, get_db, get_runtime, get_settings
 from ..schemas import OrganizationOut, OverviewOut
 from ..serializers import employer_out
@@ -61,10 +61,39 @@ def overview(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get
         employers=[employer_out(db, runtime, e) for e in employers],
         platform_fees=runtime.platform_fees(db, org_id),
         runs_total=count(),
-        runs_settled=count(PayrollRun.status == "SETTLED"),
+        runs_settled=count(PayrollRun.status.in_(MONEY_MOVED)),  # money moved: incl. partial / post-payout follow-ups
         runs_waiting=count(PayrollRun.pending_interrupt.is_not(None)),
         mode="demo" if settings.demo_mode else "live",
     )
+
+
+def _platform_journals(db: Session, tenant: Tenant) -> list[dict]:
+    """Platform book: every transaction in the caller's organization that
+    touches the ``platform`` namespace (fee revenue). Full transaction
+    lines are returned so the balanced flag is the computed truth."""
+    from .bedata import journals_for
+
+    txns = db.scalars(
+        select(LedgerTransaction).options(selectinload(LedgerTransaction.entries))
+        .where(LedgerTransaction.organization_id == tenant.organization.id)
+        .order_by(LedgerTransaction.id)).all()
+    platform_txns = [t for t in txns if any(e.namespace == "platform" for e in t.entries)]
+    return journals_for(db, platform_txns)
+
+
+@router.get("/platform/journals")
+def platform_journals(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
+    """Platform book: every transaction in the caller's organization that
+    touches the ``platform`` namespace (fee revenue)."""
+    return _platform_journals(db, tenant)
+
+
+@router.get("/platform/journals/export")
+def platform_journals_export(format: str = Query("json", pattern="^(csv|json)$"),
+                             tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
+    from .bedata import journals_download
+
+    return journals_download(_platform_journals(db, tenant), format, f"platform-journals-{tenant.organization.id}")
 
 
 @router.post("/demo/kit6")

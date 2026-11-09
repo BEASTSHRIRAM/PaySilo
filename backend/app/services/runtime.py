@@ -11,13 +11,16 @@ and ledger mirror are process-local). Run PaySilo with a single worker.
 
 Durability: the database is the source of truth. In demo mode the
 simulator is rehydrated from the persisted ledger on startup, so balances
-survive restarts. A run paused at an approval lives in the in-process
-LangGraph checkpointer; if the server restarts mid-pause the run is marked
-not resumable and a new run must be started.
+survive restarts. A run paused at an approval lives in the LangGraph
+checkpointer chosen by :func:`app.agents.checkpoint.build_checkpointer`:
+with a Postgres ``DATABASE_URL`` or a configured ``CHECKPOINT_PATH`` the
+pause is durable and the run resumes after a restart; with the in-memory
+fallback it is marked not resumable and a new run must be started.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import threading
@@ -29,8 +32,10 @@ from langgraph.types import Command
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..agents.graph import Services, build_graph, initial_state
+from ..agents.checkpoint import build_checkpointer
+from ..agents.graph import Services, build_graph, initial_state, resume_failed
 from ..airwallex.client import AirwallexClient
+from ..airwallex.rates import LiveFxRateProvider
 from ..airwallex.recording import RecordingAirwallex
 from ..airwallex.simulator import PLATFORM_ACCOUNT_ID, USD_VALUE, AirwallexSimulator, request_id_for
 from ..config import Settings
@@ -52,13 +57,22 @@ from ..db.models import (
 )
 from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
-from ..partners.metal import MockSettlementChain
-from ..partners.tap import generate_tap_agent
-from ..partners.tap_signing import TapSigner
+from ..partners.metal import MetalL2SettlementChain, MockSettlementChain
+from ..partners.tap import load_public_key_pem, public_key_raw
+from ..partners.tap_signing import (
+    TapSigner,
+    registry_from_tap_key_rows,
+    register_active_key,
+    signer_for_settings,
+    verify_stored_approval,
+)
 
 logger = logging.getLogger(__name__)
 
-TERMINAL = {"SETTLED", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED"}
+TERMINAL = {"SETTLED", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED", "PARTIALLY_PAID",
+            "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
+# Money moved and the run is closed (possibly with a follow-up still owed).
+MONEY_MOVED = {"SETTLED", "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
 _UUID_IN_MEMO = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
 
 
@@ -93,15 +107,45 @@ class PlatformRuntime:
         self.settings = settings
         self.db = db
         self.lock = threading.RLock()
+        # Live mode refuses to start without TAP_PRIVATE_KEY (TapKeyError); demo
+        # mode falls back to an ephemeral key that will not verify after a restart.
+        self.signer, self.tap_key_persistent = signer_for_settings(settings)
+        if self.tap_key_persistent:
+            logger.info("Visa TAP: persistent signing key loaded from TAP_PRIVATE_KEY (keyid %s).",
+                        self.signer.key.key_id)
+        else:
+            logger.warning(
+                "Visa TAP: TAP_PRIVATE_KEY is not set - using an ephemeral dev key (keyid %s). "
+                "Signatures from previous processes will not verify after a restart.",
+                self.signer.key.key_id)
         self.recorder = RecordingAirwallex(
             AirwallexSimulator() if settings.demo_mode else AirwallexClient(settings))
-        key = generate_tap_agent("paysilo-agent", key_id=f"paysilo-agent-{uuid.uuid4().hex[:12]}")
-        self.signer = TapSigner(key=key)
         self.ledger = Ledger()
-        self.chain = MockSettlementChain()
+        if settings.demo_mode:
+            # Demo pricing uses the static demo table, as before.
+            usd_rates, rate_provider = dict(USD_VALUE), None
+        else:
+            # Live pricing uses ONLY rates fetched from FX quotes on the
+            # employer's own account. The base table holds just the USD
+            # identity rate; the provider refuses when a rate is missing.
+            usd_rates = {"USD": Decimal("1")}
+            rate_provider = LiveFxRateProvider(self.recorder)
+        if settings.metal_rpc_url and settings.metal_private_key and settings.metal_registry_address:
+            # Live Metal L2 leg (fails closed on any RPC error). The mock
+            # chain stays the default whenever Metal is not fully configured.
+            self.chain = MetalL2SettlementChain(
+                rpc_url=settings.metal_rpc_url, private_key=settings.metal_private_key,
+                registry_address=settings.metal_registry_address,
+                explorer_url=settings.metal_explorer_url)
+            logger.info("Metal: live L2 attestation configured (registry %s).",
+                        settings.metal_registry_address)
+        else:
+            self.chain = MockSettlementChain()
         self.services = Services(airwallex=self.recorder, ledger=self.ledger, chain=self.chain,
-                                 usd_rates=dict(USD_VALUE), tap=self.signer)
-        self.graph = build_graph(self.services)
+                                 usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer)
+        self.checkpointer = build_checkpointer(database_url=settings.database_url,
+                                               checkpoint_path=settings.checkpoint_path)
+        self.graph = build_graph(self.services, checkpointer=self.checkpointer)
         self._live_threads: set[str] = set()
         self._ledger_synced = 0
         self._calls_synced = 0
@@ -109,10 +153,112 @@ class PlatformRuntime:
     # ------------------------------------------------------------------ boot
     def startup(self) -> None:
         with self.db.sessionmaker() as s:
-            s.merge(TapKey(key_id=self.signer.key.key_id, agent_id=self.signer.key.agent_id,
-                           public_key_pem=self.signer.key.public_key_pem()))
+            # Register the active public key (retiring any previous one), then
+            # load every non-revoked, non-expired key (active + retired) into the
+            # verification registry so signatures made under a retired keyid keep
+            # verifying after a rotation.
+            register_active_key(s, self.signer.key)
             s.commit()
+            rows = s.scalars(select(TapKey)).all()
+            registry = registry_from_tap_key_rows(rows)
+            if registry.lookup(self.signer.key.key_id) is None:
+                registry.register(self.signer.key)
+            self.signer.registry = registry
             self._hydrate(s)
+            self._seed_chain(s)
+
+    def _seed_chain(self, s: Session) -> None:
+        """Continue the settlement hash chain across restarts.
+
+        An in-process chain starts at genesis; seeding it with the last
+        persisted receipt keeps ``prev_hash`` / ``index`` continuous. Skipped
+        when the chain has no ``seed(prev_hash, index)`` or nothing is persisted.
+        """
+        seed = getattr(self.chain, "seed", None)
+        if not callable(seed):
+            return
+        chain_name = "mock" if isinstance(self.chain, MockSettlementChain) else "metal-l2"
+        last = s.scalar(select(SettlementReceipt).where(SettlementReceipt.chain == chain_name)
+                        .order_by(SettlementReceipt.chain_index.desc(), SettlementReceipt.created_at.desc())
+                        .limit(1))
+        if last is not None:
+            seed(prev_hash=last.receipt_hash, index=last.chain_index + 1)
+            logger.info("Settlement chain %s seeded from receipt #%d", chain_name, last.chain_index)
+
+    # ------------------------------------------------------------- Visa TAP
+    @staticmethod
+    def _tap_key_is_published(row: TapKey, now: datetime) -> bool:
+        if row.revoked_at is not None:
+            return False
+        if row.expires_at is not None:
+            expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=UTC)
+            if expires <= now:
+                return False
+        return True
+
+    def published_tap_keys(self, s: Session) -> list[TapKey]:
+        """Keys served at ``/.well-known/tap-keys``: active + retired-but-verifiable."""
+        now = datetime.now(UTC)
+        rows = s.scalars(select(TapKey).order_by(TapKey.created_at)).all()
+        return [r for r in rows if self._tap_key_is_published(r, now)]
+
+    def tap_keys_payload(self, s: Session) -> dict:
+        keys = []
+        for row in self.published_tap_keys(s):
+            try:
+                raw_key = base64.b64encode(public_key_raw(load_public_key_pem(row.public_key_pem))).decode("ascii")
+            except Exception:
+                logger.warning("Visa TAP: tap_keys row %s has an unusable public key; not published.", row.key_id)
+                continue
+            keys.append({
+                "keyid": row.key_id,
+                "agent_id": row.agent_id,
+                "algorithm": row.algorithm,
+                "status": "retired" if row.retired_at is not None else "active",
+                "public_key": raw_key,
+                "public_key_pem": row.public_key_pem,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "retired_at": row.retired_at.isoformat() if row.retired_at else None,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+            })
+        return {"keys": keys}
+
+    def verify_stored_approval(self, s: Session, organization_id: uuid.UUID, *,
+                               approval_id: uuid.UUID | None = None,
+                               run_id: uuid.UUID | None = None) -> dict | None:
+        """Verify one stored approval for the caller's organization only.
+
+        Returns ``None`` when no matching approval exists in that
+        organization (tenant isolation: another org's approval is a 404,
+        never a verification result). The registry is rebuilt from the
+        ``tap_keys`` table, so this works in a fresh process after a
+        restart as long as the signing key was persistent.
+        """
+        q = (select(Approval).join(PayrollRun, Approval.run_id == PayrollRun.id)
+             .where(PayrollRun.organization_id == organization_id))
+        if approval_id is not None:
+            q = q.where(Approval.id == approval_id)
+        elif run_id is not None:
+            q = q.where(Approval.run_id == run_id)
+        else:
+            return None
+        approval = s.scalar(q.order_by(Approval.created_at.desc()))
+        if approval is None:
+            return None
+        rows = [r for r in s.scalars(select(TapKey).where(TapKey.revoked_at.is_(None)))
+                if self._tap_key_is_published(r, datetime.now(UTC))]
+        result = verify_stored_approval(approval, registry_from_tap_key_rows(rows))
+        return {
+            "approval_id": str(approval.id),
+            "run_id": str(approval.run_id),
+            "verified": result.valid,
+            "keyid": result.key_id or approval.tap_key_id,
+            "agent_id": result.agent_id,
+            "code": result.code,
+            "reason": result.detail,
+            "decided_by_email": approval.decided_by_email,
+            "decision": approval.decision,
+        }
 
     def _hydrate(self, s: Session) -> None:
         """Rebuild the ledger mirror (and the demo simulator) from the database."""
@@ -149,9 +295,43 @@ class PlatformRuntime:
                 request_id=request_id_for(str(employer.id), "connected-account"),
                 business_name=employer.name, contact_name=employer.contact_name or "")
             employer.airwallex_account_id = account["id"]
+            if not self.settings.demo_mode:
+                self._onboard_live_account(employer, account.get("status"))
             employer.status = "ACTIVE"
             self._flush_calls(s, employer.organization_id, employer.id, None)
         return employer
+
+    def _onboard_live_account(self, employer: Employer, account_status: str | None = None) -> None:
+        """Onboard a live connected account and force it to ACTIVE.
+
+        Hosted onboarding comes first when a template is configured: the
+        flow is created and authorised so the employer can complete the
+        Airwallex-hosted form. In the sandbox the account is then moved to
+        ACTIVE through the simulation status endpoint — strictly before
+        any deposit, FX or transfer for this employer.
+
+        ``create_connected_account`` on the live client already runs the whole
+        Kit 6 activation (create -> update/EIN -> submit -> simulate ACTIVE ->
+        confirm) and returns ACTIVE; the extra forced activation is skipped then.
+        """
+        account_id = employer.airwallex_account_id
+        template = self.settings.airwallex_hosted_onboarding_template
+        if template:
+            flow = self.recorder.create_hosted_onboarding_link(
+                account_id=account_id, template=template,
+                return_url=self.settings.airwallex_onboarding_return_url or "")
+            self.recorder.authorize_hosted_onboarding_link(flow_id=flow["id"])
+            logger.info("Hosted onboarding flow %s created and authorised for employer %s",
+                        flow["id"], employer.id)
+        if account_status == "ACTIVE":
+            return
+        activated = self.recorder.activate_connected_account(account_id=account_id)
+        if activated.get("status") != "ACTIVE":
+            raise RuntimeError(
+                f"Connected account {account_id} did not reach ACTIVE "
+                f"(status: {activated.get('status')}); refusing to move money for "
+                f"{employer.name}."
+            )
 
     def fund(self, s: Session, employer: Employer, amount: Decimal, reference: str) -> None:
         """Simulated deposit into the employer's OWN wallet (sandbox simulation API)."""
@@ -198,6 +378,14 @@ class PlatformRuntime:
                   pay_lines: list[dict] | None, raw_input: str | None, source: str,
                   period_label: str | None = None) -> PayrollRun:
         self.ensure_account(s, employer)
+        with self.lock:  # check-then-create must be atomic: one open run per employer
+            self._reject_if_open_run(s, employer)
+            return self._start_run_locked(s, org=org, user=user, employer=employer, pay_lines=pay_lines,
+                                          raw_input=raw_input, source=source, period_label=period_label)
+
+    def _start_run_locked(self, s: Session, *, org: Organization, user: User, employer: Employer,
+                          pay_lines: list[dict] | None, raw_input: str | None, source: str,
+                          period_label: str | None) -> PayrollRun:
         run = PayrollRun(organization_id=org.id, employer_id=employer.id, created_by_id=user.id,
                          source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED")
         s.add(run)
@@ -214,16 +402,54 @@ class PlatformRuntime:
             raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory)
         with self.lock:
             config = {"configurable": {"thread_id": str(run.id)}}
-            result = self.graph.invoke(state, config)
             self._live_threads.add(str(run.id))
-            self._sync(s, run, employer, result)
-        s.commit()
+            self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(state, config))
         return run
+
+    def _invoke_and_persist(self, s: Session, run: PayrollRun, employer: Employer, call,
+                            approval: Approval | None = None) -> None:
+        """Invoke the graph and ALWAYS persist what happened, even if it raises.
+
+        Money may already have moved when a node raises; the checkpoint,
+        the ledger mirror and the recorded Airwallex calls are the truth, so
+        they are synced and committed before the error propagates.
+        """
+        result: dict = {}
+        failure: BaseException | None = None
+        try:
+            result = call() or {}
+        except Exception as exc:  # noqa: BLE001 - persisted, then re-raised below
+            failure = exc
+            logger.exception("Run %s: graph invocation raised; persisting state before re-raising", run.id)
+        try:
+            self._sync(s, run, employer, result)
+            if failure is not None and not run.error:
+                run.error = f"{type(failure).__name__}: {failure}"[:500]
+            if approval is not None:
+                approval.verified = approval.kind == "approval" and run.status != "APPROVAL_REJECTED"
+                s.add(approval)
+        finally:
+            s.commit()
+        if failure is not None:
+            raise failure
+
+    def _reject_if_open_run(self, s: Session, employer: Employer) -> None:
+        """One open run per employer: a run awaiting a decision holds its reserve."""
+        # Graph invocations are serialised by ``self.lock`` and every one is persisted when it
+        # returns, so the only state a competing run can observe is RESERVED (paused at the
+        # approval). A RESERVED run whose pause did not survive a restart holds nothing.
+        q = select(PayrollRun).where(PayrollRun.employer_id == employer.id, PayrollRun.status == "RESERVED")
+        for other in s.scalars(q):
+            if not self.is_resumable(other):
+                continue
+            raise RuntimeConflict(
+                f"{employer.name} already has an open run awaiting a decision. Approve or hold it "
+                "before starting another payroll for this employer.")
 
     def decide(self, s: Session, *, run: PayrollRun, employer: Employer, user: User, decision: str) -> PayrollRun:
         if run.pending_interrupt is None:
             raise RuntimeConflict("This run is not waiting for a decision.")
-        if str(run.id) not in self._live_threads:
+        if not self.is_resumable(run):
             raise RuntimeConflict("This run was paused before the server restarted and can no longer be "
                                   "resumed. Start a new run for this employer.")
         kind = run.pending_interrupt.get("kind")
@@ -239,7 +465,8 @@ class PlatformRuntime:
             if kind == "approval":
                 envelope = self.signer.sign_approval(
                     run_id=str(run.id), employer_key=employer.ledger_key, decision=decision,
-                    assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=user.email)
+                    assessment=state["assessment"], pay_lines=state["pay_lines"], decided_by=user.email,
+                    held_lines=state.get("held_lines") or [])
                 resume["tap"] = envelope.as_dict()
                 sig_input = envelope.headers["Signature-Input"]
                 approval.signed_body = envelope.body
@@ -247,15 +474,31 @@ class PlatformRuntime:
                 approval.tap_signature = envelope.headers["Signature"]
                 approval.tap_key_id = _keyword(sig_input, "keyid")
                 approval.tap_nonce = _keyword(sig_input, "nonce")
-            result = self.graph.invoke(Command(resume=resume), config)
-            self._sync(s, run, employer, result)
-            approval.verified = kind == "approval" and run.status != "APPROVAL_REJECTED"
-            s.add(approval)
-        s.commit()
+            self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(Command(resume=resume), config),
+                                     approval=approval)
         return run
 
     def is_resumable(self, run: PayrollRun) -> bool:
-        return run.pending_interrupt is not None and str(run.id) in self._live_threads
+        if run.pending_interrupt is None:
+            return False
+        if str(run.id) in self._live_threads:
+            return True
+        # Durable checkpointer: the pause survives a restart if the
+        # checkpointer still holds this thread with a pending next step.
+        try:
+            snapshot = self.graph.get_state({"configurable": {"thread_id": str(run.id)}})
+        except Exception:
+            return False
+        return bool(snapshot and snapshot.values and snapshot.next)
+
+    def resume_failed(self, s: Session, *, run: PayrollRun, employer: Employer) -> PayrollRun:
+        """Resume a FAILED run from its checkpoint without duplicating payments."""
+        if run.status != "FAILED":
+            raise RuntimeConflict("Only a FAILED run can be resumed.")
+        config = {"configurable": {"thread_id": str(run.id)}}
+        with self.lock:
+            self._invoke_and_persist(s, run, employer, lambda: resume_failed(self.graph, config))
+        return run
 
     # ------------------------------------------------------------------ sync
     def _sync(self, s: Session, run: PayrollRun, employer: Employer, result: dict) -> None:
@@ -271,9 +514,9 @@ class PlatformRuntime:
         if a:
             run.payroll_currency = a.get("payroll_currency")
             run.required_usd = to_decimal(a["required_usd"])
-            run.shortfall_usd = to_decimal(a["shortfall_usd"])
+            run.shortfall_usd = to_decimal(a.get("full_shortfall_usd") or a["shortfall_usd"])
         run.pending_interrupt = result["__interrupt__"][0].value if "__interrupt__" in result else None
-        if run.status == "SETTLED" and run.settled_at is None:
+        if run.status in MONEY_MOVED and run.settled_at is None:
             run.settled_at = datetime.now(UTC)
         if run.status in TERMINAL:
             self._live_threads.discard(str(run.id))
@@ -300,6 +543,20 @@ class PlatformRuntime:
             if run.status in ("HELD_SHORTFALL", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED"):
                 pl.status = "HELD"
 
+        # Partial payout: the lines this run does not pay are persisted too, HELD.
+        base = len(values.get("pay_lines", []))
+        for j, line in enumerate(values.get("held_lines") or []):
+            if (base + j) in existing:
+                continue
+            contractor_id = line.get("contractor_id")
+            held = PayLine(run_id=run.id, position=base + j, beneficiary_name=line["name"],
+                           amount=to_decimal(line["amount"]), currency=line["currency"],
+                           method=line.get("method", "SWIFT"),
+                           contractor_id=uuid.UUID(contractor_id) if contractor_id else None,
+                           request_id=request_id_for(str(run.id), f"held-{base + j}"), status="HELD")
+            s.add(held)
+            run.pay_lines.append(held)
+
         calls = self.recorder.log[self._calls_synced:]
         transfers = {c.request_id: c.response for c in calls if c.operation == "create_transfer"}
         for pl in run.pay_lines:
@@ -318,7 +575,7 @@ class PlatformRuntime:
             s.add(SettlementReceipt(organization_id=run.organization_id, employer_id=employer.id, run_id=run.id,
                                     chain=receipt["chain"], chain_index=receipt["index"],
                                     payload_hash=receipt["payload_hash"], prev_hash=receipt["prev_hash"],
-                                    receipt_hash=receipt["receipt_hash"]))
+                                    receipt_hash=receipt["receipt_hash"], tx_hash=receipt.get("tx_hash")))
         s.flush()
 
     def _flush_calls(self, s: Session, org_id: uuid.UUID, employer_id: uuid.UUID | None,
