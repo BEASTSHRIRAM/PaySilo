@@ -1,0 +1,25 @@
+"use client";
+import { FormEvent, useEffect, useState } from "react";
+import { Copy, X } from "lucide-react";
+import { api, type Invitation, type Session, type TeamMember } from "@/lib/api";
+import { Button } from "@/components/ui/button"; import { Input } from "@/components/ui/input"; import { Label } from "@/components/ui/label"; import { NativeSelect } from "@/components/ui/select"; import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { AppBar } from "@/components/dashboard/app-bar";
+
+export default function TeamPage() {
+ const [session,setSession]=useState<Session|null>(null); const [members,setMembers]=useState<TeamMember[]>([]); const [invites,setInvites]=useState<Invitation[]>([]); const [email,setEmail]=useState(""); const [role,setRole]=useState("viewer"); const [fresh,setFresh]=useState<Invitation|null>(null); const [error,setError]=useState(""); const [note,setNote]=useState("");
+ async function reload(){ const [m,i,s]=await Promise.all([api.teamMembers(),api.invitations().catch(()=>[]),api.me()]); setMembers(m);setInvites(i);setSession(s); }
+ useEffect(()=>{reload().catch(e=>setError(e.message));},[]);
+ const owner=session?.role==="owner", manager=owner||session?.role==="admin";
+ async function invite(e:FormEvent){e.preventDefault();setError("");try{setFresh(await api.createInvitation(email,role));setEmail("");await reload();}catch(e){setError((e as Error).message)}}
+ async function change(id:string,r:string){try{await api.updateMemberRole(id,r);await reload()}catch(e){setError((e as Error).message)}}
+ async function remove(id:string){try{await api.removeMember(id);await reload()}catch(e){setError((e as Error).message)}}
+ async function revoke(id:string){try{await api.revokeInvitation(id);await reload()}catch(e){setError((e as Error).message)}}
+ async function copy(){if(!fresh?.invite_path)return;await navigator.clipboard.writeText(window.location.origin+fresh.invite_path);setNote("Invite link copied.")}
+ return <>{session&&<AppBar session={session}/>}<main className="mx-auto mt-8 grid max-w-5xl gap-6 px-4 pb-20 pt-12 sm:px-6"><header><h1 className="font-display text-3xl font-bold text-sand-100">Team</h1><p className="mt-2 text-sage-300">Manage organization members and invitations.</p></header>
+ {error&&<p role="alert" className="text-coral-400">{error}</p>}{note&&<p role="status" className="text-mint-400">{note}</p>}
+ {manager&&<Card><CardHeader><CardTitle>Invite teammate</CardTitle></CardHeader><CardContent><form onSubmit={invite} className="grid gap-4 sm:grid-cols-[1fr_180px_auto] sm:items-end"><div><Label htmlFor="invite-email">Email</Label><Input id="invite-email" type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></div><div><Label htmlFor="invite-role">Role</Label><NativeSelect id="invite-role" value={role} onChange={e=>setRole(e.target.value)}><option value="viewer">Viewer</option><option value="approver">Approver</option>{owner&&<option value="admin">Admin</option>}</NativeSelect></div><Button>Send invite</Button></form></CardContent></Card>}
+ {fresh&&<Card><CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6"><div><h2 className="font-bold text-sand-100">Invitation created</h2><p className="text-sm text-sage-300">Copy this link now. It is shown only once.</p></div><Button type="button" onClick={copy}><Copy/>Copy invite link</Button></CardContent></Card>}
+ <Card><CardHeader><CardTitle>Members</CardTitle></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="text-sage-400"><tr><th className="p-3">Member</th><th className="p-3">Role</th><th className="p-3">Joined</th><th className="p-3">Actions</th></tr></thead><tbody>{members.map(m=><tr key={m.id} className="border-t border-ink-700"><td className="p-3"><div className="font-bold text-sand-100">{m.name}</div><div className="text-sage-400">{m.email}</div></td><td className="p-3">{owner&&m.id!==session?.user.id?<NativeSelect value={m.role} onChange={e=>change(m.id,e.target.value)}><option>owner</option><option>admin</option><option>approver</option><option>viewer</option></NativeSelect>:m.role}</td><td className="p-3">{new Date(m.joined_at).toLocaleDateString()}</td><td className="p-3">{manager&&m.id!==session?.user.id&&(owner||m.role!=="owner")&&<Button variant="ghost" size="sm" onClick={()=>remove(m.id)}><X/>Remove</Button>}</td></tr>)}</tbody></table></div></CardContent></Card>
+ {manager&&<Card><CardHeader><CardTitle>Pending invitations</CardTitle></CardHeader><CardContent className="grid gap-3">{invites.length===0?<p className="text-sm text-sage-400">No pending invitations.</p>:invites.map(i=><div key={i.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-ink-900 p-4"><div><p className="font-bold text-sand-100">{i.email}</p><p className="text-sm text-sage-400">{i.role} · expires {new Date(i.expires_at).toLocaleDateString()}</p></div><Button variant="outline" size="sm" onClick={()=>revoke(i.id)}>Revoke</Button></div>)}</CardContent></Card>}
+ </main></>;
+}

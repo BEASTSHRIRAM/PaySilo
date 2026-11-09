@@ -46,7 +46,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
       <SideBar collapsed={collapsed} onToggle={toggle} />
       <div
         className={cn(
-          "transition-[padding] duration-300 ease-out",
+          "pt-14 transition-[padding] duration-300 ease-out",
           collapsed ? "lg:pl-[76px]" : "lg:pl-60",
           // Open: on xl+ the chat is a docked column, so reserve its width.
           // Closed: leave room under the content for the floating pill.

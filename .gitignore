@@ -26,3 +26,6 @@ out/
 
 # Next.js verification builds
 .next-*/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

@@ -58,6 +58,9 @@ export interface Organization {
   industry: string | null; size_band: string | null; website: string | null; is_demo: boolean;
 }
 export interface Session { user: User; organization: Organization; role: string }
+export interface TeamMember { id: string; name: string; email: string; role: string; joined_at: string }
+export interface Invitation { id: string; email: string; role: string; status: string; expires_at: string; created_at: string; invite_path?: string }
+export interface PublicInvitation { organization_name: string; email: string; role: string; invited_by: string | null; existing_user: boolean; expires_at: string }
 
 export interface SignupPayload {
   organization: { name: string; legal_name?: string | null; country: string; base_currency: string;
@@ -211,9 +214,19 @@ function chatEventFrom(eventName: string | null, raw: string): ChatEvent | null 
 // ------------------------------------------------------------------ calls
 export const api = {
   me: () => request<Session>("/auth/me"),
+  updateMe: (full_name: string) => request<Session>("/auth/me", { method: "PATCH", body: JSON.stringify({ full_name }) }),
+  changePassword: (current_password: string, new_password: string) => request<void>("/auth/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
   login: (email: string, password: string) => post<Session>("/auth/login", { email, password }),
   signup: (payload: SignupPayload) => post<Session>("/auth/signup", payload),
   logout: () => post<void>("/auth/logout"),
+  teamMembers: () => request<TeamMember[]>("/org/members"),
+  updateMemberRole: (id: string, role: string) => request<{ id: string; role: string }>(`/org/members/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  removeMember: (id: string) => request<void>(`/org/members/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  invitations: () => request<Invitation[]>("/org/invitations"),
+  createInvitation: (email: string, role: string) => post<Invitation>("/org/invitations", { email, role }),
+  revokeInvitation: (id: string) => post<{ id: string; status: string }>(`/org/invitations/${encodeURIComponent(id)}/revoke`),
+  publicInvitation: (token: string) => request<PublicInvitation>(`/invitations/${encodeURIComponent(token)}`),
+  acceptInvitation: (token: string, body: { full_name?: string; password: string }) => post<Session>(`/invitations/${encodeURIComponent(token)}/accept`, body),
   demoCredentials: () => request<{ email: string; password: string; organization: string }>("/auth/demo-credentials"),
 
   overview: () => request<Overview>("/overview"),
