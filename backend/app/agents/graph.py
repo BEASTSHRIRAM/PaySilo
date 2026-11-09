@@ -280,12 +280,7 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "refused", "status": "REFUSED", "error": msg, "audit": audit, "events": events}
         balances = awx.get_balances(account_id=state["account_id"])
         try:
-            rates = services.usd_rates
-            if services.rate_provider is not None:
-                needed = {l["currency"] for l in state["pay_lines"]} | set(balances)
-                rates = services.rate_provider.rates_for(
-                    needed, account_id=state["account_id"], run_id=state["run_id"])
-            assessment = assess_payroll(_pay_lines(state), rates, balances)
+            assessment = assess_payroll(_pay_lines(state), _rates_for(state, balances), balances)
         except RefusalError as exc:
             _log(state, "price", f"POLICY REFUSAL: {exc}", "error", audit, events)
             return {"route": "refused", "status": "REFUSED", "error": str(exc), "audit": audit, "events": events}
@@ -307,7 +302,10 @@ def build_graph(services: Services, checkpointer=None):
         rates = services.usd_rates
         if services.rate_provider is not None:
             lines = list(state["pay_lines"]) + list(state.get("held_lines") or [])
-            needed = {l["currency"] for l in lines} | set(balances)
+            # Only currencies we pay in or actually hold: the live wallet lists every
+            # currency (mostly zero), and quoting those fails (e.g. ARS amount_below_limit).
+            held = {c for c, v in balances.items() if to_decimal(str(v)) != 0}
+            needed = {l["currency"] for l in lines} | held
             rates = services.rate_provider.rates_for(
                 needed, account_id=state["account_id"], run_id=state["run_id"])
         return rates

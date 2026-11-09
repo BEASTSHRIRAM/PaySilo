@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type RunDetail } from "@/lib/api";
 import { notifyDataChanged } from "@/lib/events";
+import { explainRunError } from "@/lib/run-errors";
 import { runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
@@ -25,6 +26,10 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
   const a = run.assessment;
   const info = runStatusInfo(run);
   const heldLines = run.pay_lines.filter((l) => l.status === "HELD");
+  // "Held until funded" is only true for a real shortfall; a refused or rejected
+  // run simply paid nothing, and the error card explains why.
+  const heldForFunding = run.status === "HELD_SHORTFALL" || run.status === "PARTIALLY_PAID";
+  const runError = explainRunError(run.error);
 
   async function decide(decision: "approve" | "hold") {
     setBusy(decision);
@@ -53,7 +58,19 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
       )}
 
       {run.explanation && <p className="rounded-3xl bg-ink-950/40 p-4 text-[15px] leading-relaxed text-sand-200">{run.explanation}</p>}
-      {run.error && <p className="rounded-3xl border-2 border-coral-600/50 bg-coral-500/10 p-4 text-sm font-bold text-coral-300">{run.error}</p>}
+      {runError && (
+        <div role="alert" className="rounded-3xl border-2 border-coral-600/50 bg-coral-500/10 p-4 text-sm">
+          <p className="font-extrabold text-coral-300">{runError.title}</p>
+          <p className="mt-1 font-semibold leading-relaxed text-sand-200">{runError.message}</p>
+          {runError.hint && <p className="mt-2 font-semibold text-sage-300">{runError.hint}</p>}
+          {runError.technical !== runError.message && (
+            <details className="mt-3 text-xs text-sage-400">
+              <summary className="cursor-pointer font-bold text-sage-300">Technical details</summary>
+              <p className="mt-1 break-words font-mono">{runError.technical}</p>
+            </details>
+          )}
+        </div>
+      )}
 
       {a && (
         <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
@@ -71,7 +88,7 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
         </dl>
       )}
 
-      {heldLines.length > 0 && (
+      {heldForFunding && heldLines.length > 0 && (
         <p className="rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">
           {heldLines.length} of {run.pay_lines.length} line{run.pay_lines.length === 1 ? "" : "s"} held, not paid:{" "}
           {heldLines.map((l) => `${l.beneficiary_name} (${formatMoney(l.amount, l.currency)})`).join(", ")}.

@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { api, ApiError, type ChatApproval, type RunDetail } from "@/lib/api";
 import { notifyDataChanged, useDataChanged } from "@/lib/events";
 import { runStatusInfo } from "@/lib/status";
+import { explainRunError } from "@/lib/run-errors";
 
 export type ApprovalCardState = ChatApproval;
 
@@ -110,7 +111,11 @@ export function ApprovalCard({ card, canDecide }: { card: ApprovalCardState; can
             {!pending || run.resumable ? <Badge tone={info.tone}>{info.label}</Badge> : null}
           </p>
           {info.detail && <p className="text-sm leading-snug text-sand-300">{info.detail}</p>}
-          {run.error && <p className="text-sm font-semibold text-coral-300">{run.error}</p>}
+          {run.error && (
+            <p className="text-sm font-semibold text-coral-300" title={run.error}>
+              {explainRunError(run.error)?.title}: {explainRunError(run.error)?.message}
+            </p>
+          )}
         </div>
       )}
       {run && (

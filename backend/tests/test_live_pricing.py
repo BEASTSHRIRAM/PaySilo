@@ -51,3 +51,29 @@ def test_graph_refuses_when_live_rate_unavailable():
     result = _run(_RefusingProvider())
     assert result["status"] == "REFUSED"
     assert "Live FX rate for EUR is unavailable" in result["error"]
+
+
+class _RecordingProvider:
+    def __init__(self):
+        self.asked: set[str] = set()
+
+    def rates_for(self, currencies, *, account_id, run_id):
+        self.asked |= set(currencies)
+        return {"USD": Decimal("1"), "EUR": Decimal("1.08")}
+
+
+def test_rates_are_only_requested_for_payroll_and_held_currencies(monkeypatch):
+    # The live wallet lists every currency, mostly at zero (seen live: 46 entries).
+    # Quoting a zero-balance currency like ARS failed with amount_below_limit and
+    # refused the whole run, so those must never be asked for.
+    provider = _RecordingProvider()
+    real = AirwallexSimulator.get_balances
+
+    def with_zero_currencies(self, *, account_id=None):
+        balances = real(self, account_id=account_id)
+        return {**balances, "ARS": Decimal("0"), "JPY": Decimal("0.00")}
+
+    monkeypatch.setattr(AirwallexSimulator, "get_balances", with_zero_currencies)
+    result = _run(provider)
+    assert result["status"] == "RESERVED"
+    assert provider.asked == {"EUR", "USD"}
