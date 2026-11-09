@@ -173,6 +173,8 @@ class Employer(TimestampMixin, Base):
     contact_email: Mapped[str | None] = mapped_column(String(254))
     funding_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     airwallex_account_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    # The employer's own funding (global) account; simulated deposits land here.
+    airwallex_global_account_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
 
     organization: Mapped[Organization] = relationship(back_populates="employers")

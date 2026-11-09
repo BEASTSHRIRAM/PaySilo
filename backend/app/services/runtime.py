@@ -289,6 +289,8 @@ class PlatformRuntime:
     def ensure_account(self, s: Session, employer: Employer) -> Employer:
         """Create + activate the employer's own connected account (its silo)."""
         if employer.airwallex_account_id:
+            if not employer.airwallex_global_account_id:
+                self._ensure_global_account(s, employer)  # account predates global accounts
             return employer
         with self.lock:
             account = self.recorder.create_connected_account(
@@ -300,7 +302,25 @@ class PlatformRuntime:
                 self._onboard_live_account(employer, account.get("status"))
             employer.status = "ACTIVE"
             self._flush_calls(s, employer.organization_id, employer.id, None)
+        self._ensure_global_account(s, employer)
         return employer
+
+    def _ensure_global_account(self, s: Session, employer: Employer) -> str:
+        """Give the employer its own funding (global) account; deposits land here.
+
+        The request id is deterministic, so a retry returns the same account.
+        """
+        if employer.airwallex_global_account_id:
+            return employer.airwallex_global_account_id
+        with self.lock:
+            ga = self.recorder.create_global_account(
+                request_id=request_id_for(str(employer.id), f"global-account:{employer.funding_currency}"),
+                account_id=employer.airwallex_account_id, currency=employer.funding_currency,
+                country_code="US" if employer.funding_currency == "USD" else (employer.country or "US"),
+                nick_name=f"{employer.name} {employer.funding_currency}"[:60])
+            employer.airwallex_global_account_id = ga["id"]
+            self._flush_calls(s, employer.organization_id, employer.id, None)
+        return employer.airwallex_global_account_id
 
     def _onboard_live_account(self, employer: Employer, account_status: str | None = None) -> None:
         """Onboard a live connected account and force it to ACTIVE.
@@ -348,7 +368,8 @@ class PlatformRuntime:
         with self.lock:
             self.recorder.deposit(request_id=request_id,
                                   account_id=employer.airwallex_account_id, amount=amount,
-                                  currency=employer.funding_currency)
+                                  currency=employer.funding_currency,
+                                  global_account_id=employer.airwallex_global_account_id or "")
             self.ledger.post([(f"{employer.ledger_key}:cash:{employer.funding_currency}", amount),
                               (f"external:bank:{employer.funding_currency}", -amount)],
                              memo=f"deposit {reference}")

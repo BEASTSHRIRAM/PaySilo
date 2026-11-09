@@ -67,6 +67,7 @@ CREATE TABLE employers (
 	contact_email VARCHAR(254), 
 	funding_currency VARCHAR(3) NOT NULL, 
 	airwallex_account_id VARCHAR(64), 
+	airwallex_global_account_id VARCHAR(64), 
 	status VARCHAR(16) NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
