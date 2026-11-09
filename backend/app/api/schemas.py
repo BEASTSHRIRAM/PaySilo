@@ -273,6 +273,47 @@ class ReceiptOut(BaseModel):
     receipt_hash: str
     payload_hash: str
     tx_hash: str | None
+    explorer_url: str | None = None
+
+
+# ---------------------------------------------------------------- Visa TAP
+class TapKeyOut(BaseModel):
+    keyid: str
+    agent_id: str
+    algorithm: str
+    status: str  # active | retired
+    public_key: str  # raw Ed25519 public key, base64
+    public_key_pem: str
+    created_at: str | None
+    retired_at: str | None
+    expires_at: str | None
+
+
+class TapKeysOut(BaseModel):
+    keys: list[TapKeyOut]
+
+
+class TapVerifyIn(BaseModel):
+    approval_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "TapVerifyIn":
+        if (self.approval_id is None) == (self.run_id is None):
+            raise ValueError("provide exactly one of approval_id or run_id")
+        return self
+
+
+class TapVerifyOut(BaseModel):
+    approval_id: str
+    run_id: str
+    verified: bool
+    keyid: str | None
+    agent_id: str | None
+    code: str
+    reason: str
+    decided_by_email: str
+    decision: str
 
 
 class RunOut(BaseModel):

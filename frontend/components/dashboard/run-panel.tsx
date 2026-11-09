@@ -114,6 +114,9 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
           {run.receipt && (
             <p className="mt-2 break-all font-semibold text-sage-400">
               Receipt anchored ({run.receipt.chain} #{run.receipt.chain_index}): <span className="text-sand-200">{run.receipt.receipt_hash.slice(0, 24)}…</span>
+              {run.receipt.explorer_url && run.receipt.tx_hash && (
+                <> · <a className="text-sand-200 underline" href={run.receipt.explorer_url} target="_blank" rel="noreferrer">View transaction {run.receipt.tx_hash.slice(0, 10)}…</a></>
+              )}
             </p>
           )}
         </div>

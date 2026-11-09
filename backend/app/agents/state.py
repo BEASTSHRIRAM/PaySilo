@@ -49,6 +49,8 @@ class PayrollRunState(TypedDict, total=False):
     events: list[dict]  # {agent, agent_name, level, message} — structured audit for the UI
     signatures: list[dict]  # Visa TAP signatures over approvals and payout instructions
     fee_charged_usd: str
+    completed_payouts: list[int]  # pay-line indices already paid AND posted to the ledger
+    fx_done: list[str]  # currencies already converted (execute is resumable after FAILED)
     metal_receipt: Optional[dict]
     explanation: Optional[str]
     error: Optional[str]

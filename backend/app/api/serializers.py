@@ -60,6 +60,13 @@ def run_out(runtime: PlatformRuntime, r: PayrollRun) -> RunOut:
     )
 
 
+def _explorer_url(runtime: PlatformRuntime, tx_hash: str | None) -> str | None:
+    base = runtime.settings.metal_explorer_url
+    if not tx_hash or not base:
+        return None
+    return f"{base.rstrip('/')}/tx/{tx_hash}"
+
+
 def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDetailOut:
     receipt = s.scalar(select(SettlementReceipt).where(SettlementReceipt.run_id == r.id))
     return RunDetailOut(
@@ -76,5 +83,6 @@ def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDe
                                verified=a.verified, tap_key_id=a.tap_key_id, tap_signature=a.tap_signature,
                                created_at=a.created_at) for a in r.approvals],
         receipt=ReceiptOut(chain=receipt.chain, chain_index=receipt.chain_index, receipt_hash=receipt.receipt_hash,
-                           payload_hash=receipt.payload_hash, tx_hash=receipt.tx_hash) if receipt else None,
+                           payload_hash=receipt.payload_hash, tx_hash=receipt.tx_hash,
+                           explorer_url=_explorer_url(runtime, receipt.tx_hash)) if receipt else None,
     )

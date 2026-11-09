@@ -81,6 +81,10 @@ class Services:
     ledger: Ledger
     chain: SettlementChain
     usd_rates: dict[str, Decimal]
+    # Live mode only: fetches fresh FX-quote rates for pricing. When set,
+    # pricing uses ONLY the provider's rates — a provider failure is a
+    # policy refusal, never a fallback to the demo table above.
+    rate_provider: object | None = None
     tap: TapSigner = field(default_factory=TapSigner)
 
 
@@ -129,6 +133,8 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
         audit=[],
         events=[],
         fee_charged_usd="0.00",
+        completed_payouts=[],
+        fx_done=[],
         metal_receipt=None,
         explanation=None,
         error=None,
@@ -226,8 +232,15 @@ def build_graph(services: Services, checkpointer=None):
                 business_name=employer_name, contact_name=state.get("contact_name", ""),
             )
             account_id = account["id"]
-            _log(state, "intake", f"Connected account {account_id} ACTIVE on Airwallex.",
+            _log(state, "intake", f"Connected account {account_id} created on Airwallex.",
                  audit=audit, events=events)
+            if account.get("status") not in (None, "ACTIVE") and hasattr(awx, "activate_connected_account"):
+                # Live mode: a new connected account starts out CREATED. It
+                # must reach ACTIVE (hosted onboarding, then the sandbox
+                # simulation status step) before any FX or transfer.
+                awx.activate_connected_account(account_id=account_id)
+                _log(state, "intake", f"Connected account {account_id} ACTIVE on Airwallex "
+                     "(activated before any FX or transfer).", audit=audit, events=events)
         if funding > 0:
             awx.deposit(request_id=request_id_for(state["run_id"], "funding"),
                         account_id=account_id, amount=funding, currency="USD")
@@ -252,7 +265,12 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "refused", "status": "REFUSED", "error": msg, "audit": audit, "events": events}
         balances = awx.get_balances(account_id=state["account_id"])
         try:
-            assessment = assess_payroll(_pay_lines(state), services.usd_rates, balances)
+            rates = services.usd_rates
+            if services.rate_provider is not None:
+                needed = {l["currency"] for l in state["pay_lines"]} | set(balances)
+                rates = services.rate_provider.rates_for(
+                    needed, account_id=state["account_id"], run_id=state["run_id"])
+            assessment = assess_payroll(_pay_lines(state), rates, balances)
         except RefusalError as exc:
             _log(state, "price", f"POLICY REFUSAL: {exc}", "error", audit, events)
             return {"route": "refused", "status": "REFUSED", "error": str(exc), "audit": audit, "events": events}
@@ -344,11 +362,17 @@ def build_graph(services: Services, checkpointer=None):
         a = state["assessment"]
         audit, events = list(state.get("audit", [])), list(state.get("events", []))
         signatures = list(state.get("signatures", []))
+        # Progress markers make a FAILED run resumable without duplicating a
+        # payment: a resumed execute skips conversions and payouts that
+        # already completed (their Airwallex request_ids would replay the
+        # original result anyway, and their ledger entries are already posted).
+        completed = list(state.get("completed_payouts", []))
+        fx_done = list(state.get("fx_done", []))
         try:
             # 1. Convert exactly the priced amount per currency, on the employer's behalf.
             for req in a["by_currency"]:
                 ccy, required = req["currency"], to_decimal(req["required"])
-                if ccy == "USD":
+                if ccy == "USD" or ccy in fx_done:
                     continue
                 quote = awx.create_fx_quote(
                     request_id=request_id_for(run_id, f"fx-quote-{ccy}"), on_behalf_of=acct,
@@ -362,9 +386,12 @@ def build_graph(services: Services, checkpointer=None):
                             memo=f"{run_id} FX USD->{ccy}")
                 _log(state, "execute", f"Converted USD {money_str(sell)} -> {ccy} {money_str(required)} "
                      f"on its own behalf (x-on-behalf-of {acct}).", audit=audit, events=events)
+                fx_done.append(ccy)
 
             # 2. Pay each contractor with a TAP-signed, verified instruction.
             for i, line in enumerate(state["pay_lines"]):
+                if i in completed:
+                    continue
                 envelope = tap.sign_payout(run_id=run_id, employer_key=key, account_id=acct, line=line, index=i)
                 check = tap.verify(envelope, {"type": "payroll.payout", "run_id": run_id, "employer": key,
                                               "on_behalf_of": acct, "index": i, "beneficiary": line["name"],
@@ -398,14 +425,17 @@ def build_graph(services: Services, checkpointer=None):
                 _log(state, "execute",
                      f"Paid {line['name']} {line['currency']} {line['amount']} via {line.get('method', 'SWIFT')} "
                      f"({paid['id']} {paid['status']}, TAP-signed).", "success", audit, events)
+                completed.append(i)
 
         except PAYOUT_ERRORS as exc:
             _log(state, "execute",
                  f"Payout step FAILED: {exc}. Retrying is safe — every call reuses its request_id.",
                  "error", audit, events)
             return {"status": "FAILED", "error": str(exc), "signatures": signatures,
+                    "completed_payouts": completed, "fx_done": fx_done,
                     "balances": balances_str(acct), "audit": audit, "events": events}
-        return {"status": "SENT", "signatures": signatures, "balances": balances_str(acct),
+        return {"status": "SENT", "signatures": signatures, "completed_payouts": completed,
+                "fx_done": fx_done, "balances": balances_str(acct),
                 "audit": audit, "events": events}
 
     def fee_node(state: PayrollRunState) -> dict:
@@ -441,12 +471,14 @@ def build_graph(services: Services, checkpointer=None):
             "run_id": state["run_id"], "employer": state["employer_name"], "status": state["status"],
             "assessment": state["assessment"], "fee_charged_usd": state["fee_charged_usd"],
         })
+        anchor_note = f" tx {receipt.tx_hash}" if receipt.tx_hash else ""
         audit, events = _log(state, "attest",
                              f"Reconciliation receipt anchored ({receipt.chain}, receipt #{receipt.index}, "
-                             f"hash {receipt.receipt_hash[:16]}…).", "success")
+                             f"hash {receipt.receipt_hash[:16]}…{anchor_note}).", "success")
         return {"metal_receipt": {"index": receipt.index, "payload_hash": receipt.payload_hash,
                                   "prev_hash": receipt.prev_hash, "receipt_hash": receipt.receipt_hash,
-                                  "chain": receipt.chain},
+                                  "chain": receipt.chain, "tx_hash": receipt.tx_hash,
+                                  "explorer_url": receipt.explorer_url},
                 "audit": audit, "events": events}
 
     def close_node(state: PayrollRunState) -> dict:
@@ -483,3 +515,22 @@ def build_graph(services: Services, checkpointer=None):
     builder.add_edge("attest", END)
     builder.add_edge("close", END)
     return builder.compile(checkpointer=checkpointer or MemorySaver())
+
+
+def resume_failed(graph, config: dict) -> dict:
+    """Resume a FAILED run from its checkpoint, re-entering the execute node.
+
+    The FAILED checkpoint already carries the execute node's progress
+    markers (``fx_done`` / ``completed_payouts``). Writing the state back
+    as if the approval node had just approved — via ``update_state`` with
+    ``as_node="approval"`` — makes ``execute`` the next step again while
+    keeping those markers, so the resumed execute skips conversions and
+    payouts that already completed. Every Airwallex call it does make
+    reuses its deterministic ``request_id`` (a replay returns the original
+    result), so resuming can never pay a contractor twice.
+    """
+    current = graph.get_state(config).values
+    if current.get("status") != "FAILED":
+        raise ValueError(f"Run is {current.get('status')}, not FAILED — nothing to resume.")
+    graph.update_state(config, {"status": "APPROVED", "error": None}, as_node="approval")
+    return graph.invoke(None, config)

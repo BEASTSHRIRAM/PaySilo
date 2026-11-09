@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2, Play, Plus } from "lucide-react";
+import { ArrowUpRight, Loader2, Play, Plus } from "lucide-react";
 
 import { LottieAnimation } from "@/components/brand/lottie";
 import { AppBar } from "@/components/dashboard/app-bar";
@@ -12,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { api, ApiError, type Employer, type Overview, type RunDetail, type RunSummary, type Session } from "@/lib/api";
+import { AnimatedNumber, Stagger } from "@/lib/gsap-anim";
 import { formatMoney } from "@/lib/utils";
 
 const DECIDERS = ["owner", "admin", "approver"];
@@ -21,7 +23,9 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4">
       <p className="text-sm font-bold text-sage-400">{label}</p>
-      <p className="mt-1 font-display text-3xl font-semibold tabular-nums text-sand-100">{value}</p>
+      <p className="mt-1 font-display text-3xl font-semibold tabular-nums text-sand-100">
+        {typeof value === "number" ? <AnimatedNumber value={value} /> : value}
+      </p>
     </div>
   );
 }
@@ -55,7 +59,11 @@ function EmployerCard({ employer, onRun, onFund, busy }: {
     <Card className="flex flex-col gap-4 p-5">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="font-display text-xl font-semibold text-sand-100">{employer.name}</h3>
+          <h3 className="font-display text-xl font-semibold text-sand-100">
+            <Link href={`/dashboard/employers/${employer.id}`} className="hover:underline hover:underline-offset-4">
+              {employer.name}
+            </Link>
+          </h3>
           <p className="text-sm font-semibold text-sage-500">
             {employer.country} · {employer.contractor_count} contractor{employer.contractor_count === 1 ? "" : "s"}
           </p>
@@ -89,6 +97,9 @@ function EmployerCard({ employer, onRun, onFund, busy }: {
             {busy ? <Loader2 className="animate-spin" /> : <Play />} Run payroll
           </Button>
           <Button variant="outline" onClick={() => setFunding(true)}><Plus /> Add funds</Button>
+          <Button variant="ghost" asChild>
+            <Link href={`/dashboard/employers/${employer.id}`}>View silo <ArrowUpRight /></Link>
+          </Button>
         </div>
       )}
     </Card>
@@ -215,19 +226,27 @@ export default function DashboardPage() {
             </section>
 
             <section>
-              <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Employers</h2>
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <h2 className="font-display text-2xl font-semibold text-sand-100">Employers</h2>
+                <Button variant="outline" size="sm" asChild>
+                  <Link href="/dashboard/employers/new"><Plus /> Add employer</Link>
+                </Button>
+              </div>
               {overview.employers.length === 0 ? (
                 <Card className="flex flex-col items-center gap-2 p-8 text-center">
                   <LottieAnimation name="silo-idle" className="size-40" label="Silo" />
                   <p className="font-bold text-sand-100">No employers yet</p>
                   <p className="text-sm text-sage-400">Employers you add will show up here with their own balances.</p>
+                  <Button asChild className="mt-2">
+                    <Link href="/dashboard/employers/new"><Plus /> Add your first employer</Link>
+                  </Button>
                 </Card>
               ) : (
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <Stagger className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {overview.employers.map((e) => (
                     <EmployerCard key={e.id} employer={e} busy={startingId === e.id} onRun={(x) => void startRun(x)} onFund={fund} />
                   ))}
-                </div>
+                </Stagger>
               )}
             </section>
 
@@ -242,17 +261,24 @@ export default function DashboardPage() {
                 ) : (
                   <ul className="grid gap-2">
                     {runs.map((r) => (
-                      <li key={r.id}>
+                      <li key={r.id} className="flex gap-2">
                         <button type="button" onClick={() => void openRun(r.id)} aria-current={selected?.id === r.id}
-                                className="w-full rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4 text-left transition-colors hover:border-sage-600 aria-[current=true]:border-coral-500">
+                                className="min-w-0 flex-1 rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4 text-left transition-colors hover:border-sage-600 aria-[current=true]:border-coral-500">
                           <div className="flex items-center justify-between gap-2">
-                            <span className="font-bold text-sand-100">{r.employer_name}</span>
+                            <span className="truncate font-bold text-sand-100">{r.employer_name}</span>
                             <Badge tone={toneForStatus(r.status)}>{r.status.replaceAll("_", " ")}</Badge>
                           </div>
                           <p className="mt-1 text-xs font-semibold text-sage-500">
                             {r.period_label ? `${r.period_label} · ` : ""}{new Date(r.created_at).toLocaleString()}
                           </p>
                         </button>
+                        <Link
+                          href={`/dashboard/runs/${r.id}`}
+                          aria-label={`Open the full page for this ${r.employer_name} run`}
+                          className="grid shrink-0 place-items-center self-stretch rounded-3xl border-2 border-ink-700 bg-ink-850/80 px-3 text-sage-300 transition-colors hover:border-sage-600 hover:text-sand-100"
+                        >
+                          <ArrowUpRight className="size-5" />
+                        </Link>
                       </li>
                     ))}
                   </ul>

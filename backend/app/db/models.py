@@ -346,14 +346,77 @@ class SettlementReceipt(TimestampMixin, Base):
 
 
 class TapKey(TimestampMixin, Base):
-    """Public half of every Visa TAP agent key PaySilo has signed with."""
+    """Public half of every Visa TAP agent key PaySilo has signed with.
+
+    Published at ``GET /.well-known/tap-keys``. A key with ``retired_at``
+    set no longer signs but stays published and verifiable, so signatures
+    made before a rotation keep verifying. A key with ``revoked_at`` set,
+    or past ``expires_at``, is no longer published.
+    """
 
     __tablename__ = "tap_keys"
 
     key_id: Mapped[str] = mapped_column(String(80), primary_key=True)
     agent_id: Mapped[str] = mapped_column(String(80), nullable=False)
     public_key_pem: Mapped[str] = mapped_column(Text, nullable=False)
+    algorithm: Mapped[str] = mapped_column(String(20), nullable=False, default="ed25519")
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# Silo chat (per-user, org-scoped conversation memory)
+# ---------------------------------------------------------------------------
+
+CHAT_ROLES = ("user", "assistant", "system", "tool")
+
+
+class ChatThread(TimestampMixin, Base):
+    """One Silo chat conversation. Owned by one user inside one organization."""
+
+    __tablename__ = "chat_threads"
+    __table_args__ = (Index("ix_chat_threads_user_updated", "user_id", "updated_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+
+    messages: Mapped[list[ChatMessage]] = relationship(back_populates="thread", cascade="all, delete-orphan",
+                                                       order_by="ChatMessage.id")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (CheckConstraint(_in("role", CHAT_ROLES), name="ck_chat_message_role"),)
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    thread: Mapped[ChatThread] = relationship(back_populates="messages")
+
+
+class ChatSecurityEvent(TimestampMixin, Base):
+    """Audit record for refused chat input (cross-tenant / injection attempts)."""
+
+    __tablename__ = "chat_security_events"
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chat_threads.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)  # e.g. "cross_tenant", "instruction_override"
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 # ---------------------------------------------------------------------------

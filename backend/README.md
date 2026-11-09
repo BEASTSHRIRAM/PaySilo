@@ -5,7 +5,7 @@ FastAPI + LangGraph. Python 3.12, managed with [uv](https://docs.astral.sh/uv/).
 ```bash
 cd backend
 uv sync                                   # creates .venv from uv.lock
-uv run pytest                             # 53 tests: policy, ledger, TAP, graph safety, API
+uv run pytest                             # 78 tests: policy, ledger, TAP, graph safety, API, live client fixtures
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -20,7 +20,8 @@ app/
   policy.py            fee-first affordability (payroll + payout fees + run fee + reserve floor)
   ledger.py            in-memory double-entry ledger (one employer per transaction)
   agents/              LangGraph graph: intake -> price -> assess -> approval/escalate -> execute -> fee -> reconcile -> attest
-  airwallex/           REST client, simulator (same interface), call recorder
+  airwallex/           REST client, simulator (same interface), call recorder, live FX rate provider
+  docs/                airwallex-fee-path.md — why the run fee uses /charges/create
   partners/            Visa TAP signing, Metal attestation, AgentCore entrypoint
   db/                  SQLAlchemy models, engine (Supabase/Postgres or SQLite), Postgres guards, schema export
   services/runtime.py  runs the graph and persists every step

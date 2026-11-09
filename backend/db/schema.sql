@@ -1,4 +1,4 @@
--- PaySilo schema (generated from app/db/models.py — do not edit by hand).
+-- PaySilo schema (generated from app/db/models.py â€” do not edit by hand).
 -- Regenerate: uv run python -m app.db.export_schema > db/schema.sql
 
 CREATE TABLE organizations (
@@ -22,6 +22,9 @@ CREATE TABLE tap_keys (
 	key_id VARCHAR(80) NOT NULL, 
 	agent_id VARCHAR(80) NOT NULL, 
 	public_key_pem TEXT NOT NULL, 
+	algorithm VARCHAR(20) NOT NULL, 
+	retired_at TIMESTAMP WITH TIME ZONE, 
+	expires_at TIMESTAMP WITH TIME ZONE, 
 	revoked_at TIMESTAMP WITH TIME ZONE, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (key_id)
@@ -38,6 +41,21 @@ CREATE TABLE users (
 	PRIMARY KEY (id), 
 	UNIQUE (email)
 );
+
+CREATE TABLE chat_threads (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	user_id UUID NOT NULL, 
+	title VARCHAR(200) NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_chat_threads_organization_id ON chat_threads (organization_id);
+CREATE INDEX ix_chat_threads_user_id ON chat_threads (user_id);
+CREATE INDEX ix_chat_threads_user_updated ON chat_threads (user_id, updated_at);
 
 CREATE TABLE employers (
 	id UUID NOT NULL, 
@@ -72,6 +90,33 @@ CREATE TABLE memberships (
 	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX ix_memberships_user_id ON memberships (user_id);
+
+CREATE TABLE chat_messages (
+	id BIGSERIAL NOT NULL, 
+	thread_id UUID NOT NULL, 
+	role VARCHAR(16) NOT NULL, 
+	content TEXT NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_chat_message_role CHECK (role IN ('user', 'assistant', 'system', 'tool')), 
+	FOREIGN KEY(thread_id) REFERENCES chat_threads (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_chat_messages_thread_id ON chat_messages (thread_id);
+
+CREATE TABLE chat_security_events (
+	id BIGSERIAL NOT NULL, 
+	organization_id UUID NOT NULL, 
+	user_id UUID, 
+	thread_id UUID, 
+	kind VARCHAR(40) NOT NULL, 
+	detail TEXT NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(thread_id) REFERENCES chat_threads (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_chat_security_events_organization_id ON chat_security_events (organization_id);
 
 CREATE TABLE contractors (
 	id UUID NOT NULL, 
@@ -307,8 +352,11 @@ CREATE TRIGGER trg_paysilo_ledger_entries_append_only
 ALTER TABLE "organizations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "tap_keys" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "users" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_threads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "employers" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "memberships" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_messages" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "chat_security_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "contractors" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "payroll_runs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "agent_events" ENABLE ROW LEVEL SECURITY;

@@ -16,18 +16,82 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Protocol
 
 from .tap import (
     TapAgentKey,
     TapAgentRegistry,
     TapReplayGuard,
     TapVerifyResult,
+    content_digest,
     generate_tap_agent,
+    load_tap_agent,
     sign_request,
     verify_request,
 )
 
 AUTHORITY = "agent.paysilo.app"
+
+
+def signer_from_key_material(agent_id: str, private_key_material: str,
+                             key_id: str | None = None) -> "TapSigner":
+    """A signer backed by a persistent key (``TAP_PRIVATE_KEY``)."""
+    return TapSigner(key=load_tap_agent(agent_id, private_key_material, key_id=key_id))
+
+
+class StoredApproval(Protocol):
+    """The fields of an ``approvals`` row needed to re-verify it."""
+
+    run_id: object
+    signed_body: str | None
+    tap_signature_input: str | None
+    tap_signature: str | None
+    created_at: datetime | None
+
+
+def registry_from_tap_key_rows(rows) -> TapAgentRegistry:
+    """Build a verification registry from ``tap_keys`` rows (active + retired)."""
+    registry = TapAgentRegistry()
+    for row in rows:
+        registry.register_pem(key_id=row.key_id, agent_id=row.agent_id, pem=row.public_key_pem)
+    return registry
+
+
+def verify_stored_approval(approval: StoredApproval, registry: TapAgentRegistry) -> TapVerifyResult:
+    """Re-verify a stored approval signature against published public keys.
+
+    This is a read-only audit check: it does not consume the nonce (replay
+    protection is enforced once, at execution time, by the graph and by the
+    unique ``tap_nonce`` column). Freshness is evaluated at the approval's
+    own ``created_at`` — TAP signatures are short-lived request signatures,
+    so the meaningful question for a stored approval is whether it was
+    valid when it was presented, not whether its 5-minute window is still
+    open today. Tampering with the stored body still fails the digest /
+    signature checks exactly as a live request would.
+    """
+    if not approval.signed_body or not approval.tap_signature_input or not approval.tap_signature:
+        return TapVerifyResult(False, "missing_signature",
+                               detail="This approval row carries no TAP signature to verify.")
+    headers = {
+        "Signature-Input": approval.tap_signature_input,
+        "Signature": approval.tap_signature,
+        # The Content-Digest header was not stored separately; it is a pure
+        # function of the stored signed body, so it is recomputed here and
+        # then checked by verify_request like any covered header.
+        "Content-Digest": content_digest(approval.signed_body),
+    }
+    at: int | None = None
+    if approval.created_at is not None:
+        created = approval.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=UTC)
+        at = int(created.timestamp())
+    return verify_request(
+        method="POST", authority=AUTHORITY, path=f"/runs/{approval.run_id}/decision",
+        headers=headers, registry=registry, replay_guard=None,
+        body=approval.signed_body, now_seconds=at,
+    )
 
 
 def canonical_json(body: dict) -> str:
