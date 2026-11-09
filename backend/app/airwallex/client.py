@@ -49,6 +49,9 @@ from ..money import round_money, to_decimal
 # SANDBOX-ONLY placeholder postcodes for payee addresses PaySilo does not collect.
 SANDBOX_PLACEHOLDER_POSTCODES = {"DE": "10115", "US": "10001", "GB": "SW1A 1AA", "FR": "75001",
                                  "NL": "1012 AB", "ES": "28001", "IT": "00100", "IE": "D01 F5P2"}
+# Countries whose payee address needs a state/province (live-verified: US, ES —
+# "beneficiary.address.state" validation_failed without it). Sandbox placeholders.
+SANDBOX_PLACEHOLDER_STATES = {"US": "NY", "ES": "Madrid"}
 DUPLICATE_CODES = {"request_id_duplicate", "duplicate_request_id"}
 
 
@@ -526,9 +529,9 @@ class AirwallexClient:
         # Some countries (DE: "beneficiary.address.postcode") also require a postcode.
         postcode = postcode or SANDBOX_PLACEHOLDER_POSTCODES.get(country_code, "10001")
         address["postcode"] = postcode
-        # US payees also need a state (live: beneficiary.address.state). Sandbox placeholder.
-        if country_code == "US":
-            address["state"] = state or "NY"
+        state = state or SANDBOX_PLACEHOLDER_STATES.get(country_code, "")
+        if state:
+            address["state"] = state
         payload = {"request_id": request_id,
                    "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account,
                                    "address": address},

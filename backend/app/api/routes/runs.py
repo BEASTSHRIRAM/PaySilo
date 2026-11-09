@@ -91,3 +91,19 @@ def decide(run_id: uuid.UUID, body: DecisionIn, tenant: Tenant = Depends(require
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run_id))
+
+
+@router.post("/{run_id}/retry", response_model=RunDetailOut)
+def retry(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+          db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """Resume a FAILED run from its checkpoint. Completed payouts are skipped and every
+    money call reuses its request_id, so nobody is paid twice."""
+    run = load_run(db, tenant, run_id)
+    if run.status != "FAILED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a failed run can be retried.")
+    try:
+        runtime.resume_failed(db, run=run, employer=run.employer)
+    except (RuntimeConflict, ValueError) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    db.expire_all()
+    return run_detail_out(db, runtime, load_run(db, tenant, run_id))

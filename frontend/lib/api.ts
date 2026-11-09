@@ -243,6 +243,7 @@ export const api = {
   startRun: (employerId: string, lines: { contractor_id: string; amount?: string }[]) =>
     post<RunDetail>("/runs", { employer_id: employerId, lines }),
   decide: (id: string, decision: "approve" | "hold") => post<RunDetail>(`/runs/${id}/decision`, { decision }),
+  retryRun: (id: string) => post<RunDetail>(`/runs/${id}/retry`),
 
   // Chat history (shapes are normalised by the panel; the backend owns them).
   chatThreads: () => request<unknown>("/chat/threads"),

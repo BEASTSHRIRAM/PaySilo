@@ -66,9 +66,11 @@ export function explainRunError(raw: string | null | undefined): RunErrorInfo | 
   }
   if (/HTTP \d{3}/.test(technical) || AIRWALLEX_CODE.test(technical)) {
     const code = technical.match(AIRWALLEX_CODE)?.[1];
+    const fields = technical.match(/\[fields: ([^\]]+)\]/)?.[1];
+    const payee = /beneficiar/i.test(technical);
     return {
-      title: "Airwallex rejected a request",
-      message: `Airwallex returned an error${code ? ` (${code.replace(/_/g, " ")})` : ""}. PaySilo stopped at that step; any payouts already sent are listed below.`,
+      title: payee ? "Airwallex rejected a payee's details" : "Airwallex rejected a request",
+      message: `Airwallex returned an error${code ? ` (${code.replace(/_/g, " ")})` : ""}${fields ? ` on ${fields}` : ""}. PaySilo stopped at that step; payouts already sent are marked PAID below.`,
       hint: "Check the technical details, then retry. Retries are safe — every step reuses its request id, so nobody is paid twice.",
       technical,
     };

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Loader2, PauseCircle } from "lucide-react";
+import { Check, Loader2, PauseCircle, RotateCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ const LEVEL_DOT: Record<string, string> = {
 };
 
 export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDecide: boolean; onChange: (r: RunDetail) => void }) {
-  const [busy, setBusy] = useState<"approve" | "hold" | null>(null);
+  const [busy, setBusy] = useState<"approve" | "hold" | "retry" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const a = run.assessment;
   const info = runStatusInfo(run);
@@ -39,6 +39,19 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
       notifyDataChanged({ runId: run.id });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not record the decision.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function retry() {
+    setBusy("retry");
+    setError(null);
+    try {
+      onChange(await api.retryRun(run.id));
+      notifyDataChanged({ runId: run.id });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not retry the run.");
     } finally {
       setBusy(null);
     }
@@ -69,6 +82,15 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
               <p className="mt-1 break-words font-mono">{runError.technical}</p>
             </details>
           )}
+          {run.status === "FAILED" && canDecide && (
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <Button size="sm" disabled={!!busy} onClick={() => void retry()}>
+                {busy === "retry" ? <Loader2 className="animate-spin" /> : <RotateCw />} Retry failed payouts
+              </Button>
+              <span className="text-xs font-semibold text-sage-400">Payouts already sent are skipped — nobody is paid twice.</span>
+            </div>
+          )}
+          {run.status === "FAILED" && error && <p className="mt-2 text-sm font-bold text-coral-300">{error}</p>}
         </div>
       )}
 

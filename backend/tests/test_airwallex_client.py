@@ -556,3 +556,15 @@ def test_gbp_local_beneficiary_uses_sort_code_without_ach_fields():
     bank = only(calls, "/beneficiaries/validate")["json"]["beneficiary"]["bank_details"]
     assert bank["account_routing_type1"] == "sort_code" and bank["account_routing_value1"] == "200000"
     assert "bank_account_category" not in bank
+
+
+def test_spanish_payee_address_gets_a_state():
+    # Live sandbox: ES payees fail validation without beneficiary.address.state.
+    client, calls = make_client({
+        ("POST", "/beneficiaries/validate"): (200, load("beneficiary_validate.json")),
+        ("POST", "/beneficiaries/create"): (201, load("beneficiary_create.json")),
+    })
+    client.create_beneficiary(request_id="req-b-es", on_behalf_of=ACCOUNT_ID, name="Tomás Rivera",
+                              currency="EUR", country_code="ES", method="SWIFT",
+                              iban="ES9121000418450200051332", swift_code="CAIXESBBXXX")
+    assert only(calls, "/beneficiaries/validate")["json"]["beneficiary"]["address"]["state"]
