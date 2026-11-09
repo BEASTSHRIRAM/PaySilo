@@ -355,7 +355,15 @@ def build_graph(services: Services, checkpointer=None):
         _log(state, "escalate",
              f"{len(held)} line(s) escalated and held: {', '.join(l['name'] for l in held)}. "
              f"Exact shortfall for the full batch: USD {full_shortfall}.", "warning", audit, events)
-        return {"route": "approval", "status": "RESERVED", "assessment": partial,
+        explanation = (
+            f"{state['employer_name']} can pay {len(paid)} of {len(all_lines)} contractor(s) from its own wallet "
+            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with the USD "
+            f"{partial['platform_fee_usd']} run fee covered and the USD {partial['reserve_floor_usd']} reserve kept. "
+            f"{', '.join(l['name'] for l in held)} {'is' if len(held) == 1 else 'are'} held — the full batch is "
+            f"short USD {full_shortfall}. Held lines are escalated to a human and will not be covered from another "
+            "employer's funds."
+        )
+        return {"route": "approval", "status": "RESERVED", "assessment": partial, "explanation": explanation,
                 "pay_lines": paid, "held_lines": held, "audit": audit, "events": events}
 
     def approval_node(state: PayrollRunState) -> dict:

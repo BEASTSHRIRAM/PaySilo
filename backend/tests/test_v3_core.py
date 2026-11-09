@@ -372,6 +372,9 @@ def test_delta_studios_pays_the_smaller_line_and_holds_the_other(demo_client):
     assert run["pending"]["partial"] is True
     assert [l["name"] for l in run["pending"]["pay_lines"]] == ["Noor van Dijk"]
     assert [l["name"] for l in run["pending"]["held_lines"]] == ["Pieter Jansen"]
+    # The operator-facing explanation describes the partial plan, not "cannot run".
+    assert run["explanation"].startswith("Delta Studios BV can pay 1 of 2 contractor(s)")
+    assert "Pieter Jansen is held" in run["explanation"] and "cannot run" not in run["explanation"]
 
     done = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
     assert done["status"] == "PARTIALLY_PAID", done
