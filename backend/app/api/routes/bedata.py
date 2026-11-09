@@ -20,14 +20,13 @@ import re
 import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
 
-from ...airwallex.simulator import request_id_for
 from ...config import Settings
 from ...db.models import (
     ChatSecurityEvent,
@@ -44,14 +43,17 @@ from ...db.models import (
 from ...money import money_str, round_money
 from ...services.runtime import PlatformRuntime
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, get_settings, require_roles
-from ..serializers import run_detail_out
 from ..schemas import RunDetailOut
+from ..serializers import run_detail_out
 from .employers import load_employer
 from .runs import load_run
 
 router = APIRouter(tags=["bedata"])
 
 SUPPORTED_CURRENCIES = {"USD", "EUR", "GBP"}
+MAX_IMPORT_ROWS = 5_000
+MAX_IMPORT_BYTES = 2_000_000
+_AMOUNT_RE = re.compile(r"^\d+(\.\d{1,2})?$")
 NON_CANCELLED_RUN_STATUSES_EXCLUDED = {"REFUSED", "APPROVAL_REJECTED"}
 
 # Canonical import fields -> accepted CSV header aliases (normalised).
@@ -105,25 +107,61 @@ class ImportCommitIn(BaseModel):
     pay_date: str | None = None  # YYYY-MM-DD
 
 
-def _import_out(imp: SourceImport) -> dict:
-    rows = [{
-        "row_number": r.row_number,
-        "status": r.status,
-        "errors": list(r.errors or []),
-        "data": dict(r.data or {}),
-    } for r in imp.rows]
+def _active_contractors(db: Session, emp: Employer) -> list[Contractor]:
+    return list(db.scalars(select(Contractor).where(
+        Contractor.employer_id == emp.id, Contractor.organization_id == emp.organization_id,
+        Contractor.is_active.is_(True))))
+
+
+def match_contractor(contractors: list[Contractor], data: dict) -> tuple[Contractor | None, str | None]:
+    """Map an import row to an existing active contractor of the employer.
+
+    Bank identifier first (iban / account number, whitespace + case
+    insensitive), else exact (case-insensitive) name. Returns
+    ``(contractor, None)`` or ``(None, reason)``. Never creates anything.
+    """
+    bank = _norm_bank(data.get("iban") or data.get("account_number"))
+    hit: Contractor | None = None
+    if bank:
+        hit = next((c for c in contractors if bank in (_norm_bank(c.iban), _norm_bank(c.account_number))), None)
+    if hit is None:
+        name = (data.get("beneficiary_name") or "").strip().casefold()
+        hit = next((c for c in contractors if c.full_name.strip().casefold() == name), None) if name else None
+    if hit is None:
+        return None, "no matching contractor for this employer; add the contractor first"
+    if (data.get("currency") or "").upper() != hit.currency:
+        return None, f"currency differs from contractor record ({hit.currency})"
+    return hit, None
+
+
+def _import_out(imp: SourceImport, contractors: list[Contractor] | None = None) -> dict:
+    rows = []
+    needs_contractor = 0
+    for r in imp.rows:
+        row = {"row_number": r.row_number, "status": r.status, "errors": list(r.errors or []),
+               "data": dict(r.data or {}), "contractor_id": None, "needs_contractor": False}
+        if contractors is not None and r.status == "ok":
+            c, reason = match_contractor(contractors, row["data"])
+            row["contractor_id"] = str(c.id) if c else None
+            row["needs_contractor"] = c is None
+            row["match_note"] = reason
+            needs_contractor += 1 if c is None else 0
+        rows.append(row)
     valid = sum(1 for r in imp.rows if r.status == "ok")
     errors = sum(1 for r in imp.rows if r.status == "error")
     dups = sum(1 for r in imp.rows if r.status == "duplicate")
     summary = {
         "row_count": len(rows), "valid_count": valid, "error_count": errors, "duplicate_count": dups,
+        "needs_contractor_count": needs_contractor,
         "status": imp.status,
-        "text": f"{valid} valid, {errors} with errors, {dups} duplicate(s) out of {len(rows)} row(s).",
+        "text": f"{valid} valid, {errors} with errors, {dups} duplicate(s) out of {len(rows)} row(s)."
+                + (f" {needs_contractor} valid row(s) need a contractor record first." if needs_contractor else ""),
     }
     return {
         "import_id": str(imp.id), "content_hash": imp.content_hash, "filename": imp.filename,
         "status": imp.status, "run_id": str(imp.run_id) if imp.run_id else None,
         "row_count": len(rows), "valid_count": valid, "error_count": errors, "duplicate_count": dups,
+        "needs_contractor_count": needs_contractor,
         "rows": rows, "summary": summary,
     }
 
@@ -153,6 +191,13 @@ def _existing_business_keys(db: Session, employer_id: uuid.UUID) -> set[str]:
             "beneficiary_name": line.beneficiary_name, "amount": money_str(line.amount),
             "currency": line.currency, "iban": bank,
         }))
+    # Rows of previously COMMITTED imports for this employer (re-imports of
+    # the same payees in a different file/order must be flagged).
+    keys.update(k for k in db.scalars(
+        select(SourceImportRow.business_key)
+        .join(SourceImport, SourceImportRow.import_id == SourceImport.id)
+        .where(SourceImport.employer_id == employer_id, SourceImport.status == "COMMITTED",
+               SourceImportRow.status == "ok", SourceImportRow.business_key.is_not(None))) if k)
     return keys
 
 
@@ -162,10 +207,14 @@ def preview_import(employer_id: uuid.UUID, body: ImportPreviewIn,
                    db: Session = Depends(get_db)) -> dict:
     emp = load_employer(db, tenant, employer_id)
     content_hash = hashlib.sha256(body.content.encode("utf-8")).hexdigest()
+    if len(body.content.encode("utf-8")) > MAX_IMPORT_BYTES:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Import file is too large.")
+    contractors = _active_contractors(db, emp)
     existing = db.scalar(select(SourceImport).options(selectinload(SourceImport.rows)).where(
         SourceImport.employer_id == emp.id, SourceImport.content_hash == content_hash))
-    if existing is not None:
-        return _import_out(existing)  # same employer + same file: no new rows, ever
+    if existing is not None and (existing.status == "COMMITTED"
+                                 or (existing.mapping or None) == (body.mapping or None)):
+        return _import_out(existing, contractors)  # same file + same mapping: no new rows, ever
 
     # Resolve column mapping: explicit {csv_column: field} wins over aliases.
     explicit: dict[str, str] = {}
@@ -182,6 +231,9 @@ def preview_import(employer_id: uuid.UUID, body: ImportPreviewIn,
         raise HTTPException(422, f"Could not parse CSV: {exc}") from None
     if not headers:
         raise HTTPException(422, "CSV has no header row.")
+    if len(raw_rows) > MAX_IMPORT_ROWS:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"Import has {len(raw_rows)} rows; the limit is {MAX_IMPORT_ROWS}.")
 
     col_field: dict[str, str] = {}
     for h in headers:
@@ -194,12 +246,20 @@ def preview_import(employer_id: uuid.UUID, body: ImportPreviewIn,
     existing_keys = _existing_business_keys(db, emp.id)
     seen_in_file: set[str] = set()
 
-    imp = SourceImport(organization_id=tenant.organization.id, employer_id=emp.id,
-                       created_by_id=tenant.user.id, filename=body.filename,
-                       content_hash=content_hash, content=body.content, mapping=body.mapping,
-                       status="PREVIEWED")
-    db.add(imp)
-    db.flush()
+    if existing is not None:
+        # Same file previewed again with a different mapping: re-run it.
+        existing.rows.clear()
+        existing.mapping = body.mapping
+        existing.filename = body.filename or existing.filename
+        db.flush()
+        imp = existing
+    else:
+        imp = SourceImport(organization_id=tenant.organization.id, employer_id=emp.id,
+                           created_by_id=tenant.user.id, filename=body.filename,
+                           content_hash=content_hash, content=body.content, mapping=body.mapping,
+                           status="PREVIEWED")
+        db.add(imp)
+        db.flush()
 
     for idx, raw in enumerate(raw_rows, start=1):
         data: dict[str, str] = {}
@@ -220,17 +280,15 @@ def preview_import(employer_id: uuid.UUID, body: ImportPreviewIn,
         if not raw_amount:
             errors.append("amount is required")
         else:
-            try:
+            if not _AMOUNT_RE.fullmatch(raw_amount):
+                errors.append("amount must be a positive decimal with at most 2 decimal places")
+            else:
                 amt = Decimal(raw_amount)
-                if not amt.is_finite() or amt <= 0:
+                if amt <= 0:
                     errors.append("amount must be a positive decimal")
-                elif amt.as_tuple().exponent < -2:
-                    errors.append("amount must have at most 2 decimal places")
                 else:
                     amount_str = money_str(amt)
                     data["amount"] = amount_str
-            except InvalidOperation:
-                errors.append("amount must be a positive decimal")
         # currency
         ccy = (data.get("currency") or "").strip().upper()
         if not ccy:
@@ -284,21 +342,32 @@ def preview_import(employer_id: uuid.UUID, body: ImportPreviewIn,
     db.expire_all()
     imp = db.scalar(select(SourceImport).options(selectinload(SourceImport.rows))
                     .where(SourceImport.id == imp.id))
-    return _import_out(imp)
+    return _import_out(imp, contractors)
 
 
 @router.post("/employers/{employer_id}/imports/{import_id}/commit", response_model=RunDetailOut)
 def commit_import(employer_id: uuid.UUID, import_id: uuid.UUID, body: ImportCommitIn,
                   tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                   db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """Commit a previewed import by starting a normal payroll run.
+
+    Every valid row must map to an existing active contractor of this
+    employer (bank identifier, else exact name); the run then goes through
+    the agent graph (pricing, TAP approval, payout) exactly like a manual
+    run. Nothing is created behind the graph's back.
+    """
     emp = load_employer(db, tenant, employer_id)
     imp = db.scalar(select(SourceImport).options(selectinload(SourceImport.rows)).where(
         SourceImport.id == import_id, SourceImport.employer_id == emp.id,
         SourceImport.organization_id == tenant.organization.id))
     if imp is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Import not found.")
-    if imp.status == "COMMITTED" and imp.run_id is not None:
+    if imp.status == "COMMITTED":
+        if imp.run_id is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "This import is being committed; retry shortly.")
         return run_detail_out(db, runtime, load_run(db, tenant, imp.run_id))  # idempotent replay
+    if emp.status != "ACTIVE":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{emp.name} is not active.")
 
     pay_date_val: date | None = None
     if body.pay_date:
@@ -308,23 +377,49 @@ def commit_import(employer_id: uuid.UUID, import_id: uuid.UUID, body: ImportComm
             raise HTTPException(422, "pay_date must be YYYY-MM-DD.") from None
 
     ok_rows = [r for r in imp.rows if r.status == "ok"]
-    run = PayrollRun(organization_id=tenant.organization.id, employer_id=emp.id,
-                     created_by_id=tenant.user.id, source="import", status="RECEIVED",
-                     period_label=body.period_label or f"Import {imp.filename}".strip(),
-                     pay_date=pay_date_val)
-    db.add(run)
-    db.flush()
-    currencies = set()
-    for pos, row in enumerate(ok_rows):
+    if not ok_rows:
+        raise HTTPException(422, "This import has no valid rows to commit.")
+    contractors = _active_contractors(db, emp)
+    lines: list[dict] = []
+    unmatched: list[dict] = []
+    seen: set[uuid.UUID] = set()
+    for row in ok_rows:
         d = dict(row.data or {})
-        currencies.add(d["currency"])
-        db.add(PayLine(run_id=run.id, position=pos, beneficiary_name=d["beneficiary_name"],
-                       amount=Decimal(d["amount"]), currency=d["currency"],
-                       method=d.get("method", "SWIFT"), status="PENDING",
-                       request_id=request_id_for(str(run.id), f"pay-{pos}")))
-    run.payroll_currency = next(iter(currencies)) if len(currencies) == 1 else ("MIXED" if currencies else None)
-    imp.status = "COMMITTED"
-    imp.run_id = run.id
+        c, reason = match_contractor(contractors, d)
+        if c is None:
+            unmatched.append({"row_number": row.row_number, "beneficiary_name": d.get("beneficiary_name"),
+                              "reason": reason})
+            continue
+        if c.id in seen:
+            unmatched.append({"row_number": row.row_number, "beneficiary_name": d.get("beneficiary_name"),
+                              "reason": f"{c.full_name} appears twice in this import"})
+            continue
+        seen.add(c.id)
+        lines.append(runtime.contractor_line(c, Decimal(d["amount"])))
+    if unmatched:
+        raise HTTPException(422, detail={
+            "message": "Some rows need a contractor record before this import can become a run.",
+            "needs_contractor": unmatched})
+
+    # Atomic PREVIEWED -> COMMITTED claim: a concurrent commit updates zero
+    # rows and gets 409 instead of starting a second run. The UPDATE shares
+    # the transaction that start_run commits, so a failed run start rolls the
+    # claim back too.
+    claimed = db.execute(update(SourceImport).where(
+        SourceImport.id == imp.id, SourceImport.status == "PREVIEWED").values(status="COMMITTED"))
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "This import was already committed.")
+    try:
+        run = runtime.start_run(db, org=tenant.organization, user=tenant.user, employer=emp,
+                                pay_lines=lines, raw_input=None, source="import",
+                                period_label=body.period_label or f"Import {imp.filename}".strip()[:60])
+    except Exception:
+        db.rollback()
+        raise
+    if pay_date_val is not None:
+        run.pay_date = pay_date_val
+    db.execute(update(SourceImport).where(SourceImport.id == imp.id).values(run_id=run.id))
     db.commit()
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run.id))
@@ -343,7 +438,8 @@ def _load_import(db: Session, tenant: Tenant, employer_id: uuid.UUID, import_id:
 @router.get("/employers/{employer_id}/imports/{import_id}")
 def get_import(employer_id: uuid.UUID, import_id: uuid.UUID,
                tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> dict:
-    return _import_out(_load_import(db, tenant, employer_id, import_id))
+    emp = load_employer(db, tenant, employer_id)
+    return _import_out(_load_import(db, tenant, employer_id, import_id), _active_contractors(db, emp))
 
 
 # ---------------------------------------------------------------------------
@@ -439,13 +535,9 @@ def employer_journals(employer_id: uuid.UUID, tenant: Tenant = Depends(current_t
     return journals_for(db, _employer_transactions(db, tenant, emp))
 
 
-@router.get("/employers/{employer_id}/journals/export")
-def employer_journals_export(employer_id: uuid.UUID, format: str = Query("json", pattern="^(csv|json)$"),
-                             tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
-    emp = load_employer(db, tenant, employer_id)
-    journals = journals_for(db, _employer_transactions(db, tenant, emp))
-    fname = f"journals-{emp.id}.{format}"
-    if format == "json":
+def journals_download(journals: list[dict], fmt: str, fname_stem: str) -> Response:
+    fname = f"{fname_stem}.{fmt}"
+    if fmt == "json":
         return Response(content=json.dumps(journals, indent=2), media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
     buf = io.StringIO()
@@ -459,13 +551,21 @@ def employer_journals_export(employer_id: uuid.UUID, format: str = Query("json",
                     headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
+@router.get("/employers/{employer_id}/journals/export")
+def employer_journals_export(employer_id: uuid.UUID, format: str = Query("json", pattern="^(csv|json)$"),
+                             tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
+    emp = load_employer(db, tenant, employer_id)
+    return journals_download(journals_for(db, _employer_transactions(db, tenant, emp)), format,
+                             f"journals-{emp.id}")
+
+
 # ---------------------------------------------------------------------------
 # 4. Reconciliation (guide §10.3)
 # ---------------------------------------------------------------------------
 
 @router.get("/employers/{employer_id}/reconciliation")
 def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tenant),
-                   db: Session = Depends(get_db)) -> dict:
+                   db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> dict:
     """Cash identity per currency, classified from this employer's ledger:
 
         closing = opening(0) + deposits + refunds + fx_buys - fx_sells
@@ -482,7 +582,12 @@ def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tena
                       posted by the current graph, so honestly 0 unless real
                       refund postings exist)
       other           any remaining cash movement, reported — never hidden
-    Variance is reported, never forced to zero.
+    ``variance`` = ledger closing cash minus the employer's wallet balance
+    as reported by the provider (``wallet_balance``). If the wallet cannot be
+    read (no connected account, provider error) ``wallet_available`` is false,
+    ``variance`` falls back to the internal identity check and the response
+    is labelled ``basis: "ledger_self_check"`` so it never claims external
+    assurance. ``identity_variance`` is always the internal check.
     """
     emp = load_employer(db, tenant, employer_id)
     key = emp.ledger_key
@@ -543,15 +648,33 @@ def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tena
             "provider_ref": line.airwallex_transfer_id,
         })
     matched_n = sum(1 for s in settlements if s["matched"])
-    matched_percent = round(100.0 * matched_n / len(settlements), 2) if settlements else 100.0
+    matched_percent = round(100.0 * matched_n / len(settlements), 2) if settlements else None
     has_open = any(s["status"] in ("PENDING", "HELD") for s in settlements)
+
+    wallet: dict[str, Decimal] | None = None
+    if emp.airwallex_account_id:
+        try:
+            wallet = {c: round_money(v) for c, v in
+                      runtime.recorder.get_balances(account_id=emp.airwallex_account_id).items()}
+        except Exception:  # provider unreachable: degrade to a labelled self-check
+            wallet = None
+    if wallet is not None:
+        currencies |= {c for c, v in wallet.items() if v != 0}
 
     currency_rows = []
     for ccy in sorted(currencies):
         p = per[ccy]
         computed = (p["deposits"] + p["refunds"] + p["fx_buys"] - p["fx_sells"]
                     - p["payout_debits"] - p["provider_fees"] - p["platform_charges"] + p["other"])
-        variance = round_money(p["closing_cash"] - computed)
+        identity_variance = round_money(p["closing_cash"] - computed)
+        if wallet is not None:
+            wallet_bal = wallet.get(ccy, Decimal("0.00"))
+            variance = round_money(p["closing_cash"] - wallet_bal)
+            if identity_variance != 0:
+                variance = identity_variance if variance == 0 else variance
+        else:
+            wallet_bal = None
+            variance = identity_variance
         if variance != 0:
             rstatus = "variance"
         elif has_open:
@@ -568,6 +691,9 @@ def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tena
             "other": money_str(p["other"]),
             "computed_closing_cash": money_str(computed),
             "closing_cash": money_str(p["closing_cash"]),
+            "wallet_balance": money_str(wallet_bal) if wallet_bal is not None else None,
+            "wallet_available": wallet_bal is not None,
+            "identity_variance": money_str(identity_variance),
             "variance": money_str(variance), "status": rstatus,
         })
 
@@ -578,6 +704,11 @@ def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tena
         "employer_id": str(emp.id), "employer_name": emp.name,
         "currencies": currency_rows, "status": overall,
         "settlements": settlements, "matched_percent": matched_percent,
+        "basis": "ledger_vs_wallet" if wallet is not None else "ledger_self_check",
+        "basis_note": ("Ledger cash compared with the employer's wallet balance reported by the provider."
+                       if wallet is not None else
+                       "Ledger self-check only: the provider wallet could not be read, so this is not "
+                       "external assurance."),
     }
 
 
@@ -587,7 +718,7 @@ def reconciliation(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tena
 
 @router.get("/employers/{employer_id}/calendar")
 def employer_calendar(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tenant),
-                      db: Session = Depends(get_db)) -> list[dict]:
+                      db: Session = Depends(get_db)) -> dict:
     emp = load_employer(db, tenant, employer_id)
     runs = db.scalars(select(PayrollRun).where(
         PayrollRun.employer_id == emp.id, PayrollRun.organization_id == tenant.organization.id,
@@ -608,7 +739,7 @@ def employer_calendar(employer_id: uuid.UUID, tenant: Tenant = Depends(current_t
                 "label": f"{label_base} — {suffix}", "derived": True, "note": note,
             })
     events.sort(key=lambda e: (e["date"], e["kind"]))
-    return events
+    return {"events": events}
 
 
 # ---------------------------------------------------------------------------
@@ -715,14 +846,15 @@ def run_evidence(run_id: uuid.UUID, tenant: Tenant = Depends(current_tenant),
 # ---------------------------------------------------------------------------
 
 @router.get("/exceptions")
-def list_exceptions(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
+def list_exceptions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                    tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
     org_id = tenant.organization.id
     employers = {e.id: e for e in db.scalars(select(Employer).where(Employer.organization_id == org_id))}
     out: list[dict] = []
 
     runs = db.scalars(select(PayrollRun).options(selectinload(PayrollRun.pay_lines))
                       .where(PayrollRun.organization_id == org_id)
-                      .order_by(PayrollRun.created_at.desc())).all()
+                      .order_by(PayrollRun.created_at.desc()).limit(1000)).all()
     for run in runs:
         emp = employers.get(run.employer_id)
         ename = emp.name if emp else None
@@ -767,7 +899,7 @@ def list_exceptions(tenant: Tenant = Depends(current_tenant), db: Session = Depe
     imports = db.scalars(select(SourceImport).options(selectinload(SourceImport.rows))
                          .where(SourceImport.organization_id == org_id,
                                 SourceImport.status != "COMMITTED")
-                         .order_by(SourceImport.created_at.desc())).all()
+                         .order_by(SourceImport.created_at.desc()).limit(200)).all()
     for imp in imports:
         errs = sum(1 for r in imp.rows if r.status == "error")
         dups = sum(1 for r in imp.rows if r.status == "duplicate")
@@ -785,8 +917,10 @@ def list_exceptions(tenant: Tenant = Depends(current_tenant), db: Session = Depe
             "created_at": imp.created_at.isoformat() if imp.created_at else None,
         })
 
-    sec_events = db.scalars(select(ChatSecurityEvent).where(ChatSecurityEvent.organization_id == org_id)
-                            .order_by(ChatSecurityEvent.created_at.desc())).all()
+    # Security events are operator-sensitive: owner/admin only.
+    sec_events = [] if tenant.role not in EDITOR_ROLES else db.scalars(
+        select(ChatSecurityEvent).where(ChatSecurityEvent.organization_id == org_id)
+        .order_by(ChatSecurityEvent.created_at.desc()).limit(200)).all()
     for ev in sec_events:
         out.append({
             "id": f"chatsec:{ev.id}", "type": "chat_security", "severity": "high",
@@ -799,16 +933,45 @@ def list_exceptions(tenant: Tenant = Depends(current_tenant), db: Session = Depe
         })
 
     out.sort(key=lambda x: x["created_at"] or "", reverse=True)
-    return out
+    return out[offset:offset + limit]
 
 
 # ---------------------------------------------------------------------------
 # 9. Worker receipt (HMAC token + public receipt)
 # ---------------------------------------------------------------------------
 
-def receipt_token(settings: Settings, pay_line_id: uuid.UUID) -> str:
-    return hmac.new(settings.session_secret().encode("utf-8"), str(pay_line_id).encode("utf-8"),
-                    hashlib.sha256).hexdigest()[:32]
+RECEIPT_TTL = timedelta(days=30)
+
+
+def _receipt_key(settings: Settings) -> bytes:
+    """Dedicated HMAC key for receipt links, derived from the session secret
+    with a distinct label so a receipt token can never be confused with (or
+    used to forge) any other signature made with the same secret."""
+    return hmac.new(settings.session_secret().encode("utf-8"), b"paysilo/receipt-link/v1",
+                    hashlib.sha256).digest()
+
+
+def _receipt_sig(settings: Settings, pay_line_id: uuid.UUID, expires: int) -> str:
+    return hmac.new(_receipt_key(settings), f"{pay_line_id}.{expires}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def receipt_token(settings: Settings, pay_line_id: uuid.UUID, *, now: datetime | None = None) -> str:
+    """``<expiry-epoch>.<signature>``; the expiry is covered by the signature."""
+    expires = int(((now or datetime.now(UTC)) + RECEIPT_TTL).timestamp())
+    return f"{expires}.{_receipt_sig(settings, pay_line_id, expires)}"
+
+
+def verify_receipt_token(settings: Settings, pay_line_id: uuid.UUID, token: str | None,
+                         *, now: datetime | None = None) -> bool:
+    if not token or "." not in token:
+        return False
+    exp_s, _, sig = token.partition(".")
+    if not exp_s.isdigit():
+        return False
+    expires = int(exp_s)
+    if not hmac.compare_digest(sig, _receipt_sig(settings, pay_line_id, expires)):
+        return False
+    return expires >= int((now or datetime.now(UTC)).timestamp())
 
 
 @router.get("/runs/{run_id}/pay-lines/{line_id}/receipt-token")
@@ -820,23 +983,23 @@ def get_receipt_token(run_id: uuid.UUID, line_id: uuid.UUID,
     if line is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Pay line not found.")
     token = receipt_token(settings, line.id)
-    return {"token": token, "path": f"/receipts/{line.id}?token={token}"}
+    return {"token": token, "path": f"/receipt/{line.id}?token={token}",
+            "api_path": f"/receipts/{line.id}?token={token}",
+            "expires_at": datetime.fromtimestamp(int(token.split(".")[0]), UTC).isoformat()}
 
 
 @router.get("/receipts/{pay_line_id}")
 def public_receipt(pay_line_id: uuid.UUID, token: str | None = Query(None),
-                   db: Session = Depends(get_db), settings: Settings = Depends(get_settings),
-                   runtime: PlatformRuntime = Depends(get_runtime)) -> dict:
-    # Wrong or missing token is a 404, never a hint that the line exists.
-    expected = receipt_token(settings, pay_line_id)
-    if not token or not hmac.compare_digest(token, expected):
+                   db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> dict:
+    # Wrong, expired or missing token is a 404, never a hint that the line exists.
+    if not verify_receipt_token(settings, pay_line_id, token):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Receipt not found.")
     line = db.get(PayLine, pay_line_id)
     if line is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Receipt not found.")
     run = db.scalar(select(PayrollRun).options(
-        selectinload(PayrollRun.events), selectinload(PayrollRun.approvals),
-        selectinload(PayrollRun.employer)).where(PayrollRun.id == line.run_id))
+        selectinload(PayrollRun.approvals), selectinload(PayrollRun.employer))
+        .where(PayrollRun.id == line.run_id))
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Receipt not found.")
     contractor = db.get(Contractor, line.contractor_id) if line.contractor_id else None
@@ -849,13 +1012,28 @@ def public_receipt(pay_line_id: uuid.UUID, token: str | None = Query(None),
     explorer = None
     if receipt and receipt.tx_hash and settings.metal_explorer_url:
         explorer = f"{settings.metal_explorer_url.rstrip('/')}/tx/{receipt.tx_hash}"
+
+    def iso(d: datetime | None) -> str | None:
+        return d.isoformat() if d else None
+
+    # Only this line's data and generic run milestones. No agent events (they
+    # name other beneficiaries, amounts and account ids).
+    timeline = [{"label": "Payroll received by your employer's payroll agency", "at": iso(run.created_at)}]
+    approved = [a for a in run.approvals if a.verified and a.decision == "approve"]
+    if approved:
+        timeline.append({"label": "Payroll approved with a verified Visa TAP signature",
+                         "at": iso(min(a.created_at for a in approved if a.created_at))})
+    if line.status == "PAID":
+        timeline.append({"label": f"Your payout of {line.currency} {money_str(line.amount)} was sent",
+                         "at": iso(run.settled_at)})
+    if run.settled_at:
+        timeline.append({"label": "Payroll run settled", "at": iso(run.settled_at)})
     return {
         "beneficiary_name": line.beneficiary_name,
         "amount": money_str(line.amount), "currency": line.currency, "method": line.method,
         "status": line.status, "employer_name": run.employer.name if run.employer else None,
-        "timeline": [{"label": f"{e.agent}: {e.message}",
-                      "at": e.created_at.isoformat() if e.created_at else None} for e in run.events],
-        "settled_at": run.settled_at.isoformat() if run.settled_at else None,
+        "timeline": timeline,
+        "settled_at": iso(run.settled_at),
         "bank_masked": bank_masked,
         "verification": {
             "tap_verified": any(a.verified for a in run.approvals),

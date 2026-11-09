@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -67,8 +67,7 @@ def overview(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get
     )
 
 
-@router.get("/platform/journals")
-def platform_journals(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
+def _platform_journals(db: Session, tenant: Tenant) -> list[dict]:
     """Platform book: every transaction in the caller's organization that
     touches the ``platform`` namespace (fee revenue). Full transaction
     lines are returned so the balanced flag is the computed truth."""
@@ -80,6 +79,21 @@ def platform_journals(tenant: Tenant = Depends(current_tenant), db: Session = De
         .order_by(LedgerTransaction.id)).all()
     platform_txns = [t for t in txns if any(e.namespace == "platform" for e in t.entries)]
     return journals_for(db, platform_txns)
+
+
+@router.get("/platform/journals")
+def platform_journals(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> list[dict]:
+    """Platform book: every transaction in the caller's organization that
+    touches the ``platform`` namespace (fee revenue)."""
+    return _platform_journals(db, tenant)
+
+
+@router.get("/platform/journals/export")
+def platform_journals_export(format: str = Query("json", pattern="^(csv|json)$"),
+                             tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
+    from .bedata import journals_download
+
+    return journals_download(_platform_journals(db, tenant), format, f"platform-journals-{tenant.organization.id}")
 
 
 @router.post("/demo/kit6")
