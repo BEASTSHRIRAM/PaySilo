@@ -30,7 +30,7 @@ PAYLOAD = {
 }
 
 
-def _mock_transport(captured: list) -> httpx.MockTransport:
+def _mock_transport(captured: list, overrides: dict | None = None) -> httpx.MockTransport:
     results = {
         "eth_chainId": "0x270f",
         "eth_getTransactionCount": "0x0",
@@ -38,7 +38,9 @@ def _mock_transport(captured: list) -> httpx.MockTransport:
         "eth_gasPrice": "0x3b9aca00",
         "eth_getBlockByNumber": {"number": "0x1", "baseFeePerGas": "0x3b9aca00"},
         "eth_sendRawTransaction": TX_HASH,
+        "eth_getTransactionReceipt": {"status": "0x1", "transactionHash": TX_HASH},
     }
+    results.update(overrides or {})
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -101,7 +103,7 @@ def test_attest_happy_path_returns_and_stores_tx_hash():
     assert chain.verify_chain() is True
 
     methods = [m for m, _ in captured]
-    assert methods[-1] == "eth_sendRawTransaction"
+    assert methods[-2:] == ["eth_sendRawTransaction", "eth_getTransactionReceipt"]
     assert "eth_chainId" in methods and "eth_getTransactionCount" in methods
 
     # The signed transaction really is signed by the configured wallet and
@@ -190,3 +192,70 @@ def test_explorer_url_field_for_the_run_panel():
     assert _explorer_url(runtime, None) is None
     blank = SimpleNamespace(settings=SimpleNamespace(metal_explorer_url=None))
     assert _explorer_url(blank, TX_HASH) is None
+
+
+# -- receipt polling: never claim anchored before status 0x1 ------------------------
+
+def test_attest_polls_until_receipt_status_success(monkeypatch):
+    monkeypatch.setattr("app.partners.metal.time.sleep", lambda _s: None)
+    seq = iter([None, None, {"status": "0x1"}])
+    captured: list = []
+    chain = _l2_chain(captured)
+    real = chain._rpc
+
+    def rpc(method, params):
+        if method == "eth_getTransactionReceipt":
+            captured.append((method, params))
+            return next(seq)
+        return real(method, params)
+
+    chain._rpc = rpc
+    receipt = chain.attest(PAYLOAD)
+    assert receipt.tx_hash == TX_HASH
+    assert [m for m, _ in captured].count("eth_getTransactionReceipt") == 3
+
+
+def test_attest_pending_receipt_times_out_and_records_nothing(monkeypatch):
+    from app.partners.metal import MetalAttestationPending
+
+    monkeypatch.setattr("app.partners.metal.time.sleep", lambda _s: None)
+    chain = _l2_chain([], transport=_mock_transport([], {"eth_getTransactionReceipt": None}),
+                      receipt_timeout=0.0)
+    with pytest.raises(MetalAttestationPending) as exc:
+        chain.attest(PAYLOAD)
+    assert exc.value.tx_hash == TX_HASH
+    assert chain.receipts == []
+
+
+def test_attest_reverted_tx_is_an_error_not_an_anchor():
+    from app.partners.metal import MetalRPCError
+
+    chain = _l2_chain([], transport=_mock_transport([], {"eth_getTransactionReceipt": {"status": "0x0"}}))
+    with pytest.raises(MetalRPCError, match="did not succeed"):
+        chain.attest(PAYLOAD)
+    assert chain.receipts == []
+
+
+# -- seed(): continue the hash chain after a restart ------------------------------------
+
+def test_mock_chain_seed_continues_hash_chain():
+    first = MockSettlementChain()
+    r0 = first.attest({"a": 1})
+    restarted = MockSettlementChain()
+    restarted.seed(r0.receipt_hash, 1)
+    r1 = restarted.attest({"a": 2})
+    assert r1.index == 1 and r1.prev_hash == r0.receipt_hash
+    assert restarted.verify_chain() is True
+    reference = MockSettlementChain()
+    reference.attest({"a": 1})
+    assert reference.attest({"a": 2}).receipt_hash == r1.receipt_hash
+
+
+def test_l2_chain_seed_continues_hash_chain():
+    chain = _l2_chain([])
+    chain.seed("ab" * 32, 5)
+    r = chain.attest(PAYLOAD)
+    assert r.index == 5 and r.prev_hash == "ab" * 32
+    assert chain.verify_chain() is True
+    with pytest.raises(ValueError):
+        chain.seed("cd" * 32, 9)  # cannot re-seed after attesting
