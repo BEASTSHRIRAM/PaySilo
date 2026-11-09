@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -64,7 +65,43 @@ class SettlementChain(ABC):
         """True when every receipt still links to its predecessor."""
 
 
-class MockSettlementChain(SettlementChain):
+class _ChainState:
+    """Shared hash-chain bookkeeping, including continuation after a restart."""
+
+    receipts: list[SettlementReceipt]
+    _seed_prev: str = GENESIS_HASH
+    _seed_index: int = 0
+
+    def seed(self, prev_hash: str, index: int) -> None:
+        """Continue an existing chain: the next receipt gets ``index`` and
+        links to ``prev_hash`` (the last persisted receipt hash). Only valid
+        on a chain with no receipts of its own yet."""
+        if self.receipts:
+            raise ValueError("seed() must be called before any receipt is attested.")
+        if len(prev_hash) != 64 or int(prev_hash, 16) < 0:
+            raise ValueError("prev_hash must be a 32-byte hex digest.")
+        if index < 0:
+            raise ValueError("index must be >= 0.")
+        self._seed_prev = prev_hash
+        self._seed_index = index
+
+    def _next_link(self) -> tuple[int, str]:
+        if self.receipts:
+            return self.receipts[-1].index + 1, self.receipts[-1].receipt_hash
+        return self._seed_index, self._seed_prev
+
+    def _verify_links(self) -> bool:
+        prev = self._seed_prev
+        for i, receipt in enumerate(self.receipts):
+            if receipt.index != self._seed_index + i or receipt.prev_hash != prev:
+                return False
+            if receipt.receipt_hash != _hash(f"{receipt.prev_hash}:{receipt.payload_hash}"):
+                return False
+            prev = receipt.receipt_hash
+        return True
+
+
+class MockSettlementChain(_ChainState, SettlementChain):
     """Deterministic, hash-linked, offline chain — same interface as live."""
 
     def __init__(self) -> None:
@@ -72,10 +109,10 @@ class MockSettlementChain(SettlementChain):
 
     def attest(self, payload: dict) -> SettlementReceipt:
         payload_hash = _hash(canonical_payload(payload))
-        prev_hash = self.receipts[-1].receipt_hash if self.receipts else GENESIS_HASH
+        index, prev_hash = self._next_link()
         receipt_hash = _hash(f"{prev_hash}:{payload_hash}")
         receipt = SettlementReceipt(
-            index=len(self.receipts),
+            index=index,
             payload_hash=payload_hash,
             prev_hash=prev_hash,
             receipt_hash=receipt_hash,
@@ -85,18 +122,23 @@ class MockSettlementChain(SettlementChain):
         return receipt
 
     def verify_chain(self) -> bool:
-        prev = GENESIS_HASH
-        for i, receipt in enumerate(self.receipts):
-            if receipt.index != i or receipt.prev_hash != prev:
-                return False
-            if receipt.receipt_hash != _hash(f"{receipt.prev_hash}:{receipt.payload_hash}"):
-                return False
-            prev = receipt.receipt_hash
-        return True
+        return self._verify_links()
 
 
 class MetalNotConfiguredError(RuntimeError):
     """Metal L2 was asked to attest without full configuration."""
+
+
+class MetalAttestationPending(RuntimeError):
+    """The anchor tx was broadcast but no successful receipt was seen in time.
+
+    The hash is NOT claimed as anchored. ``tx_hash`` lets an operator check
+    the explorer and re-attest later.
+    """
+
+    def __init__(self, message: str, tx_hash: str | None = None):
+        super().__init__(message)
+        self.tx_hash = tx_hash
 
 
 class MetalRPCError(RuntimeError):
@@ -113,7 +155,7 @@ def anchor_calldata(receipt_hash: str) -> bytes:
     return keccak(text="anchor(bytes32)")[:4] + digest
 
 
-class MetalL2SettlementChain(SettlementChain):
+class MetalL2SettlementChain(_ChainState, SettlementChain):
     """Live Metal L2 attestation via raw JSON-RPC. Fails closed until configured.
 
     The transaction calls ``anchor(bytes32)`` on the deployed
@@ -128,7 +170,8 @@ class MetalL2SettlementChain(SettlementChain):
 
     def __init__(self, rpc_url: str | None = None, private_key: str | None = None,
                  registry_address: str | None = None, explorer_url: str | None = None,
-                 transport: httpx.BaseTransport | None = None, timeout: float = 15.0) -> None:
+                 transport: httpx.BaseTransport | None = None, timeout: float = 15.0,
+                 receipt_timeout: float = 60.0, poll_interval: float = 2.0) -> None:
         self.rpc_url = rpc_url if rpc_url is not None else os.environ.get("METAL_RPC_URL")
         self.private_key = private_key if private_key is not None else os.environ.get("METAL_PRIVATE_KEY")
         self.registry_address = (
@@ -137,6 +180,8 @@ class MetalL2SettlementChain(SettlementChain):
         self.explorer_url = explorer_url if explorer_url is not None else os.environ.get("METAL_EXPLORER_URL")
         self.transport = transport
         self.timeout = timeout
+        self.receipt_timeout = receipt_timeout
+        self.poll_interval = poll_interval
         self.receipts: list[SettlementReceipt] = []
         self._request_id = 0
 
@@ -171,6 +216,27 @@ class MetalL2SettlementChain(SettlementChain):
             raise MetalRPCError(f"{method} returned no result: {data!r}")
         return data["result"]
 
+    def _wait_for_success(self, tx_hash: str) -> None:
+        """Poll ``eth_getTransactionReceipt`` until the tx is mined.
+
+        ``status == 0x1`` -> anchored. ``0x0`` -> reverted (MetalRPCError).
+        No receipt before ``receipt_timeout`` -> MetalAttestationPending.
+        """
+        deadline = time.monotonic() + self.receipt_timeout
+        while True:
+            receipt = self._rpc("eth_getTransactionReceipt", [tx_hash])
+            if receipt:
+                status = receipt.get("status")
+                if status is not None and int(status, 16) == 1:
+                    return
+                raise MetalRPCError(f"Anchor transaction {tx_hash} was mined but did not succeed "
+                                    f"(status={status!r}).")
+            if time.monotonic() >= deadline:
+                raise MetalAttestationPending(
+                    f"Anchor transaction {tx_hash} was sent but not confirmed within "
+                    f"{self.receipt_timeout:g}s; NOT treated as anchored.", tx_hash=tx_hash)
+            time.sleep(self.poll_interval)
+
     def _account(self):
         from eth_account import Account
 
@@ -200,7 +266,7 @@ class MetalL2SettlementChain(SettlementChain):
     def attest(self, payload: dict) -> SettlementReceipt:
         self._require_configured()
         payload_hash = _hash(canonical_payload(payload))
-        prev_hash = self.receipts[-1].receipt_hash if self.receipts else GENESIS_HASH
+        index, prev_hash = self._next_link()
         receipt_hash = _hash(f"{prev_hash}:{payload_hash}")
 
         signed = self._account().sign_transaction(self._build_anchor_tx(receipt_hash))
@@ -208,9 +274,10 @@ class MetalL2SettlementChain(SettlementChain):
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex])
         if not (isinstance(tx_hash, str) and tx_hash.startswith("0x") and len(tx_hash) == 66):
             raise MetalRPCError(f"eth_sendRawTransaction returned an invalid tx hash: {tx_hash!r}")
+        self._wait_for_success(tx_hash)
 
         receipt = SettlementReceipt(
-            index=len(self.receipts),
+            index=index,
             payload_hash=payload_hash,
             prev_hash=prev_hash,
             receipt_hash=receipt_hash,
@@ -229,11 +296,4 @@ class MetalL2SettlementChain(SettlementChain):
         when unconfigured, like every other live-leg call.
         """
         self._require_configured()
-        prev = GENESIS_HASH
-        for i, receipt in enumerate(self.receipts):
-            if receipt.index != i or receipt.prev_hash != prev:
-                return False
-            if receipt.receipt_hash != _hash(f"{receipt.prev_hash}:{receipt.payload_hash}"):
-                return False
-            prev = receipt.receipt_hash
-        return True
+        return self._verify_links()
