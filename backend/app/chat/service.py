@@ -67,7 +67,9 @@ SYSTEM_PROMPT = (
     "and you must never ask for or invent another organization's data. Amounts and statuses must "
     "come from tool results, never from memory. You cannot approve a payroll run or move money: "
     "approvals are TAP-signed human decisions on the run itself. If a run is waiting, use "
-    "request_approval to surface it. Keep answers concise and in plain English."
+    "request_approval to surface it. When a payroll ended partially paid or held, pay_held_lines starts a "
+    "continuation run for only the held contractors (like start_payroll_run it pauses for a human "
+    "TAP-signed approval; anyone already paid is never paid again). Keep answers concise and in plain English."
 )
 
 
@@ -94,7 +96,7 @@ _AMOUNT_RE = re.compile(r"(?:USD\s*)?\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.
 
 _HELP_INTRO = (
     "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
-    "(including exactly why a payroll is held), show a run's timeline, start a run — which "
+    "(including exactly why a payroll is held), show a run's timeline, start a run or pay a run's held lines — which "
     "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
     "own wallet. I cannot approve a run or move money between employers. "
 )
@@ -279,6 +281,9 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
     employer_ref = _employer_ref_in(ctx, message) or context.get("employer_name")
     run_ref = context.get("run_id")
 
+    if re.search(r"\bpay\b", text) and re.search(r"\bheld\b", text) and "why" not in text:
+        return ([("pay_held_lines", {"employer": employer_ref, "run_id": run_ref})],
+                "Matched the pay-held-lines intent (a continuation run that pauses for human approval)", None)
     if any(w in text for w in ("timeline", "what happened", "history of", "events")):
         return ([("get_run_timeline", {"run_id": run_ref, "employer": employer_ref})],
                 "Matched the run-timeline intent", None)
