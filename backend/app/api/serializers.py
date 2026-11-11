@@ -51,7 +51,7 @@ def employer_detail_out(s: Session, runtime: PlatformRuntime, e: Employer) -> Em
 def run_out(runtime: PlatformRuntime, r: PayrollRun) -> RunOut:
     return RunOut(
         id=r.id, employer_id=r.employer_id, employer_name=r.employer.name, status=r.status, source=r.source,
-        period_label=r.period_label, payroll_currency=r.payroll_currency,
+        parent_run_id=r.parent_run_id, period_label=r.period_label, payroll_currency=r.payroll_currency,
         required_usd=money_str(r.required_usd) if r.required_usd is not None else None,
         shortfall_usd=money_str(r.shortfall_usd) if r.shortfall_usd is not None else None,
         fee_charged_usd=money_str(r.fee_charged_usd), explanation=r.explanation, error=r.error,
@@ -69,7 +69,11 @@ def _explorer_url(runtime: PlatformRuntime, tx_hash: str | None) -> str | None:
 
 def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDetailOut:
     receipt = s.scalar(select(SettlementReceipt).where(SettlementReceipt.run_id == r.id))
+    continuations = runtime.continuations_of(s, r)
     return RunDetailOut(
+        continuation_run_id=continuations[0].id if continuations else None,
+        held_line_count=len(runtime.held_pay_lines(r)),
+        can_pay_held=runtime.pay_held_blocker(s, r) is None,
         **run_out(runtime, r).model_dump(),
         assessment=r.assessment,
         pay_lines=[PayLineOut(id=str(p.id), position=p.position, beneficiary_name=p.beneficiary_name, amount=money_str(p.amount),

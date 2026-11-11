@@ -349,6 +349,7 @@ class RunOut(BaseModel):
     employer_name: str
     status: str
     source: str
+    parent_run_id: uuid.UUID | None = None
     period_label: str | None
     payroll_currency: str | None
     required_usd: str | None
@@ -368,6 +369,9 @@ class RunDetailOut(RunOut):
     events: list[EventOut]
     approvals: list[ApprovalOut]
     receipt: ReceiptOut | None
+    continuation_run_id: uuid.UUID | None = None  # newest "pay held lines" run that continues this one
+    held_line_count: int = 0
+    can_pay_held: bool = False  # held lines can be paid right now (role-independent)
 
 
 class OverviewOut(BaseModel):
