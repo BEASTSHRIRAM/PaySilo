@@ -372,6 +372,7 @@ class RunDetailOut(RunOut):
     continuation_run_id: uuid.UUID | None = None  # newest "pay held lines" run that continues this one
     held_line_count: int = 0
     can_pay_held: bool = False  # held lines can be paid right now (role-independent)
+    run_fee_collected: bool = False  # the run fee was collected on this run or a parent up the chain
 
 
 class OverviewOut(BaseModel):

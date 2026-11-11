@@ -138,9 +138,11 @@ def approval_payload(run: PayrollRun) -> dict:
         summary = (f"{run.employer.name} is held: payroll is short by {fmt_usd(a.get('shortfall_usd', '0'))}. "
                    "It can only be held — fund the employer's own wallet, then start a new run.")
     else:
-        summary = (f"{run.employer.name} payroll of {fmt_usd(a.get('required_usd', '0'))} (including the "
-                   f"{fmt_usd(a.get('platform_fee_usd', '149'))} run fee) is ready and waiting for a "
-                   "TAP-signed human approval. Approving happens on the run, not in chat.")
+        fee = ("no run fee: already collected on the original payroll" if a.get("run_fee_waived")
+               else f"including the {fmt_usd(a.get('platform_fee_usd', '149'))} run fee")
+        kind = "continuation payroll (held lines only)" if run.parent_run_id else "payroll"
+        summary = (f"{run.employer.name} {kind} of {fmt_usd(a.get('required_usd', '0'))} ({fee}) is ready and "
+                   "waiting for a TAP-signed human approval. Approving happens on the run, not in chat.")
     return {"run_id": str(run.id), "employer_id": str(run.employer_id),
             "employer_name": run.employer.name, "summary": summary}
 

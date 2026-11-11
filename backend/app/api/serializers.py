@@ -74,6 +74,7 @@ def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDe
         continuation_run_id=continuations[0].id if continuations else None,
         held_line_count=len(runtime.held_pay_lines(r)),
         can_pay_held=runtime.pay_held_blocker(s, r) is None,
+        run_fee_collected=runtime.run_fee_collected(s, r),
         **run_out(runtime, r).model_dump(),
         assessment=r.assessment,
         pay_lines=[PayLineOut(id=str(p.id), position=p.position, beneficiary_name=p.beneficiary_name, amount=money_str(p.amount),
