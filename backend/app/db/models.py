@@ -237,8 +237,11 @@ class PayrollRun(TimestampMixin, Base):
     employer_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # "Pay held lines": a continuation run points at the run whose HELD lines it pays.
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("payroll_runs.id", ondelete="SET NULL"), index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="RECEIVED")
-    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")  # manual|text|demo
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")  # manual|text|chat|demo|continuation
     period_label: Mapped[str | None] = mapped_column(String(60))
     pay_date: Mapped[date | None] = mapped_column(Date)
     raw_input: Mapped[str | None] = mapped_column(Text)

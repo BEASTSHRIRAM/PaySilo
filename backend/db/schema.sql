@@ -172,6 +172,7 @@ CREATE TABLE payroll_runs (
 	organization_id UUID NOT NULL, 
 	employer_id UUID NOT NULL, 
 	created_by_id UUID, 
+	parent_run_id UUID, 
 	status VARCHAR(20) NOT NULL, 
 	source VARCHAR(16) NOT NULL, 
 	period_label VARCHAR(60), 
@@ -192,9 +193,11 @@ CREATE TABLE payroll_runs (
 	CONSTRAINT ck_run_status CHECK (status IN ('RECEIVED', 'PRICED', 'RESERVED', 'APPROVED', 'SENT', 'SETTLED', 'HELD_SHORTFALL', 'HELD_BY_HUMAN', 'APPROVAL_REJECTED', 'REFUSED', 'FAILED', 'PARTIALLY_PAID', 'SENT_FEE_FAILED', 'SENT_UNRECONCILED', 'ATTEST_PENDING')), 
 	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
 	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
-	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL
+	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(parent_run_id) REFERENCES payroll_runs (id) ON DELETE SET NULL
 );
 CREATE INDEX ix_payroll_runs_employer_id ON payroll_runs (employer_id);
+CREATE INDEX ix_payroll_runs_parent_run_id ON payroll_runs (parent_run_id);
 CREATE INDEX ix_runs_org_created ON payroll_runs (organization_id, created_at);
 
 CREATE TABLE agent_events (

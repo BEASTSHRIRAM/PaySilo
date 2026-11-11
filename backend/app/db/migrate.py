@@ -69,6 +69,12 @@ def add_column_ddl(engine: Engine, table: str, column: Column) -> str:
         parts.append(f"DEFAULT {default}")
     if not column.nullable and default is not None:
         parts.append("NOT NULL")
+    for fk in column.foreign_keys:
+        target = fk.column
+        clause = f"REFERENCES {_quote(engine, target.table.name)} ({_quote(engine, target.name)})"
+        if fk.ondelete:
+            clause += f" ON DELETE {fk.ondelete}"
+        parts.append(clause)
     return " ".join(parts)
 
 
@@ -81,6 +87,7 @@ def add_missing_columns(engine: Engine) -> list[str]:
         if table.name not in existing_tables:
             continue  # create_all makes whole tables
         have = {c["name"] for c in inspector.get_columns(table.name)}
+        new_columns: set[str] = set()
         for column in table.columns:
             if column.name in have:
                 continue
@@ -89,6 +96,17 @@ def add_missing_columns(engine: Engine) -> list[str]:
                 conn.execute(text(ddl))
             logger.warning("Schema migration: added %s.%s (%s)", table.name, column.name, ddl)
             added.append(f"{table.name}.{column.name}")
+            new_columns.add(column.name)
+        # create_all only indexes NEW tables: index the added columns once every column exists.
+        have |= new_columns
+        for index in table.indexes:
+            names = {c.name for c in index.columns}
+            if index.name and names & new_columns and names <= have:
+                cols = ", ".join(_quote(engine, c.name) for c in index.columns)
+                uniq = "UNIQUE " if index.unique else ""
+                with engine.begin() as conn:
+                    conn.execute(text(f"CREATE {uniq}INDEX IF NOT EXISTS {_quote(engine, index.name)} "
+                                      f"ON {_quote(engine, table.name)} ({cols})"))
     return added
 
 
