@@ -497,18 +497,31 @@ def build_graph(services: Services, checkpointer=None):
                 ccy, required = req["currency"], to_decimal(req["required"])
                 if ccy == "USD" or ccy in fx_done:
                     continue
+                # Affordability counted what this employer already holds in ``ccy`` (e.g. left
+                # over from an earlier failed run), so spend that first and convert only the
+                # gap. Converting the full amount from USD ran out of USD mid-run (seen live).
+                held = round_money(awx.balance_of(ccy, account_id=acct))
+                to_buy = round_money(max(Decimal("0"), required - held))
+                if to_buy == 0:
+                    _log(state, "execute", f"Using {ccy} {money_str(required)} already held in its own wallet "
+                         f"({ccy} {money_str(held)} available); no conversion needed.", audit=audit, events=events)
+                    fx_done.append(ccy)
+                    continue
+                to_buy = max(to_buy, MIN_FX_TOP_UP)  # Airwallex rejects tiny quotes
                 quote = awx.create_fx_quote(
                     request_id=request_id_for(run_id, f"fx-quote-{ccy}"), on_behalf_of=acct,
-                    sell_currency="USD", buy_currency=ccy, buy_amount=required)
+                    sell_currency="USD", buy_currency=ccy, buy_amount=to_buy)
                 conversion = awx.create_fx_conversion(
                     request_id=request_id_for(run_id, f"fx-conversion-{ccy}"), on_behalf_of=acct,
-                    quote_id=quote["id"], buy_amount=required, sell_currency="USD", buy_currency=ccy)
+                    quote_id=quote["id"], buy_amount=to_buy, sell_currency="USD", buy_currency=ccy)
                 sell = round_money(to_decimal(str(conversion["sell_amount"])))
                 ledger.post([(f"{key}:cash:USD", -sell), (f"{key}:fx_clearing:USD", sell),
-                             (f"{key}:fx_clearing:{ccy}", -required), (f"{key}:cash:{ccy}", required)],
+                             (f"{key}:fx_clearing:{ccy}", -to_buy), (f"{key}:cash:{ccy}", to_buy)],
                             memo=f"{run_id} FX USD->{ccy}")
-                _log(state, "execute", f"Converted USD {money_str(sell)} -> {ccy} {money_str(required)} "
-                     f"on its own behalf (x-on-behalf-of {acct}).", audit=audit, events=events)
+                _log(state, "execute", f"Converted USD {money_str(sell)} -> {ccy} {money_str(to_buy)} "
+                     f"on its own behalf (x-on-behalf-of {acct})"
+                     + (f", on top of {ccy} {money_str(held)} already held." if held > 0 else "."),
+                     audit=audit, events=events)
                 fx_done.append(ccy)
 
             # 2. Pay each contractor with a TAP-signed, verified instruction.
