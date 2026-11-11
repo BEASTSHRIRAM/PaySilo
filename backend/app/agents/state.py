@@ -58,4 +58,7 @@ class PayrollRunState(TypedDict, total=False):
     metal_receipt: Optional[dict]
     explanation: Optional[str]
     error: Optional[str]
+    continuation: bool  # True for a "pay held lines" run that continues a parent run
+    parent_run_id: Optional[str]
+    run_fee_waived: bool  # the parent chain already collected the run fee: never priced or charged again
     balances: dict  # currency -> Decimal text, employer's own wallet at last check

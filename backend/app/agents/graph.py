@@ -132,7 +132,9 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
                   pay_lines: list[dict] | None = None,
                   raw_input: str | None = None,
                   account_id: str | None = None,
-                  directory: list[dict] | None = None) -> PayrollRunState:
+                  directory: list[dict] | None = None,
+                  parent_run_id: str | None = None,
+                  waive_run_fee: bool = False) -> PayrollRunState:
     return PayrollRunState(
         run_id=run_id,
         employer_key=employer_key,
@@ -158,6 +160,9 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
         error=None,
         balances={},
         signatures=[],
+        continuation=parent_run_id is not None,
+        parent_run_id=parent_run_id,
+        run_fee_waived=bool(waive_run_fee),
     )
 
 
@@ -198,6 +203,7 @@ def assessment_dict(a: PayrollAssessment) -> dict:
         "available_usd": money_str(a.available_usd),
         "shortfall_usd": money_str(a.shortfall_usd),
         "can_run": a.can_run,
+        "run_fee_waived": a.run_fee_waived,
     }
 
 
@@ -212,6 +218,10 @@ def _decision_of(value: object) -> tuple[str, str, dict | None]:
         return (str(value.get("decision", "hold")), str(value.get("decided_by", "unknown")),
                 value.get("tap"))
     return str(value), "unknown", None
+
+
+def _waived(state: PayrollRunState) -> bool:
+    return bool(state.get("run_fee_waived"))
 
 
 def build_graph(services: Services, checkpointer=None):
@@ -288,7 +298,8 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "refused", "status": "REFUSED", "error": msg, "audit": audit, "events": events}
         balances = awx.get_balances(account_id=state["account_id"])
         try:
-            assessment = assess_payroll(_pay_lines(state), _rates_for(state, balances), balances)
+            assessment = assess_payroll(_pay_lines(state), _rates_for(state, balances), balances,
+                                        waive_run_fee=_waived(state))
         except RefusalError as exc:
             _log(state, "price", f"POLICY REFUSAL: {exc}", "error", audit, events)
             return {"route": "refused", "status": "REFUSED", "error": str(exc), "audit": audit, "events": events}
@@ -297,11 +308,18 @@ def build_graph(services: Services, checkpointer=None):
                  f"Priced {r.currency}: salaries {money_str(r.payroll)} + payout fees {money_str(r.fees)} "
                  f"= {r.currency} {money_str(r.required)} (~USD {money_str(r.required_usd)}).",
                  audit=audit, events=events)
-        _log(state, "price",
-             f"Total leaving the wallet: USD {money_str(assessment.required_usd)} incl. USD "
-             f"{money_str(assessment.platform_fee_usd)} run fee; reserve floor USD "
-             f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
-             audit=audit, events=events)
+        if _waived(state):
+            _log(state, "price",
+                 f"Total leaving the wallet: USD {money_str(assessment.required_usd)}; no run fee on this "
+                 "continuation (already collected on the original payroll); reserve floor USD "
+                 f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
+                 audit=audit, events=events)
+        else:
+            _log(state, "price",
+                 f"Total leaving the wallet: USD {money_str(assessment.required_usd)} incl. USD "
+                 f"{money_str(assessment.platform_fee_usd)} run fee; reserve floor USD "
+                 f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
+                 audit=audit, events=events)
         return {"assessment": assessment_dict(assessment), "status": "PRICED",
                 "explanation": explain_assessment(state["employer_name"], assessment),
                 "audit": audit, "events": events}
@@ -334,7 +352,8 @@ def build_graph(services: Services, checkpointer=None):
         plan = None
         try:
             balances = awx.get_balances(account_id=state["account_id"])
-            plan = plan_partial_payout(_pay_lines(state), _rates_for(state, balances), balances)
+            plan = plan_partial_payout(_pay_lines(state), _rates_for(state, balances), balances,
+                                       waive_run_fee=_waived(state))
         except RefusalError as exc:
             _log(state, "assess", f"Partial payout not possible: {exc}", "warning", audit, events)
         if plan is None:
@@ -361,10 +380,12 @@ def build_graph(services: Services, checkpointer=None):
         _log(state, "escalate",
              f"{len(held)} line(s) escalated and held: {', '.join(l['name'] for l in held)}. "
              f"Exact shortfall for the full batch: USD {full_shortfall}.", "warning", audit, events)
+        run_fee_note = ("no run fee due (already collected)" if _waived(state)
+                        else f"the USD {partial['platform_fee_usd']} run fee covered")
         explanation = (
             f"{state['employer_name']} can pay {len(paid)} of {len(all_lines)} contractor(s) from its own wallet "
-            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with the USD "
-            f"{partial['platform_fee_usd']} run fee covered and the USD {partial['reserve_floor_usd']} reserve kept. "
+            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with "
+            f"{run_fee_note} and the USD {partial['reserve_floor_usd']} reserve kept. "
             f"{', '.join(l['name'] for l in held)} {'is' if len(held) == 1 else 'are'} held — the full batch is "
             f"short USD {full_shortfall}. Held lines are escalated to a human and will not be covered from another "
             "employer's funds."
@@ -381,6 +402,9 @@ def build_graph(services: Services, checkpointer=None):
             "pay_lines": state["pay_lines"],
             "held_lines": [_line_view(l) for l in state.get("held_lines") or []],
             "partial": bool(state.get("held_lines")),
+            "continuation": bool(state.get("continuation")),
+            "parent_run_id": state.get("parent_run_id"),
+            "run_fee_waived": _waived(state),
             "message": "Approve this exact payroll? Amounts, currencies and beneficiaries are fixed "
                        "and your decision is Visa TAP-signed."
                        + (" Only the lines listed in pay_lines are paid; held_lines stay HELD."
@@ -449,7 +473,8 @@ def build_graph(services: Services, checkpointer=None):
             # into the reserve since this run was assessed).
             try:
                 fresh = awx.get_balances(account_id=acct)
-                recheck = assess_payroll(_pay_lines(state), _rates_for(state, fresh), fresh)
+                recheck = assess_payroll(_pay_lines(state), _rates_for(state, fresh), fresh,
+                                         waive_run_fee=_waived(state))
             except RefusalError as exc:
                 msg = f"Affordability re-check refused: {exc}"
                 _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
@@ -589,6 +614,12 @@ def build_graph(services: Services, checkpointer=None):
 
     def fee_node(state: PayrollRunState) -> dict:
         # Money already moved at this point: a failure here is recorded, never raised.
+        if _waived(state):
+            # Continuation of a payroll whose run fee was already collected: never charge it twice.
+            audit, events = _log(state, "fee", "Run fee was already collected on the original payroll; "
+                                 "not charged again on this continuation.", "info")
+            return {"fee_charged_usd": "0.00", "balances": balances_str(state["account_id"]),
+                    "audit": audit, "events": events}
         try:
             fee = to_decimal(state["assessment"]["platform_fee_usd"])
             awx.create_charge(request_id=request_id_for(state["run_id"], "platform-fee"),
@@ -631,7 +662,8 @@ def build_graph(services: Services, checkpointer=None):
             full_shortfall = (state.get("assessment") or {}).get("full_shortfall_usd", "0.00")
             _log(state, "escalate",
                  f"Partially paid: {len(held)} line(s) remain HELD ({', '.join(l['name'] for l in held)}). "
-                 f"Fund this employer's own wallet (short USD {full_shortfall}) and start a new run for them.",
+                 f"Fund this employer's own wallet (short USD {full_shortfall}) and "
+                 + ("pay the held lines again." if state.get("continuation") else "pay the held lines."),
                  "warning", audit, events)
             return {"status": "PARTIALLY_PAID", "audit": audit, "events": events}
         return {"status": "SETTLED", "audit": audit, "events": events}
