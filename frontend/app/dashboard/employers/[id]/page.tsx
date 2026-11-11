@@ -262,7 +262,10 @@ export default function EmployerPage() {
                           className="grid gap-2 bg-ink-850/80 px-5 py-4 transition-colors hover:bg-ink-800 md:grid-cols-[1fr_auto_auto_auto] md:items-center md:gap-4"
                         >
                           <span className="min-w-0">
-                            <span className="block truncate font-bold text-sand-100">{r.period_label ?? "Payroll run"}</span>
+                            <span className="flex items-center gap-2 font-bold text-sand-100">
+                              <span className="truncate">{r.period_label ?? "Payroll run"}</span>
+                              {r.parent_run_id && <Badge tone="sage" className="px-2 py-0 text-[10px]">Continuation</Badge>}
+                            </span>
                             <span className="block text-xs font-semibold text-sage-500">{new Date(r.created_at).toLocaleString()}</span>
                           </span>
                           <Badge tone={runStatusInfo(r).tone}>{runStatusInfo(r).label}</Badge>

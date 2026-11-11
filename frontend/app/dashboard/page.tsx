@@ -19,7 +19,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { api, ApiError, type Employer, type Overview, type RunDetail, type RunSummary, type Session } from "@/lib/api";
 import { useDataChanged } from "@/lib/events";
 import { AnimatedNumber, Stagger } from "@/lib/gsap-anim";
-import { DECIDER_ROLES, isMoneyMoved, runStatusInfo } from "@/lib/status";
+import { DECIDER_ROLES, RUN_STARTER_ROLES, isMoneyMoved, runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
@@ -289,6 +289,7 @@ export default function DashboardPage() {
   const fees = overview ? Object.entries(overview.platform_fees) : [];
   const feeText = fees.length === 0 ? formatMoney(0) : fees.map(([c, a]) => formatMoney(a, c)).join(" + ");
   const canDecide = !!session && DECIDER_ROLES.includes(session.role);
+  const canPayHeld = !!session && RUN_STARTER_ROLES.includes(session.role);
 
   return (
     <div className="min-h-dvh pb-16">
@@ -434,7 +435,10 @@ export default function DashboardPage() {
                             <button type="button" onClick={() => void openRun(r.id)} className="font-bold text-sand-100 hover:underline hover:underline-offset-4">
                               {r.period_label ?? "Payroll run"}
                             </button>
-                            <span className="block text-xs font-semibold text-sage-500">#{r.id.slice(0, 8)} · via {r.source}</span>
+                            <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs font-semibold text-sage-500">
+                              #{r.id.slice(0, 8)} · via {r.source}
+                              {r.parent_run_id && <Badge tone="sage" className="px-2 py-0 text-[10px]">Continuation</Badge>}
+                            </span>
                           </td>
                           <td className="px-5 py-3.5 font-semibold text-sand-200">{r.employer_name}</td>
                           <td className="px-5 py-3.5 text-sm font-semibold text-sage-400">{new Date(r.created_at).toLocaleDateString()}{" "}
@@ -470,7 +474,7 @@ export default function DashboardPage() {
 
               <Card className="mt-5 p-5 sm:p-6">
                 {selected ? (
-                  <RunPanel key={selected.id} run={selected} canDecide={canDecide} onChange={(r) => void onRunChange(r)} />
+                  <RunPanel key={selected.id} run={selected} canDecide={canDecide} canPayHeld={canPayHeld} onChange={(r) => void onRunChange(r)} />
                 ) : (
                   <p className="py-10 text-center font-semibold text-sage-500">Select a run to see its assessment, approvals and timeline.</p>
                 )}

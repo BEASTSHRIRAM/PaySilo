@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Loader2, PauseCircle, RotateCw } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Check, CornerDownRight, Loader2, PauseCircle, RotateCw, Wallet } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,8 +22,11 @@ const LEVEL_DOT: Record<string, string> = {
   info: "bg-sage-500", success: "bg-mint-500", warning: "bg-sand-400", error: "bg-coral-500",
 };
 
-export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDecide: boolean; onChange: (r: RunDetail) => void }) {
-  const [busy, setBusy] = useState<"approve" | "hold" | "retry" | null>(null);
+export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
+  run: RunDetail; canDecide: boolean; canPayHeld?: boolean; onChange: (r: RunDetail) => void;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState<"approve" | "hold" | "retry" | "payheld" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const a = run.assessment;
   const info = runStatusInfo(run);
@@ -40,6 +45,19 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not record the decision.");
     } finally {
+      setBusy(null);
+    }
+  }
+
+  async function payHeld() {
+    setBusy("payheld");
+    setError(null);
+    try {
+      const next = await api.payHeld(run.id);
+      notifyDataChanged({ runId: next.id });
+      router.push(`/dashboard/runs/${next.id}`); // the new run is waiting for approval
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not start the continuation run.");
       setBusy(null);
     }
   }
@@ -64,8 +82,23 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
           <p className="text-sm font-bold text-sage-400">Payroll run</p>
           <h3 className="font-display text-2xl font-semibold text-sand-100">{run.employer_name}</h3>
         </div>
-        <Badge tone={info.tone}>{info.label}</Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          {run.parent_run_id && <Badge tone="sage">Continuation</Badge>}
+          <Badge tone={info.tone}>{info.label}</Badge>
+        </div>
       </div>
+      {run.parent_run_id && (
+        <p className="-mt-2 flex items-center gap-2 text-sm font-bold text-sage-300">
+          <CornerDownRight className="size-4 shrink-0" aria-hidden />
+          <span>
+            Continuation of run{" "}
+            <Link href={`/dashboard/runs/${run.parent_run_id}`} className="text-sand-100 underline underline-offset-4 hover:text-sage-300">
+              #{run.parent_run_id.slice(0, 8)}
+            </Link>
+            . Pays only the lines that run held.
+          </span>
+        </p>
+      )}
       {info.detail && (
         <p role="status" className="rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">{info.detail}</p>
       )}
@@ -111,11 +144,41 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
       )}
 
       {heldForFunding && heldLines.length > 0 && (
-        <p className="rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">
-          {heldLines.length} of {run.pay_lines.length} line{run.pay_lines.length === 1 ? "" : "s"} held, not paid:{" "}
-          {heldLines.map((l) => `${l.beneficiary_name} (${formatMoney(l.amount, l.currency)})`).join(", ")}.
-          Held lines move only after the employer is funded and a person approves again.
-        </p>
+        <div className="grid gap-3 rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">
+          <p>
+            {heldLines.length} of {run.pay_lines.length} line{run.pay_lines.length === 1 ? "" : "s"} held, not paid:{" "}
+            {heldLines.map((l) => `${l.beneficiary_name} (${formatMoney(l.amount, l.currency)})`).join(", ")}.
+            Held lines move only after the employer is funded and a person approves again.
+          </p>
+          {run.continuation_run_id && (
+            <p className="font-semibold text-sage-300">
+              {run.can_pay_held ? "Last attempt in run" : "Held lines continued in run"}{" "}
+              <Link href={`/dashboard/runs/${run.continuation_run_id}`} className="font-extrabold text-sand-100 underline underline-offset-4 hover:text-sage-300">
+                #{run.continuation_run_id.slice(0, 8)}
+              </Link>
+              .
+            </p>
+          )}
+          {run.can_pay_held && canPayHeld && (
+            <div className="grid gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <Button disabled={!!busy} onClick={() => void payHeld()}>
+                  {busy === "payheld" ? <Loader2 className="animate-spin" /> : <Wallet />} Pay held lines
+                </Button>
+                <Button variant="outline" asChild>
+                  <Link href={`/dashboard/employers/${run.employer_id}`}>Add funds first</Link>
+                </Button>
+              </div>
+              <p className="font-semibold leading-relaxed text-sage-300">
+                Pays only the held contractors from this employer&apos;s own wallet. Anyone already paid is not paid again.
+                {run.run_fee_collected
+                  ? " The run fee was already collected, so it is not charged again."
+                  : " The run fee has not been collected yet; it is charged when this payroll runs."}
+              </p>
+            </div>
+          )}
+          {error && !run.pending && <p role="alert" className="font-bold text-coral-300">{error}</p>}
+        </div>
       )}
 
       {run.pay_lines.length > 0 && (
@@ -141,6 +204,11 @@ export function RunPanel({ run, canDecide, onChange }: { run: RunDetail; canDeci
       {run.pending && (
         <div className={cn("rounded-3xl border-2 p-4", run.pending.kind === "approval" ? "border-sage-600/60 bg-sage-500/10" : "border-sand-400/50 bg-sand-300/10")}>
           <p className="font-bold text-sand-100">{run.pending.message}</p>
+          {run.pending.run_fee_waived && (
+            <p className="mt-2 text-sm font-semibold text-sage-300">
+              Continuation: the run fee was already collected on the original payroll, so none is charged here.
+            </p>
+          )}
           {!run.resumable && <p className="mt-2 text-sm font-semibold text-coral-300">The server restarted while this run was paused. Start a new run.</p>}
           {error && <p className="mt-2 text-sm font-bold text-coral-300">{error}</p>}
           {canDecide && run.resumable && (

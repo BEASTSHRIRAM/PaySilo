@@ -87,10 +87,16 @@ export interface Assessment {
   by_currency: { currency: string; payouts: number; payroll: string; fees: string; required: string; required_usd: string }[];
 }
 export interface RunSummary {
-  id: string; employer_id: string; employer_name: string; status: string; source: string; period_label: string | null;
+  id: string; employer_id: string; employer_name: string; status: string; source: string;
+  /** Set on a "Pay held lines" continuation: the run whose held lines it pays. */
+  parent_run_id?: string | null; period_label: string | null;
   payroll_currency: string | null; required_usd: string | null; shortfall_usd: string | null; fee_charged_usd: string;
-  explanation: string | null; error: string | null; pending: { kind: "approval" | "escalation"; message: string } | null;
+  explanation: string | null; error: string | null; pending: PendingDecision | null;
   resumable: boolean; created_at: string; settled_at: string | null;
+}
+export interface PendingDecision {
+  kind: "approval" | "escalation"; message: string;
+  partial?: boolean; continuation?: boolean; parent_run_id?: string | null; run_fee_waived?: boolean;
 }
 export interface RunDetail extends RunSummary {
   assessment: Assessment | null;
@@ -101,6 +107,13 @@ export interface RunDetail extends RunSummary {
     tap_signature: string | null; created_at: string }[];
   receipt: { chain: string; chain_index: number; receipt_hash: string; payload_hash: string; tx_hash: string | null;
     explorer_url: string | null } | null;
+  /** Newest "Pay held lines" run that continues this one. */
+  continuation_run_id?: string | null;
+  held_line_count?: number;
+  /** Held lines can be paid right now (role-independent; the button also needs owner/admin). */
+  can_pay_held?: boolean;
+  /** The run fee was already collected on this run or a parent up the chain. */
+  run_fee_collected?: boolean;
 }
 export interface Overview {
   organization: Organization; employers: Employer[]; platform_fees: Record<string, string>;
@@ -244,6 +257,8 @@ export const api = {
     post<RunDetail>("/runs", { employer_id: employerId, lines }),
   decide: (id: string, decision: "approve" | "hold") => post<RunDetail>(`/runs/${id}/decision`, { decision }),
   retryRun: (id: string) => post<RunDetail>(`/runs/${id}/retry`),
+  /** Start a NEW run that pays only this run's HELD lines (it then waits for a TAP-signed approval). */
+  payHeld: (id: string) => post<RunDetail>(`/runs/${id}/pay-held`),
 
   // Chat history (shapes are normalised by the panel; the backend owns them).
   chatThreads: () => request<unknown>("/chat/threads"),
