@@ -215,7 +215,68 @@ class Contractor(TimestampMixin, Base):
     airwallex_beneficiary_id: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # --- contractor trust: tax paperwork status (never tax ids or documents) ---
+    tax_status: Mapped[str] = mapped_column(String(10), nullable=False, default="UNKNOWN", server_default="UNKNOWN")
+    tax_form_type: Mapped[str] = mapped_column(String(8), nullable=False, default="NONE", server_default="NONE")
+    tax_form_status: Mapped[str] = mapped_column(String(10), nullable=False, default="MISSING", server_default="MISSING")
+    tax_form_received_at: Mapped[date | None] = mapped_column(Date)
+    tax_form_expires_at: Mapped[date | None] = mapped_column(Date)
+    # --- bank-detail change control (four-eyes) ---
+    # VERIFIED = payable. PENDING_VERIFICATION = bank details changed/submitted and not yet
+    # confirmed by a second person after an independent callback.
+    bank_verification_status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="VERIFIED", server_default="VERIFIED")
+    bank_details_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bank_change_requested_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    bank_verified_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    bank_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     employer: Mapped[Employer] = relationship(back_populates="contractors")
+
+
+class ContractorChange(Base):
+    """Audit trail of contractor edits. ``summary`` is MASKED text (last 4 only), never full bank values."""
+
+    __tablename__ = "contractor_changes"
+    __table_args__ = (
+        CheckConstraint(_in("change_group", ("bank", "profile", "tax", "onboarding")), name="ck_contractor_change_group"),
+        Index("ix_contractor_changes_contractor", "contractor_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    contractor_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("contractors.id", ondelete="CASCADE"), nullable=False)
+    change_group: Mapped[str] = mapped_column(String(12), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    changed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ContractorOnboardingInvite(Base):
+    """A one-time self-serve onboarding link. Only the sha256 of the token is stored."""
+
+    __tablename__ = "contractor_onboarding_invites"
+    __table_args__ = (
+        CheckConstraint(_in("status", INVITATION_STATUSES), name="ck_onboarding_invite_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False)
+    contractor_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("contractors.id", ondelete="CASCADE"), nullable=False, index=True)
+    email: Mapped[str | None] = mapped_column(String(254))
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 # ---------------------------------------------------------------------------

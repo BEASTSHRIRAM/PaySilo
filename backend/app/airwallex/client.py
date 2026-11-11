@@ -37,6 +37,7 @@ or retrying with a new id.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from decimal import Decimal
@@ -499,11 +500,10 @@ class AirwallexClient:
     def get_beneficiary(self, *, beneficiary_id: str, on_behalf_of: str) -> dict:
         return self._get(f"/beneficiaries/{beneficiary_id}", on_behalf_of=on_behalf_of)
 
-    def create_beneficiary(self, *, request_id: str, on_behalf_of: str, name: str,
-                           currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
-                           iban: str = "", swift_code: str = "", account_number: str = "",
-                           routing_code: str = "", street_address: str = "", city: str = "",
-                           postcode: str = "", state: str = "") -> dict:
+    @staticmethod
+    def _beneficiary_payload(*, request_id: str, name: str, currency: str, country_code: str, method: str,
+                             iban: str, swift_code: str, account_number: str, routing_code: str,
+                             street_address: str, city: str, postcode: str, state: str) -> dict:
         bank_account: dict = {"account_name": name, "account_currency": currency,
                               "bank_country_code": country_code}
         if iban:
@@ -532,15 +532,50 @@ class AirwallexClient:
         state = state or SANDBOX_PLACEHOLDER_STATES.get(country_code, "")
         if state:
             address["state"] = state
-        payload = {"request_id": request_id,
-                   "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account,
-                                   "address": address},
-                   "transfer_methods": [method]}
+        return {"request_id": request_id,
+                "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account,
+                                "address": address},
+                "transfer_methods": [method]}
+
+    def create_beneficiary(self, *, request_id: str, on_behalf_of: str, name: str,
+                           currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
+                           iban: str = "", swift_code: str = "", account_number: str = "",
+                           routing_code: str = "", street_address: str = "", city: str = "",
+                           postcode: str = "", state: str = "") -> dict:
+        payload = self._beneficiary_payload(
+            request_id=request_id, name=name, currency=currency, country_code=country_code, method=method,
+            iban=iban, swift_code=swift_code, account_number=account_number, routing_code=routing_code,
+            street_address=street_address, city=city, postcode=postcode, state=state)
         self._request("POST", "/beneficiaries/validate", on_behalf_of=on_behalf_of, json=payload)
         return self._request("POST", "/beneficiaries/create", on_behalf_of=on_behalf_of, json=payload,
                              request_id=request_id,
                              duplicate_item_path="/beneficiaries/{id}",
                              duplicate_collection="/beneficiaries")
+
+    def validate_beneficiary(self, *, on_behalf_of: str, name: str,
+                             currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
+                             iban: str = "", swift_code: str = "", account_number: str = "",
+                             routing_code: str = "", street_address: str = "", city: str = "",
+                             postcode: str = "", state: str = "") -> dict:
+        """Validate-only (``/beneficiaries/validate``): creates nothing.
+
+        Returns ``{"valid": bool, "errors": [field names only]}``. Provider messages can
+        echo bank values, so only the failing field names are surfaced.
+        """
+        payload = self._beneficiary_payload(
+            request_id=str(uuid.uuid4()), name=name, currency=currency, country_code=country_code,
+            method=method, iban=iban, swift_code=swift_code, account_number=account_number,
+            routing_code=routing_code, street_address=street_address, city=city, postcode=postcode,
+            state=state)
+        try:
+            self._request("POST", "/beneficiaries/validate", on_behalf_of=on_behalf_of, json=payload)
+        except AirwallexError as exc:
+            if exc.status_code is not None and 400 <= exc.status_code < 500 and exc.status_code != 429:
+                found = re.search(r"\[fields: (.*?)\]", str(exc))
+                fields = list(dict.fromkeys(f.strip() for f in found.group(1).split(","))) if found else ["bank_details"]
+                return {"valid": False, "errors": fields}
+            raise
+        return {"valid": True, "errors": []}
 
     def get_transfer(self, *, transfer_id: str, on_behalf_of: str) -> dict:
         return self._get(f"/transfers/{transfer_id}", on_behalf_of=on_behalf_of)
