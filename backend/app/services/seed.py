@@ -8,7 +8,7 @@ balances exist as real ledger entries (never typed in).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -28,7 +28,7 @@ DEMO_USER_NAME = "Priya Raman"
 
 DEMO_EMPLOYERS: list[dict] = [
     {
-        "name": "Acme Manufacturing GmbH", "country": "DE", "contact_name": "Ana Weber",
+        "name": "Acme Manufacturing GmbH", "pay_frequency": "MONTHLY", "pay_in_days": 12, "country": "DE", "contact_name": "Ana Weber",
         "contact_email": "ana.weber@acme.example", "funding_usd": Decimal("20000"),
         "contractors": [
             {"full_name": "Lena Fischer", "country": "DE", "currency": "EUR", "payout_method": "SWIFT",
@@ -38,7 +38,7 @@ DEMO_EMPLOYERS: list[dict] = [
         ],
     },
     {
-        "name": "Borealis Labs AB", "country": "SE", "contact_name": "Bo Lindqvist",
+        "name": "Borealis Labs AB", "pay_frequency": "BIWEEKLY", "pay_in_days": 10, "country": "SE", "contact_name": "Bo Lindqvist",
         "contact_email": "bo@borealis.example", "funding_usd": Decimal("5000"),
         "contractors": [
             {"full_name": "Ingrid Solberg", "country": "SE", "currency": "EUR", "payout_method": "SWIFT",
@@ -46,7 +46,7 @@ DEMO_EMPLOYERS: list[dict] = [
         ],
     },
     {
-        "name": "Cobalt Retail LLC", "country": "US", "contact_name": "Cleo Nakamura",
+        "name": "Cobalt Retail LLC", "pay_frequency": "WEEKLY", "pay_in_days": 3, "country": "US", "contact_name": "Cleo Nakamura",
         "contact_email": "cleo@cobalt.example", "funding_usd": Decimal("0"),
         "contractors": [
             {"full_name": "Sam Lee", "country": "US", "currency": "USD", "payout_method": "LOCAL",
@@ -56,7 +56,7 @@ DEMO_EMPLOYERS: list[dict] = [
     # Kit 6 shortfall story: USD 5,000 pays the smaller EUR line (plus its EUR 12.85 SWIFT fee, the USD 149
     # run fee and the USD 1,000 reserve) but not both, and not the larger line alone -> smallest-first partial.
     {
-        "name": "Delta Studios BV", "country": "NL", "contact_name": "Daan de Vries",
+        "name": "Delta Studios BV", "pay_frequency": "MONTHLY", "pay_in_days": 6, "country": "NL", "contact_name": "Daan de Vries",
         "contact_email": "daan@deltastudios.example", "funding_usd": Decimal("5000"),
         "contractors": [
             {"full_name": "Noor van Dijk", "country": "NL", "currency": "EUR", "payout_method": "SWIFT",
@@ -103,6 +103,15 @@ def _seed_contractor_trust(s: Session, org: Organization, user: User) -> None:
                                    summary="Bank details submitted for verification (demo data)", changed_by_id=None))
 
 
+def _fill_schedule(emp: Employer, spec: dict) -> None:
+    """Funding-planner defaults, only into fields that are still empty (never overwrites a user's edits)."""
+    if emp.pay_frequency is None and emp.next_pay_date is None and spec.get("pay_frequency"):
+        emp.pay_frequency = spec["pay_frequency"]
+        emp.next_pay_date = date.today() + timedelta(days=spec["pay_in_days"])
+    if not emp.contact_email:
+        emp.contact_email = spec["contact_email"]
+
+
 def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
     org = s.scalar(select(Organization).where(Organization.slug == DEMO_ORG_SLUG))
     if org is None:
@@ -123,9 +132,11 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
     for spec in DEMO_EMPLOYERS:
         emp = s.scalar(select(Employer).where(Employer.organization_id == org.id, Employer.name == spec["name"]))
         if emp is not None:
+            _fill_schedule(emp, spec)
             continue
         emp = Employer(organization_id=org.id, name=spec["name"], legal_name=spec["name"], country=spec["country"],
                        contact_name=spec["contact_name"], contact_email=spec["contact_email"])
+        _fill_schedule(emp, spec)
         s.add(emp)
         s.flush()
         for c in spec["contractors"]:

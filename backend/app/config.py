@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
+    # Email outbox: "console" marks messages SENT without sending anything (simulated delivery);
+    # "smtp" really sends through the SMTP_* settings.
+    email_provider: Literal["console", "smtp"] = "console"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+    # Background funding-reminder sweep (every 30 min). Tests turn it off.
+    funding_reminders: Literal["on", "off"] = "on"
+
     @property
     def demo_mode(self) -> bool:
         """Demo mode = explicitly requested, or no Airwallex keys present."""

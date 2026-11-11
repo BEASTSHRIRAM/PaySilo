@@ -68,6 +68,9 @@ PAY_LINE_STATUSES = ("PENDING", "PAID", "HELD", "FAILED")
 APPROVAL_KINDS = ("approval", "escalation")
 DECISIONS = ("approve", "hold")
 INVITATION_STATUSES = ("PENDING", "ACCEPTED", "REVOKED")
+PAY_FREQUENCIES = ("WEEKLY", "BIWEEKLY", "MONTHLY")
+NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE", "PAYMENT_NOTICE", "GENERIC")
+NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED")
 
 
 class Base(DeclarativeBase):
@@ -150,6 +153,37 @@ class Invitation(TimestampMixin, Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class Notification(TimestampMixin, Base):
+    """Outbox row: one message PaySilo wants delivered (funding reminders, statements...).
+
+    ``dedupe_key`` makes queueing idempotent per organization (a nullable key is never deduplicated).
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "dedupe_key", name="uq_notification_org_dedupe"),
+        CheckConstraint(_in("status", NOTIFICATION_STATUSES), name="ck_notification_status"),
+        CheckConstraint(_in("kind", NOTIFICATION_KINDS), name="ck_notification_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("employers.id", ondelete="SET NULL"))
+    contractor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contractors.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="GENERIC")
+    channel: Mapped[str] = mapped_column(String(12), nullable=False, default="email")
+    recipient: Mapped[str] = mapped_column(String(254), nullable=False)
+    subject: Mapped[str] = mapped_column(String(300), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="QUEUED")
+    provider: Mapped[str | None] = mapped_column(String(24))
+    error: Mapped[str | None] = mapped_column(Text)
+    dedupe_key: Mapped[str | None] = mapped_column(String(120))
+    meta: Mapped[dict | None] = mapped_column(JsonType)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 # ---------------------------------------------------------------------------
 # Employers (silos) & contractors
 # ---------------------------------------------------------------------------
@@ -161,6 +195,8 @@ class Employer(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "name", name="uq_employer_org_name"),
         CheckConstraint(_in("status", EMPLOYER_STATUSES), name="ck_employer_status"),
+        CheckConstraint("pay_frequency IS NULL OR " + _in("pay_frequency", PAY_FREQUENCIES),
+                        name="ck_employer_pay_frequency"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -176,6 +212,11 @@ class Employer(TimestampMixin, Base):
     # The employer's own funding (global) account; simulated deposits land here.
     airwallex_global_account_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    # Funding planner: when this employer's payroll is paid and how many business days
+    # before that its wallet must already hold the money.
+    pay_frequency: Mapped[str | None] = mapped_column(String(12))
+    next_pay_date: Mapped[date | None] = mapped_column(Date)
+    funding_lead_days: Mapped[int] = mapped_column(Integer, nullable=False, default=2, server_default="2")
 
     organization: Mapped[Organization] = relationship(back_populates="employers")
     contractors: Mapped[list[Contractor]] = relationship(back_populates="employer", cascade="all, delete-orphan",

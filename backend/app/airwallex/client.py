@@ -434,6 +434,16 @@ class AirwallexClient:
             duplicate_collection="/global_accounts",
         )
 
+    def get_global_account(self, *, account_id: str, global_account_id: str) -> dict:
+        """Read the employer's receiving account: ``GET /global_accounts/{id}`` on its behalf.
+
+        Live-verified shape (see tests/fixtures/airwallex/global_account_get.json): ``account_name``,
+        ``account_number`` (both ``"-"`` while the account is still PROCESSING), ``swift_code``,
+        ``institution.name``, and ``supported_features[]`` carrying DEPOSIT routing codes
+        (``ach`` / ``fedwire`` / ``swift``). Read-only.
+        """
+        return self._get(f"/global_accounts/{global_account_id}", on_behalf_of=account_id)
+
     def deposit(self, *, request_id: str, account_id: str, amount: object, currency: str = "USD",
                 global_account_id: str = "") -> dict:
         """Simulate an inbound bank deposit (sandbox).
