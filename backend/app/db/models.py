@@ -1115,6 +1115,8 @@ class Workflow(TimestampMixin, Base):
     trigger_type: Mapped[str] = mapped_column(String(80), nullable=False, default="")
     graph: Mapped[dict | None] = mapped_column(JsonType)
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # True when the Silo agent drafted it (always saved DISABLED; a person reviews, edits and enables it).
+    drafted_by_agent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     # ``created_by`` in the lane contract = created_by_id (house naming).
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
                                                  nullable=False)

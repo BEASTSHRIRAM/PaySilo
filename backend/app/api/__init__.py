@@ -24,7 +24,7 @@ from ..services.seed import seed_demo
 from .routes import auth, bedata, benefits, chat, employers, platform, runs, tap, team
 from .routes import contractor_trust
 from .routes import funding_plan
-from .routes import notifications, onboarding, travel, workflows
+from .routes import notifications, onboarding, travel, workflow_tools, workflows
 from .routes import proofs
 
 logger = logging.getLogger("paysilo")
@@ -76,7 +76,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     app.include_router(contractor_trust.router)
     app.include_router(funding_plan.router)
     app.include_router(notifications.router)
-    for module in (onboarding, travel, workflows):
+    for module in (onboarding, travel, workflow_tools, workflows):
         app.include_router(module.router)
     app.include_router(proofs.router)
     return app

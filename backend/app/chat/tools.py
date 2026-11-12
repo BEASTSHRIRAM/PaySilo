@@ -1259,6 +1259,43 @@ def read_workflow_runs(ctx: ChatContext, employer: str | None = None, limit: int
                       data={"workflow_runs": entries, "available": True})
 
 
+def draft_workflow(ctx: ChatContext, description: str | None = None) -> ToolResult:
+    """Draft a workflow graph from a plain-language request. Saved DISABLED, flagged as drafted by the agent, for a
+    human to review, edit and enable on the canvas. Cannot enable, run, approve or delete anything."""
+    from ..services import workflow_draft
+
+    if not (description or "").strip():
+        return ToolResult("Tell me what the workflow should do, for example 'monthly payroll for Acme on day 3'.",
+                          data={"drafted": False})
+    if ctx.role not in workflow_draft.DRAFT_ROLES:
+        return ToolResult("Only an owner or admin can create workflows. Ask one of them to draft it.",
+                          data={"drafted": False})
+    model = DRAFT_MODEL_FACTORY(ctx) if DRAFT_MODEL_FACTORY is not None else _default_draft_model(ctx)
+    if model is None:
+        result = workflow_draft.draft_without_model(ctx.db, organization_id=ctx.organization_id,
+                                                    user_id=ctx.user_id, description=description)
+    else:
+        result = workflow_draft.draft_with_model(ctx.db, model=model, organization_id=ctx.organization_id,
+                                                 user_id=ctx.user_id, description=description)
+    if not result.ok:
+        return ToolResult(result.message, data={"drafted": False, "source": result.source})
+    link = f"/dashboard/workflows/{result.workflow_id}"
+    return ToolResult(f"{result.message} Open it to review, edit and enable: {link} "
+                      "(I can't enable, run or approve workflows; that is your decision.)",
+                      data={"drafted": True, "workflow_id": str(result.workflow_id), "link": link,
+                            "enabled": False, "source": result.source, "attempts": result.attempts})
+
+
+# Test seam: a callable (ctx) -> chat model or None. None means "use the configured provider".
+DRAFT_MODEL_FACTORY = None
+
+
+def _default_draft_model(ctx: ChatContext):
+    from .llm import get_chat_model
+
+    return get_chat_model(ctx.runtime.settings)
+
+
 # Registry used by the LLM path: name -> (function, label, description).
 TOOL_LABELS = {
     "list_employers": "Listing employers",
@@ -1277,6 +1314,7 @@ TOOL_LABELS = {
     "read_travel": "Reading travel budgets and trips",
     "propose_trip": "Proposing a trip (human approval required)",
     "read_workflow_runs": "Reading workflow run status",
+    "draft_workflow": "Drafting a workflow (saved disabled for a human to review)",
 }
 
 # Fuller descriptions for the tools whose limits the model must never blur.
@@ -1329,6 +1367,11 @@ TOOL_DESCRIPTIONS = {
         "recent workflow (automation) runs with their workflow name, employer, status and "
         "step counts. Workflows are managed in the Workflows screen, not in chat — this tool "
         "cannot create, edit, start or change any workflow or workflow run."),
+    "draft_workflow": (
+        "Drafting a workflow. Describe the automation in plain language (e.g. 'monthly payroll for Acme on "
+        "day 3'). The graph is validated by code and saved DISABLED, flagged as drafted by Silo, for a human to "
+        "review, edit and enable on the Workflows canvas; the reply links to it. This tool can never enable, run, "
+        "approve or delete a workflow and cannot move money. Never say a drafted workflow is active."),
 }
 
 TOOL_FUNCTIONS = {
@@ -1348,6 +1391,7 @@ TOOL_FUNCTIONS = {
     "read_travel": read_travel,
     "propose_trip": propose_trip,
     "read_workflow_runs": read_workflow_runs,
+    "draft_workflow": draft_workflow,
 }
 
 

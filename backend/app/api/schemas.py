@@ -563,6 +563,7 @@ class WorkflowOut(BaseModel):
     trigger_type: str
     graph: dict | None
     created_by_id: uuid.UUID | None
+    drafted_by_agent: bool = False
     created_at: datetime
     updated_at: datetime
 

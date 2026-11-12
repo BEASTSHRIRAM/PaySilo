@@ -132,11 +132,14 @@ def spend_approval_requested(ctx: dict, org: str = "PaySilo") -> tuple[str, str,
                      if isinstance(line, dict) else f"- {line}")
     total = _money_s(cur, ctx.get("total"))
     entity = _v(ctx, "entity_label", "Approval")
-    text = (f"Hello,\n\nA purchase needs your decision before it can proceed.\n\n"
+    payroll = entity == "Payroll run"
+    text = (f"Hello,\n\n{'A prepared payroll run' if payroll else 'A purchase'} needs your decision before it can "
+            "proceed.\n\n"
             f"{entity} for {_v(ctx, 'employer_name')}"
             + (f" (requested for {_v(ctx, 'requested_for')})" if ctx.get("requested_for") else "") + ".\n\n"
             + ("\n".join(lines) + "\n\n" if lines else "") + f"Total: {total}\n\n"
-            "Nothing is bought until an approver reviews the exact items and approves. If you were not "
+            f"Nothing is {'paid' if payroll else 'bought'} until an approver reviews the exact "
+            f"{'amounts' if payroll else 'items'} and approves. If you were not "
             f"expecting this request, do not approve it.\n\n{_sign(org)}")
     subject = f"Approval requested: {entity}" + (f" ({total})" if total else "")
     link = ctx.get("link_url")

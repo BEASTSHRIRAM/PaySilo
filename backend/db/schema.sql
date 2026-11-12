@@ -127,6 +127,7 @@ CREATE TABLE workflows (
 	trigger_type VARCHAR(80) NOT NULL, 
 	graph JSONB, 
 	created_by_id UUID, 
+	drafted_by_agent BOOLEAN DEFAULT '0' NOT NULL, 
 	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 

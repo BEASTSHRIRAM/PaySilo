@@ -591,6 +591,7 @@ _SEEDED_DISABLED = {"Monthly Payroll Day", "Held Payroll Rescue", "Friday Fundin
 
 def _seed_workflows(s: Session, org: Organization, user: User) -> None:
     from ..db.models import Workflow
+    from .workflow_templates import build_payroll_schedule_graph, layout_graph
     from .workflows import trigger_type_of, validate_graph
 
     existing_names = set(s.scalars(
@@ -598,6 +599,14 @@ def _seed_workflows(s: Session, org: Organization, user: User) -> None:
     for name, description, graph in _WORKFLOW_TEMPLATES:
         if name in existing_names:
             continue  # per-name idempotent: never duplicate a template
+        if name == "Monthly Payroll Day":  # scoped to ONE employer (the first), like a real per-employer schedule
+            first = s.scalar(select(Employer).where(Employer.organization_id == org.id).order_by(Employer.created_at))
+            if first is not None:
+                graph = build_payroll_schedule_graph(employer_id=str(first.id), employer_name=first.name, day=3)
+                description = (f"On day 3 each month at 09:00 (Asia/Kolkata), prepare {first.name}'s payroll run, "
+                               "email the approvers and wait for a person to approve; a shortfall raises a funding "
+                               "reminder instead. The workflow never approves or pays. Duplicate it per employer.")
+        graph = layout_graph(graph)
         errors = validate_graph(graph)
         if errors:  # a broken template must be loud in logs, never silently seeded
             logger.warning("Seed workflow %r failed validation: %s", name, errors)

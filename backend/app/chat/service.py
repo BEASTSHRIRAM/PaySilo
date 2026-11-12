@@ -78,7 +78,8 @@ SYSTEM_PROMPT = (
     "is read-only and propose_trip only creates a REQUESTED trip for a human approver in "
     "the Travel screen. You cannot approve or purchase onboarding kits, and cannot approve, "
     "book or purchase trips, and must never imply that you did. Silo can read workflow run "
-    "status; workflows (automations) are managed in the Workflows screen, not in chat. "
+    "status, and draft_workflow can DRAFT one for a person: it is saved disabled and a human reviews, edits "
+    "and enables it in the Workflows screen. You can never enable, run, approve or delete a workflow. "
     "Keep answers concise and in plain English."
 )
 
@@ -491,6 +492,11 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
     if "travel" in text or "trip" in text:
         return ([("read_travel", {"employer": employer_ref})],
                 "Matched the travel read intent (budgets, category caps, trips and blocked components)", None)
+    if ("workflow" in text or "automation" in text or "schedule" in text) and any(
+            w in text for w in ("create", "build", "draft", "make", "set up", "new ", "add ")):
+        return ([("draft_workflow", {"description": message})],
+                "Matched the draft-a-workflow intent (saved DISABLED for a human to review; chat cannot "
+                "enable, run or approve workflows)", None)
     if "workflow" in text or "automation" in text:
         return ([("read_workflow_runs", {"employer": employer_ref})],
                 "Matched the workflow-runs read intent (workflows are managed in the "

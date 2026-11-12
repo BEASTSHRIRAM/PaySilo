@@ -160,7 +160,8 @@ def workflow_out(w: Workflow) -> WorkflowOut:
     return WorkflowOut(
         id=w.id, organization_id=w.organization_id, name=w.name, description=w.description,
         enabled=w.enabled, trigger_type=w.trigger_type, graph=w.graph,
-        created_by_id=w.created_by_id, created_at=w.created_at, updated_at=w.updated_at)
+        created_by_id=w.created_by_id, drafted_by_agent=bool(w.drafted_by_agent),
+        created_at=w.created_at, updated_at=w.updated_at)
 
 
 def workflow_step_out(st: WorkflowRunStep) -> WorkflowRunStepOut:

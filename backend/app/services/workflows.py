@@ -157,108 +157,11 @@ def _is_forbidden_action(node_type: str) -> bool:
     return bool(parts & FORBIDDEN_ACTION_WORDS)
 
 
-def validate_graph(graph) -> list[str]:
-    """Return a list of human-readable errors; empty means valid."""
-    errors: list[str] = []
-    if not isinstance(graph, dict):
-        return ["Graph must be an object with 'nodes' and 'edges'."]
-    nodes = graph.get("nodes")
-    edges = graph.get("edges") or []
-    if not isinstance(nodes, list) or not nodes:
-        return ["Graph must contain at least one node."]
-    if not isinstance(edges, list):
-        return ["Graph 'edges' must be a list."]
+def validate_graph(graph, *, employer_ids: set[str] | None = None) -> list[str]:
+    """Return a list of human-readable errors; empty means valid (rules live in ``workflow_validation``)."""
+    from .workflow_validation import validate_graph_detailed
 
-    node_ids: set[str] = set()
-    trigger_count = 0
-    node_types: dict[str, str] = {}
-    for node in nodes:
-        if not isinstance(node, dict):
-            errors.append("Every node must be an object with 'id' and 'type'.")
-            continue
-        node_id, node_type = node.get("id"), node.get("type")
-        if not node_id or not isinstance(node_id, str):
-            errors.append("Every node must have a string 'id'.")
-            continue
-        if node_id in node_ids:
-            errors.append(f"Duplicate node id '{node_id}'.")
-        node_ids.add(node_id)
-        if not node_type or not isinstance(node_type, str):
-            errors.append(f"Node '{node_id}' must have a 'type'.")
-            continue
-        node_types[node_id] = node_type
-        if _is_forbidden_action(node_type):
-            errors.append(
-                f"Node '{node_id}': '{node_type}' is forbidden — workflows never approve, "
-                "purchase or pay. Use gate.wait_for_approval to park for a human decision.")
-            continue
-        if node_type not in KNOWN_TYPES:
-            errors.append(f"Node '{node_id}': unknown node type '{node_type}'.")
-            continue
-        if node_type in TRIGGER_TYPES:
-            trigger_count += 1
-        data = node.get("data") or {}
-        if not isinstance(data, dict):
-            errors.append(f"Node '{node_id}': 'data' must be an object.")
-            continue
-        if node_type == "trigger.schedule":
-            cadence = data.get("cadence")
-            if cadence not in ("monthly", "weekly"):
-                errors.append(f"Node '{node_id}': trigger.schedule requires data.cadence "
-                              "('monthly' or 'weekly').")
-            day = data.get("day")
-            if not isinstance(day, int) or isinstance(day, bool):
-                errors.append(f"Node '{node_id}': trigger.schedule requires integer data.day "
-                              "(day of month for monthly, 0-6 weekday for weekly).")
-            elif cadence == "monthly" and not 1 <= day <= 31:
-                errors.append(f"Node '{node_id}': monthly schedule day must be 1-31.")
-            elif cadence == "weekly" and not 0 <= day <= 6:
-                errors.append(f"Node '{node_id}': weekly schedule day must be 0-6 (Mon-Sun).")
-            if data.get("fan_out", "org") not in ("org", "employers"):
-                errors.append(f"Node '{node_id}': trigger.schedule fan_out must be 'org' or 'employers'.")
-        if node_type == "condition.field_check":
-            if not data.get("field"):
-                errors.append(f"Node '{node_id}': condition.field_check requires data.field.")
-            if data.get("operator", "eq") not in OPERATORS:
-                errors.append(f"Node '{node_id}': operator must be one of {', '.join(OPERATORS)}.")
-        if node_type == "gate.wait_for_approval":
-            entity = data.get("entity", "trigger")
-            if entity not in GATE_ENTITIES:
-                errors.append(
-                    f"Node '{node_id}': wait gate entity must be one of "
-                    f"{', '.join(GATE_ENTITIES)} (got '{entity}') — a gate with no "
-                    "resolvable entity cannot park.")
-            elif entity == "kit" and "action.draft_onboarding_kit" not in node_types.values() \
-                    and trigger_type_of(graph) not in ("trigger.kit_approved", "trigger.kit_completed"):
-                # No kit is created by this graph and the trigger is not a
-                # kit, so a kit gate can never resolve.
-                errors.append(
-                    f"Node '{node_id}': wait gate for entity 'kit' has no resolvable entity — "
-                    "no node in this graph drafts a kit and the trigger is not a kit event.")
-        if node_type == "action.send_email":
-            from .spend_mail import TEMPLATE_NAMES
-
-            if not data.get("template"):
-                errors.append(f"Node '{node_id}': action.send_email requires data.template.")
-            elif data["template"] not in TEMPLATE_NAMES:
-                errors.append(f"Node '{node_id}': unknown email template '{data['template']}' "
-                              f"(use one of {', '.join(TEMPLATE_NAMES)}).")
-            if data.get("recipient", "decider") not in EMAIL_RECIPIENTS:
-                errors.append(
-                    f"Node '{node_id}': send_email recipient must be one of "
-                    f"{', '.join(EMAIL_RECIPIENTS)}.")
-    if trigger_count != 1:
-        errors.append(f"Graph must have exactly one trigger node (found {trigger_count}).")
-
-    for edge in edges:
-        if not isinstance(edge, dict):
-            errors.append("Every edge must be an object with 'source' and 'target'.")
-            continue
-        for end in ("source", "target"):
-            if edge.get(end) not in node_ids:
-                errors.append(f"Edge '{edge.get('id', '?')}': {end} references missing node "
-                              f"'{edge.get(end)}'.")
-    return errors
+    return [e["message"] for e in validate_graph_detailed(graph, employer_ids=employer_ids)]
 
 
 # ---------------------------------------------------------------------------
@@ -874,6 +777,9 @@ def _email_context(s: Session, run: WorkflowRun, facts: dict, settings) -> dict:
                 context.setdefault(key, value)
     context["link_url"] = _link_for(settings, kind, entity_id)
     context.setdefault("run_label", facts.get("run_label"))
+    if kind in ("run", "payroll_run"):
+        context.setdefault("entity_label", "Payroll run")
+        context.setdefault("total", facts.get("total_required"))
     return {k: _jsonable(v) for k, v in context.items() if v is not None}
 
 
@@ -1201,22 +1107,33 @@ _ACTION_HANDLERS = {
 # ---------------------------------------------------------------------------
 
 def _period_stamp(cadence: str, now) -> str:
+    """Legacy (no time/timezone) schedules dedupe once per calendar period, exactly as before."""
     if cadence == "weekly":
         iso = now.isocalendar()
         return f"{iso[0]:04d}-W{iso[1]:02d}"
     return f"{now.year:04d}-{now.month:02d}"
 
 
+def _as_utc(moment):
+    from datetime import UTC
+
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
 def run_due_schedules(s: Session, *, now, runtime=None,
                       organization_id: uuid.UUID | None = None) -> list[WorkflowRun]:
-    """Fire enabled schedule workflows due at ``now``.
+    """Fire enabled schedule workflows that have an occurrence due at ``now`` (see ``workflow_schedule``).
 
-    Monthly: ``now.day == day``. Weekly: ``now.weekday() == day``.
-    Once per period per entity: the period stamp is part of the run's
-    dedupe key, so a second tick in the same period creates nothing.
-    fan_out="employers" creates one run per employer (entity=employer);
-    fan_out="org" creates one run (entity=organization).
+    Per organisation and idempotent: the run's dedupe key contains the scheduled occurrence, so a second tick
+    (or a second worker) for the same occurrence creates nothing. After downtime at most ONE missed occurrence is
+    caught up, and only if it is under 24h old. A schedule created or edited AFTER an occurrence's time never
+    fires for it (saving a schedule at 10:00 does not run its 09:00 slot).
+
+    Scope: ``employer_id`` runs for that one employer (it must belong to the workflow's organisation);
+    ``fan_out="employers"`` runs once per employer; otherwise one run for the organisation.
     """
+    from . import workflow_schedule as sched
+
     created: list[WorkflowRun] = []
     workflows = s.scalars(
         select(Workflow).where(Workflow.enabled.is_(True),
@@ -1229,30 +1146,43 @@ def run_due_schedules(s: Session, *, now, runtime=None,
         if trigger_node is None:
             continue
         data = trigger_node.get("data") or {}
-        cadence, day = data.get("cadence"), data.get("day")
-        if cadence == "monthly" and now.day != day:
+        try:
+            occurrence = sched.due_occurrence(data, _as_utc(now))
+        except sched.ScheduleConfigError:
+            logger.warning("Workflow %s has an invalid schedule; skipped", workflow.id)
             continue
-        if cadence == "weekly" and now.weekday() != day:
+        if occurrence is None:
             continue
-        if cadence not in ("monthly", "weekly"):
-            continue
-        period = _period_stamp(cadence, now)
-        if data.get("fan_out", "org") == "employers":
+        legacy = not data.get("time") and not data.get("timezone")
+        if not legacy and workflow.updated_at is not None and occurrence < _as_utc(workflow.updated_at):
+            continue  # saved/enabled after this slot: never fire retroactively
+        suffix = _period_stamp(data.get("cadence"), occurrence) if legacy and data.get("cadence") != "once"             else sched.occurrence_key(occurrence)
+        if data.get("employer_id"):
+            employer = s.get(Employer, _parse_uuid(data["employer_id"]))
+            if employer is None or employer.organization_id != workflow.organization_id:
+                logger.warning("Workflow %s schedules an employer outside its organisation; skipped", workflow.id)
+                continue
+            employers = [employer]
+        elif data.get("fan_out", "org") == "employers":
             employers = s.scalars(
                 select(Employer).where(Employer.organization_id == workflow.organization_id)
                 .order_by(Employer.created_at)).all()
-            for employer in employers:
-                facts = _entity_facts(s, workflow.organization_id, "employer", str(employer.id))
-                created.extend(dispatch_event(
-                    s, organization_id=workflow.organization_id, event_type="trigger.schedule",
-                    entity_kind="employer", entity_id=str(employer.id), facts=facts,
-                    runtime=runtime, dedupe_suffix=period, only_workflow_id=workflow.id))
         else:
+            employers = None
+        if employers is None:
             created.extend(dispatch_event(
                 s, organization_id=workflow.organization_id, event_type="trigger.schedule",
                 entity_kind="organization", entity_id=str(workflow.organization_id),
                 facts={"organization_id": str(workflow.organization_id)},
-                runtime=runtime, dedupe_suffix=period, only_workflow_id=workflow.id))
+                runtime=runtime, dedupe_suffix=suffix, only_workflow_id=workflow.id))
+            continue
+        for employer in employers:
+            facts = _entity_facts(s, workflow.organization_id, "employer", str(employer.id))
+            facts["scheduled_for"] = suffix
+            created.extend(dispatch_event(
+                s, organization_id=workflow.organization_id, event_type="trigger.schedule",
+                entity_kind="employer", entity_id=str(employer.id), facts=facts,
+                runtime=runtime, dedupe_suffix=suffix, only_workflow_id=workflow.id))
     return created
 
 

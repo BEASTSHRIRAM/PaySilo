@@ -16,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ...db.models import Workflow, WorkflowRun, WorkflowTask
-from ...services.workflows import build_payroll_brief, run_due_schedules, trigger_type_of, validate_graph
+from ...services.workflows import build_payroll_brief, run_due_schedules, trigger_type_of
+from .workflow_tools import check_graph
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, require_roles
 from ..schemas import (
     WorkflowBriefEntryOut,
@@ -39,11 +40,12 @@ def _load(db: Session, tenant: Tenant, workflow_id: uuid.UUID) -> Workflow:
     return wf
 
 
-def _validate_or_422(graph) -> None:
-    errors = validate_graph(graph)
-    if errors:
+def _validate_or_422(db: Session, tenant: Tenant, graph) -> None:
+    detailed = check_graph(db, tenant, graph)
+    if detailed:
+        errors = [e["message"] for e in detailed]
         raise HTTPException(422, detail={"code": "INVALID_GRAPH", "message": "; ".join(errors),
-                                         "errors": errors})
+                                         "errors": errors, "details": detailed})
 
 
 @router.get("", response_model=list[WorkflowOut])
@@ -58,7 +60,7 @@ def list_workflows(tenant: Tenant = Depends(current_tenant), db: Session = Depen
 @router.post("/", response_model=WorkflowOut, status_code=status.HTTP_201_CREATED)
 def create_workflow(body: WorkflowIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                     db: Session = Depends(get_db)) -> WorkflowOut:
-    _validate_or_422(body.graph)
+    _validate_or_422(db, tenant, body.graph)
     wf = Workflow(organization_id=tenant.organization.id, name=body.name, description=body.description,
                   enabled=body.enabled, trigger_type=trigger_type_of(body.graph) or "",
                   graph=body.graph, created_by_id=tenant.user.id)
@@ -134,7 +136,7 @@ def update_workflow(workflow_id: uuid.UUID, body: WorkflowUpdateIn,
                     db: Session = Depends(get_db)) -> WorkflowOut:
     wf = _load(db, tenant, workflow_id)
     if body.graph is not None:
-        _validate_or_422(body.graph)
+        _validate_or_422(db, tenant, body.graph)
         wf.graph = body.graph
         wf.trigger_type = trigger_type_of(body.graph) or ""
     if body.name is not None:
