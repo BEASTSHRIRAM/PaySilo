@@ -20,6 +20,7 @@ import {
   ApiError, apiWorkflows,
   type WorkflowDetail, type WorkflowGraph, type WorkflowRunDetail, type WorkflowRunStep,
 } from "@/lib/api";
+import { layoutGraph, needsLayout } from "@/lib/workflow-layout";
 import { WORKFLOW_NODE_DEFS, isKnownNodeType, kindMiniMapColor, nodeDef } from "@/lib/workflows";
 import { cn } from "@/lib/utils";
 
@@ -40,19 +41,20 @@ function stepBranch(step: WorkflowRunStep | undefined): string | null {
   return null;
 }
 
-/** Is this entity a payroll run? The WAITING banner deep-links payroll gates to the Morning Brief. */
-function isPayrollEntity(run: WorkflowRunDetail): boolean {
-  const k = `${run.entity_kind ?? ""} ${run.trigger_event ?? ""}`.toLowerCase();
-  return k.includes("payroll") || k.includes("run");
-}
-
-function waitingDeepLink(run: WorkflowRunDetail): { href: string; label: string } | null {
-  const kind = (run.entity_kind ?? "").toLowerCase();
-  if (isPayrollEntity(run)) return { href: "/dashboard/workflows/brief", label: "Open the Payroll Morning Brief" };
-  if (kind.includes("kit")) return { href: "/dashboard/onboarding", label: "Open onboarding" };
-  if (kind.includes("trip")) return { href: "/dashboard/travel", label: "Open travel" };
-  if (run.entity_id) return { href: `/dashboard/runs/${run.entity_id}`, label: "Open the payroll run" };
-  return null;
+/** Where the person decides, named for the screen the GATE is waiting on (kit / trip / payroll run), not the trigger. */
+function waitingLinks(run: WorkflowRunDetail): { href: string; label: string; brief?: boolean }[] {
+  const ctx = (run.context ?? {}) as Record<string, unknown>;
+  const kind = String(ctx.gate_entity_kind ?? run.entity_kind ?? "").toLowerCase();
+  const id = String(ctx.gate_entity_id ?? run.entity_id ?? "");
+  if (kind.includes("kit")) return [{ href: "/dashboard/onboarding", label: "Open the onboarding kit" }];
+  if (kind.includes("trip")) return [{ href: "/dashboard/travel", label: "Open the trip" }];
+  if (kind === "run" || kind === "payroll_run" || kind.includes("payroll")) {
+    return [
+      ...(id ? [{ href: `/dashboard/runs/${id}`, label: "Open the payroll run" }] : []),
+      { href: "/dashboard/workflows/brief", label: "Open the Payroll Morning Brief", brief: true },
+    ];
+  }
+  return [];
 }
 
 const TERMINAL = ["COMPLETED", "FAILED"];
@@ -105,7 +107,8 @@ function RunCanvas() {
   }, [run]);
 
   const { flowNodes, flowEdges } = useMemo((): { flowNodes: RFNode[]; flowEdges: RFEdge[] } => {
-    const graph: WorkflowGraph | undefined = workflow?.graph ?? undefined;
+    const saved: WorkflowGraph | undefined = workflow?.graph ?? undefined;
+    const graph = saved && needsLayout(saved) ? layoutGraph(saved) : saved;
     if (!graph || !run) return { flowNodes: [], flowEdges: [] };
     const executed = new Set((run.steps ?? []).map((s) => s.node_id));
     const nodes: RFNode[] = graph.nodes.map((n, i) => {
@@ -114,7 +117,7 @@ function RunCanvas() {
       const status = last ? last.status.toUpperCase() : "NOT_REACHED";
       return {
         id: n.id, type: n.type,
-        position: n.position ?? { x: 240, y: 60 + i * 140 },
+        position: n.position ?? { x: 40 + i * 300, y: 60 },
         data: { ...(n.data ?? {}), __runStatus: status, __editable: false },
         draggable: false, selectable: true,
       };
@@ -145,7 +148,7 @@ function RunCanvas() {
         id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? undefined, type: "default",
         className: isFailed ? "wf-edge-taken-failed" : isTaken ? "wf-edge-taken" : undefined,
         style: { stroke: isFailed ? "#E64833" : isTaken ? "#3A8C6B" : "#244855", strokeWidth: isTaken || isFailed ? 3 : 1.8, opacity: isTaken || isFailed ? 1 : 0.55 },
-        ...(e.sourceHandle === "true" || e.sourceHandle === "false" ? { label: e.sourceHandle, labelStyle: EDGE_LABEL_STYLE, labelBgStyle: EDGE_LABEL_BG, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 999 } : {}),
+        ...(e.sourceHandle === "true" || e.sourceHandle === "false" ? { label: e.sourceHandle === "true" ? "Yes" : "No", labelStyle: EDGE_LABEL_STYLE, labelBgStyle: EDGE_LABEL_BG, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 999 } : {}),
       };
     });
     return { flowNodes: nodes, flowEdges: edges };
@@ -160,7 +163,7 @@ function RunCanvas() {
   const selectedSteps = selectedNodeId ? (stepsByNode.get(selectedNodeId) ?? []) : [];
   const selectedNodeDef = selectedNodeId && workflow ? nodeDef((workflow.graph?.nodes ?? []).find((n) => n.id === selectedNodeId)?.type ?? "") : null;
   const isWaiting = runStatus === "WAITING";
-  const deepLink = run && isWaiting ? waitingDeepLink(run) : null;
+  const deepLinks = run && isWaiting ? waitingLinks(run) : [];
 
   const runTone: BadgeProps["tone"] = runStatus === "COMPLETED" ? "sage" : runStatus === "FAILED" ? "coral" : runStatus === "WAITING" ? "sand" : "neutral";
 
@@ -201,13 +204,11 @@ function RunCanvas() {
               <p className="flex-1 text-sm font-bold text-sand-100">
                 Waiting for approval — {run.entity_label || run.entity_id || "the gated entity"}
               </p>
-              {deepLink && (
-                deepLink.href === "/dashboard/workflows/brief" ? (
-                  <Button size="sm" asChild><Link href={deepLink.href}><Sunrise /> {deepLink.label}</Link></Button>
-                ) : (
-                  <Button size="sm" variant="outline" asChild><Link href={deepLink.href}>{deepLink.label}</Link></Button>
-                )
-              )}
+              {deepLinks.map((l, i) => (
+                <Button key={l.href} size="sm" variant={i === 0 ? "primary" : "outline"} asChild>
+                  <Link href={l.href}>{l.brief ? <Sunrise /> : null} {l.label}</Link>
+                </Button>
+              ))}
             </div>
           )}
 

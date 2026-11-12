@@ -3,14 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowUpRight, CalendarDays, ChevronLeft, ChevronRight, Info } from "lucide-react";
+import { ArrowUpRight, CalendarClock, CalendarDays, ChevronLeft, ChevronRight, Info } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
+import { PayrollScheduleDialog } from "@/components/workflows/payroll-schedule-dialog";
 import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { api, apiV3, ApiError, type CalendarEvent, type Employer, type Session } from "@/lib/api";
+import { api, apiV3, apiWorkflows, ApiError, type CalendarEvent, type Employer, type ScheduleOccurrence, type Session } from "@/lib/api";
+import { EDITOR_ROLES } from "@/lib/status";
 import { cn } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
@@ -64,6 +66,8 @@ export default function CalendarPage() {
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [occurrences, setOccurrences] = useState<ScheduleOccurrence[]>([]);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -107,6 +111,14 @@ export default function CalendarPage() {
 
   useEffect(() => { void load(); }, [load]);
 
+  // Scheduled workflow occurrences (read-only chips) for the visible 6-week grid.
+  const loadOccurrences = useCallback(async () => {
+    const g = monthGrid(cursor);
+    try { setOccurrences(await apiWorkflows.occurrences(isoOf(g[0]), isoOf(g[g.length - 1]))); }
+    catch { setOccurrences([]); }
+  }, [cursor]);
+  useEffect(() => { void loadOccurrences(); }, [loadOccurrences]);
+
   const accentFor = useCallback(
     (employerId: string) => {
       const idx = employers.findIndex((e) => e.id === employerId);
@@ -130,6 +142,16 @@ export default function CalendarPage() {
     return map;
   }, [visible]);
 
+  const visibleOccurrences = useMemo(
+    () => occurrences.filter((o) => filter === "ALL" || o.employer_id === filter || o.employer_id === null),
+    [occurrences, filter],
+  );
+  const occByDay = useMemo(() => {
+    const map = new Map<string, ScheduleOccurrence[]>();
+    for (const o of visibleOccurrences) map.set(o.date, [...(map.get(o.date) ?? []), o]);
+    return map;
+  }, [visibleOccurrences]);
+  const canCreateSchedule = !!session && EDITOR_ROLES.includes(session.role);
   const grid = useMemo(() => monthGrid(cursor), [cursor]);
   const todayIso = isoOf(new Date());
   const monthName = cursor.toLocaleDateString("en-US", { month: "long", year: "numeric" });
@@ -159,7 +181,10 @@ export default function CalendarPage() {
               Pay dates, cut-offs and funding deadlines across every employer, from each employer&apos;s calendar.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {canCreateSchedule && employers.length > 0 && (
+              <Button size="sm" onClick={() => setScheduleOpen(true)}><CalendarClock /> Create payroll schedule</Button>
+            )}
             <Button variant="outline" size="sm" onClick={() => shiftMonth(-1)} aria-label="Previous month">
               <ChevronLeft />
             </Button>
@@ -248,6 +273,15 @@ export default function CalendarPage() {
                           {day.getDate()}
                         </span>
                         <span className="mt-1 grid gap-1">
+                          {(occByDay.get(iso) ?? []).slice(0, 2).map((o) => (
+                            <Link key={`${o.workflow_id}-${o.date}`} href={`/dashboard/workflows/${o.workflow_id}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  title={`Scheduled workflow: ${o.workflow_name} at ${o.time} ${o.timezone}`}
+                                  className="flex items-center gap-1 truncate rounded-md border border-sage-500/60 bg-sage-500/15 px-1.5 py-0.5 text-[11px] font-bold leading-tight text-sage-300 hover:bg-sage-500/30">
+                              <CalendarClock className="size-3 shrink-0" />
+                              <span className="truncate">{o.employer_name ?? o.workflow_name} {o.time}</span>
+                            </Link>
+                          ))}
                           {dayEvents.slice(0, 3).map((ev, i) => (
                             <span key={`${ev.date}-${ev.kind}-${ev.run_id ?? ""}-${i}`}
                                   className={cn("flex items-center gap-1 truncate rounded-md px-1.5 py-0.5 text-[11px] font-bold leading-tight", kindMeta(ev.kind).chip)}>
@@ -270,6 +304,9 @@ export default function CalendarPage() {
                       {isDerived(kind) && <span className="font-semibold text-sage-500">(derived)</span>}
                     </span>
                   ))}
+                  <span className="flex items-center gap-1.5 text-xs font-bold text-sage-300">
+                    <CalendarClock className="size-3.5 text-sage-400" /> Scheduled workflow <span className="font-semibold text-sage-500">(read-only, links to the workflow)</span>
+                  </span>
                 </div>
               </Card>
 
@@ -285,6 +322,16 @@ export default function CalendarPage() {
                     Show the whole month
                   </Button>
                 )}
+                {(selectedDay ? visibleOccurrences.filter((o) => o.date === selectedDay) : visibleOccurrences.filter((o) => o.date.startsWith(`${cursor.getFullYear()}-${`${cursor.getMonth() + 1}`.padStart(2, "0")}`))).map((o) => (
+                  <Card key={`agenda-${o.workflow_id}-${o.date}`} className="mb-2 p-4">
+                    <p className="flex items-center gap-2 font-bold text-sand-100"><CalendarClock className="size-4 text-sage-400" /> <span className="truncate">{o.workflow_name}</span></p>
+                    <p className="mt-1 text-sm font-semibold text-sage-400">
+                      {new Date(`${o.date}T00:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} · {o.time} {o.timezone}{o.employer_name ? ` · ${o.employer_name}` : ""}
+                    </p>
+                    <p className="mt-1 text-xs font-semibold text-sage-500">Scheduled workflow: prepares the run, then asks an approver.</p>
+                    <Link href={`/dashboard/workflows/${o.workflow_id}`} className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-sage-300 hover:text-sand-100">Open workflow <ArrowUpRight className="size-4" /></Link>
+                  </Card>
+                ))}
                 {agenda.length === 0 ? (
                   <Card className="p-5">
                     <p className="font-semibold text-sage-400">
@@ -338,6 +385,9 @@ export default function CalendarPage() {
           </>
         )}
       </main>
+      <PayrollScheduleDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)}
+        employers={employers.map((e) => ({ id: e.id, name: e.name }))} employerId={filter !== "ALL" ? filter : null}
+        onCreated={() => void loadOccurrences()} />
     </div>
   );
 }

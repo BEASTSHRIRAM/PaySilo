@@ -31,6 +31,8 @@ export interface WorkflowNodeDef {
   kind: WorkflowNodeKind;
   group: PaletteGroup;
   fields: ConfigFieldDef[];
+  /** Initial config for a freshly added node (merged with the field defaults). */
+  defaults?: Record<string, unknown>;
   /** One-line configured essence shown on the card — the flow must read without opening panels. */
   summary: (data: Record<string, unknown>) => string | null;
 }
@@ -63,22 +65,36 @@ export const GATE_ENTITIES: ConfigFieldOption[] = [
   { value: "trigger", label: "Triggering entity" }, { value: "kit", label: "Onboarding kit" }, { value: "trip", label: "Trip" },
   { value: "run", label: "Payroll run" },
 ];
-export const SCHEDULE_CADENCES: ConfigFieldOption[] = [{ value: "monthly", label: "Monthly" }, { value: "weekly", label: "Weekly" }];
-export const SCHEDULE_WEEKDAYS: ConfigFieldOption[] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].map((d) => ({ value: d, label: cap(d) }));
+export const SCHEDULE_CADENCES: ConfigFieldOption[] = [
+  { value: "monthly", label: "Monthly, on a day of the month" },
+  { value: "weekly", label: "Weekly, on a weekday" },
+  { value: "once", label: "Once, on a specific date" },
+];
+export const SCHEDULE_WEEKDAYS: ConfigFieldOption[] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((d, i) => ({ value: String(i), label: d }));
+export const WEEKEND_RULES: ConfigFieldOption[] = [
+  { value: "as_is", label: "Run as is" },
+  { value: "previous_business_day", label: "Previous business day (Friday)" },
+  { value: "next_business_day", label: "Next business day (Monday)" },
+];
 export const FAN_OUT_OPTIONS: ConfigFieldOption[] = [{ value: "employers", label: "Per employer" }, { value: "org", label: "Whole organisation" }];
+export const DEFAULT_TIMEZONE = "Asia/Kolkata";
+export const COMMON_TIMEZONES = ["Asia/Kolkata", "UTC", "Europe/London", "Europe/Berlin", "America/New_York", "America/Los_Angeles", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney"];
+export const SCHEDULE_DEFAULTS: Record<string, unknown> = { cadence: "monthly", day: 3, time: "09:00", timezone: DEFAULT_TIMEZONE, weekend_rule: "as_is", fan_out: "org" };
 
 export function templateLabel(v: string): string { return EMAIL_TEMPLATES.find((t) => t.value === v)?.label ?? v; }
 export function recipientLabel(v: string): string { return EMAIL_RECIPIENTS.find((t) => t.value === v)?.label ?? v; }
 
 function scheduleSummary(data: Record<string, unknown>): string {
   const cadence = str(data.cadence) || "monthly";
-  const fan = str(data.fan_out) === "org" ? "whole organisation" : "per employer";
-  if (cadence === "weekly") {
-    const day = str(data.weekday) || str(data.day) || "friday";
-    return `Weekly on ${cap(day)} · ${fan}`;
-  }
-  const day = str(data.day) || "1";
-  return `Monthly on day ${day} · ${fan}`;
+  const day = Number(data.day);
+  let when: string;
+  if (cadence === "once") when = str(data.date) ? `On ${str(data.date)}` : "On a date (pick one)";
+  else if (cadence === "weekly") when = `Every ${SCHEDULE_WEEKDAYS[Number.isInteger(day) && day >= 0 && day <= 6 ? day : 4].label}`;
+  else if (data.last_day === true) when = "Monthly, last day";
+  else when = `Monthly on day ${Number.isFinite(day) && day > 0 ? day : "?"}`;
+  const time = str(data.time) ? ` · ${str(data.time)} ${str(data.timezone) || DEFAULT_TIMEZONE}` : "";
+  const scope = str(data.__employerName) ? ` · ${str(data.__employerName)}` : data.employer_id ? " · one employer" : str(data.fan_out) === "employers" ? " · every employer" : " · whole organisation";
+  return `${when}${time}${scope}`;
 }
 
 // ------------------------------------------------------------------ THE registry
@@ -93,13 +109,8 @@ export const WORKFLOW_NODE_DEFS: WorkflowNodeDef[] = [
   { type: "trigger.kit_approved", label: "Kit approved", description: "Runs when an onboarding kit is approved.", kind: "trigger", group: "Triggers", fields: [], summary: () => "When a kit is approved" },
   { type: "trigger.kit_completed", label: "Kit completed", description: "Runs when an onboarding kit is completed.", kind: "trigger", group: "Triggers", fields: [], summary: () => "When a kit is completed" },
   {
-    type: "trigger.schedule", label: "Schedule", description: "Runs on a monthly or weekly cadence, per employer or for the whole organisation.", kind: "trigger", group: "Triggers",
-    fields: [
-      { key: "cadence", label: "Cadence", kind: "select", options: SCHEDULE_CADENCES, defaultValue: "monthly", required: true },
-      { key: "day", label: "Day of month (monthly)", kind: "number", placeholder: "3", defaultValue: "1", help: "Used when the cadence is monthly." },
-      { key: "weekday", label: "Weekday (weekly)", kind: "select", options: SCHEDULE_WEEKDAYS, defaultValue: "friday", help: "Used when the cadence is weekly." },
-      { key: "fan_out", label: "Fan out", kind: "select", options: FAN_OUT_OPTIONS, defaultValue: "employers", required: true },
-    ],
+    type: "trigger.schedule", label: "Schedule", description: "Runs on a calendar date for one employer: monthly on a day, weekly on a weekday, or once.", kind: "trigger", group: "Triggers",
+    fields: [], defaults: SCHEDULE_DEFAULTS,
     summary: scheduleSummary,
   },
   { type: "trigger.funds_received", label: "Funds received", description: "Runs when funds land in an employer's silo.", kind: "trigger", group: "Triggers", fields: [], summary: () => "When funds land in a silo" },
@@ -184,7 +195,7 @@ export function humanizeTrigger(type: string | null | undefined): string { if (!
 export function defaultDataFor(type: string): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of nodeDef(type).fields) if (f.defaultValue !== undefined) out[f.key] = f.defaultValue;
-  return out;
+  return { ...out, ...(nodeDef(type).defaults ?? {}) };
 }
 export function configSummary(type: string, data: Record<string, unknown> | undefined): string | null {
   return nodeDef(type).summary(data ?? {});
@@ -197,6 +208,7 @@ export function validateNodeData(type: string, data: Record<string, unknown> | u
     const v = data?.[f.key];
     if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) errs[f.key] = `${f.label} is required.`;
   }
+  if (type === "trigger.schedule") Object.assign(errs, validateScheduleData(data ?? {}));
   return errs;
 }
 
@@ -226,3 +238,52 @@ export function cleanNodeData(data: Record<string, unknown> | undefined): Record
 }
 export const ADD_NEXT_EVENT = "paysilo:add-next";
 export interface AddNextDetail { sourceId: string; sourceHandle: string | null }
+
+/** Friendly inline checks for the Schedule trigger (the server re-checks everything and computes the next runs). */
+export function validateScheduleData(data: Record<string, unknown>): Record<string, string> {
+  const errs: Record<string, string> = {};
+  const cadence = str(data.cadence);
+  const day = Number(data.day);
+  if (!["monthly", "weekly", "once"].includes(cadence)) errs.cadence = "Choose how often it runs.";
+  if (cadence === "monthly" && data.last_day !== true && !(Number.isInteger(day) && day >= 1 && day <= 31)) errs.day = "Pick a day of the month from 1 to 31, or 'last day'.";
+  if (cadence === "weekly" && !(Number.isInteger(day) && day >= 0 && day <= 6)) errs.day = "Pick a weekday.";
+  if (cadence === "once" && !/^\d{4}-\d{2}-\d{2}$/.test(str(data.date))) errs.date = "Pick the date it should run on.";
+  if (str(data.time) && !/^([01]\d|2[0-3]):[0-5]\d$/.test(str(data.time))) errs.time = "Use a 24-hour time like 09:00.";
+  return errs;
+}
+
+// ------------------------------------------------------------------ connection rules (flow is LEFT -> RIGHT)
+export interface HandleSpec { id: string; label: string }
+/** Inputs sit on the LEFT edge, outputs on the RIGHT edge. Triggers have no input; conditions have Yes (true) / No (false) outputs. */
+export function handlesFor(kind: WorkflowNodeKind): { input: boolean; outputs: HandleSpec[] } {
+  if (kind === "condition") return { input: true, outputs: [{ id: "true", label: "Yes" }, { id: "false", label: "No" }] };
+  return { input: kind !== "trigger", outputs: [{ id: "out", label: "" }] };
+}
+
+/** Same sentences as the server validator, so the toast and a rejected save/import agree. */
+export function connectionProblem(sourceType: string, targetType: string, sourceHandle?: string | null): string | null {
+  const s = nodeDef(sourceType).kind;
+  const t = nodeDef(targetType).kind;
+  if (t === "trigger") {
+    if (s === "trigger") return "A trigger can't connect to another trigger. A workflow starts from exactly one trigger: connect the trigger to an action or condition instead, or put the second trigger in its own workflow.";
+    return "Nothing can connect into a trigger: it is where the workflow starts. Connect this step to a node to the right of it instead.";
+  }
+  if (s === "condition" && sourceHandle && sourceHandle !== "true" && sourceHandle !== "false") return "A condition's outputs are Yes (true) and No (false).";
+  return null;
+}
+
+export function wouldCreateCycle(edges: { source: string; target: string }[], source: string, target: string): boolean {
+  // Adding source -> target loops iff target already reaches source.
+  const next: Record<string, string[]> = {};
+  for (const e of edges) (next[e.source] ??= []).push(e.target);
+  const stack = [target];
+  const seen = new Set<string>();
+  while (stack.length) {
+    const cur = stack.pop() as string;
+    if (cur === source) return true;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    stack.push(...(next[cur] ?? []));
+  }
+  return false;
+}

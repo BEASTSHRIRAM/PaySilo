@@ -10,7 +10,7 @@ import type { ReactNode } from "react";
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   // Split on **bold**, *italic*, `code` and [label](https://…) tokens.
-  const pattern = /(\*\*[^*]+\*\*|\*[^*\n]+\*|`[^`\n]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  const pattern = /(\*\*[^*]+\*\*|\*[^*\n]+\*|`[^`\n]+`|\[[^\]]+\]\((?:https?:\/\/|\/dashboard\/)[^)\s]+\)|\/dashboard\/[A-Za-z0-9/_-]+)/g;
   const parts = text.split(pattern);
   parts.forEach((part, i) => {
     const key = `${keyPrefix}-${i}`;
@@ -25,11 +25,15 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
           {part.slice(1, -1)}
         </code>,
       );
+    } else if (part.startsWith("/dashboard/")) {
+      // A bare in-app path (e.g. a drafted workflow's canvas): same-tab link.
+      nodes.push(<a key={key} href={part} className="font-bold text-coral-300 underline underline-offset-2">{part}</a>);
     } else if (part.startsWith("[")) {
-      const match = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(part);
+      const match = /^\[([^\]]+)\]\(((?:https?:\/\/|\/dashboard\/)[^)\s]+)\)$/.exec(part);
       if (match) {
+        const internal = match[2].startsWith("/");
         nodes.push(
-          <a key={key} href={match[2]} target="_blank" rel="noreferrer" className="font-bold text-coral-300 underline underline-offset-2">
+          <a key={key} href={match[2]} {...(internal ? {} : { target: "_blank", rel: "noreferrer" })} className="font-bold text-coral-300 underline underline-offset-2">
             {match[1]}
           </a>,
         );

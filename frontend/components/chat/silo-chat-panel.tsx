@@ -256,6 +256,9 @@ async function withPendingRuns(history: ChatMessage[]): Promise<ChatMessage[]> {
 }
 
 // ------------------------------------------------------------------ panel
+/** Dispatch on window with detail {message} to open the Silo chat with the input pre-filled. */
+export const CHAT_OPEN_EVENT = "paysilo:chat-open";
+
 export function SiloChatPanel({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const pathname = usePathname() ?? "/dashboard";
   const router = useRouter();
@@ -366,6 +369,20 @@ export function SiloChatPanel({ open, onOpenChange }: { open: boolean; onOpenCha
     const el = scrollRef.current;
     if (el && stickRef.current) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, open]);
+
+  // Other screens (e.g. "Build with Silo") can open the chat with a pre-filled message: the person still presses Send.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const message = (e as CustomEvent<{ message?: string }>).detail?.message;
+      onOpenChange(true);
+      if (message) {
+        setInput(message);
+        setTimeout(() => inputRef.current?.focus(), 80);
+      }
+    };
+    window.addEventListener(CHAT_OPEN_EVENT, handler);
+    return () => window.removeEventListener(CHAT_OPEN_EVENT, handler);
+  }, [onOpenChange]);
 
   // Focus moves into the panel on open and back to the trigger on close.
   useEffect(() => {

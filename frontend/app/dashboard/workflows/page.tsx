@@ -4,9 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ChevronDown, Clock, Pencil, Play, Plus, RefreshCw, Trash2, Workflow as WorkflowIcon,
+  ChevronDown, Clock, MessageCircle, Pencil, Play, Plus, RefreshCw, Trash2, Workflow as WorkflowIcon,
 } from "lucide-react";
 
+import { CHAT_OPEN_EVENT } from "@/components/chat/silo-chat-panel";
 import { PageNotice, SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { FebShell, PickerField } from "@/components/feb/shell";
 import { errMsg, useSession } from "@/components/feb/use-session";
@@ -151,11 +152,12 @@ export default function WorkflowsPage() {
             {
               id: "trigger_1",
               type: "trigger.employer_added",
-              position: { x: 240, y: 60 },
+              position: { x: 40, y: 60 },
               data: {},
             },
           ],
           edges: [],
+          layout: "lr",
         },
       });
       router.push(`/dashboard/workflows/${created.id}`);
@@ -208,6 +210,10 @@ export default function WorkflowsPage() {
           <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={refreshing}>
             <RefreshCw className={refreshing ? "animate-spin" : undefined} /> Refresh
           </Button>
+          <Button variant="sage" size="sm" onClick={() => window.dispatchEvent(new CustomEvent(CHAT_OPEN_EVENT, { detail: { message: "Create a workflow: monthly payroll for <employer> on day 3" } }))}
+            title="Describe the automation in chat. Silo drafts it disabled; you review and enable it.">
+            <MessageCircle /> Build with Silo
+          </Button>
           <Button size="sm" onClick={() => void createWorkflow()} disabled={creating}>
             <Plus /> {creating ? "Creating…" : "New workflow"}
           </Button>
@@ -248,7 +254,10 @@ export default function WorkflowsPage() {
                       Trigger: {humanizeTrigger(wf.trigger_type)} · Updated {fmtDate(wf.updated_at)}
                     </p>
                   </div>
-                  <Badge tone={wf.enabled ? "sage" : "neutral"}>{wf.enabled ? "Enabled" : "Disabled"}</Badge>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {wf.drafted_by_agent && <Badge tone="warning" title="Silo drafted this and left it disabled. Review every step before enabling.">Drafted by Silo: review</Badge>}
+                    <Badge tone={wf.enabled ? "sage" : "neutral"}>{wf.enabled ? "Enabled" : "Disabled"}</Badge>
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <label className="flex items-center gap-2.5 text-sm font-bold text-sand-100">

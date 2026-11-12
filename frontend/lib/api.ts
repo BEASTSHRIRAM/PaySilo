@@ -921,6 +921,8 @@ export interface WorkflowSummary {
   enabled: boolean;
   trigger_type: string;
   updated_at: string;
+  /** True when the Silo agent drafted it (always saved disabled until a person enables it). */
+  drafted_by_agent?: boolean;
 }
 
 export interface WorkflowGraphNode {
@@ -940,6 +942,54 @@ export interface WorkflowGraphEdge {
 export interface WorkflowGraph {
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
+  /** "lr" = positions are laid out left to right (older saved graphs are tidied on load). */
+  layout?: string;
+}
+
+/** One precise validation problem from the server: where (node / edge / field) and what to do. */
+export interface GraphIssue {
+  node_id: string | null;
+  edge_id: string | null;
+  field: string | null;
+  code: string;
+  message: string;
+}
+export interface GraphValidation {
+  valid: boolean;
+  errors: GraphIssue[];
+  trigger_type: string | null;
+  node_count: number;
+  /** The graph laid out left to right when it was valid. */
+  graph: WorkflowGraph | null;
+}
+export interface SchedulePreviewRow { utc: string; local: string; weekday: string; timezone: string; key: string }
+export interface SchedulePreview {
+  valid: boolean;
+  summary?: string;
+  next_runs: SchedulePreviewRow[];
+  timezone?: string;
+  note?: string;
+  field?: string;
+  message?: string;
+}
+export interface ScheduleOccurrence {
+  workflow_id: string;
+  workflow_name: string;
+  employer_id: string | null;
+  employer_name: string | null;
+  date: string;
+  time: string;
+  timezone: string;
+}
+export interface EmployerScheduleIn {
+  employer_id: string;
+  day?: number | null;
+  last_day?: boolean;
+  time: string;
+  timezone: string;
+  weekend_rule: string;
+  /** Only true after the wizard's explicit confirm. */
+  enabled: boolean;
 }
 
 export interface WorkflowDetail extends WorkflowSummary {
@@ -970,6 +1020,8 @@ export interface WorkflowRun {
   entity_kind: string;
   entity_id: string;
   entity_label: string | null;
+  /** Engine context: gate_entity_kind / gate_entity_id name what a parked run is waiting on. */
+  context?: Record<string, unknown> | null;
   status: WorkflowRunStatus | string;
   error_detail: string | null;
   started_at: string;
@@ -1043,6 +1095,15 @@ export const apiWorkflows = {
     request<WorkflowRun[]>(`/workflows/runs${workflowRunsQuery(params)}`),
   run: (runId: string) => request<WorkflowRunDetail>(`/workflows/runs/${encodeURIComponent(runId)}`),
   brief: () => request<MorningBriefItem[]>("/workflows/brief"),
+  validate: (graph: unknown) => post<GraphValidation>("/workflows/validate", { graph }),
+  schedulePreview: (config: Record<string, unknown>, count = 3) =>
+    post<SchedulePreview>("/workflows/schedule-preview", { config, count }),
+  occurrences: (start: string, end: string) =>
+    request<ScheduleOccurrence[]>(`/workflows/schedule-occurrences?start=${start}&end=${end}`),
+  employerSchedules: (employerId?: string) =>
+    request<{ id: string; name: string; summary: string }[]>(
+      `/workflows/employer-schedules${employerId ? `?employer_id=${encodeURIComponent(employerId)}` : ""}`),
+  createEmployerSchedule: (body: EmployerScheduleIn) => post<WorkflowDetail>("/workflows/employer-schedules", body),
 };
 
 // ==================================================================

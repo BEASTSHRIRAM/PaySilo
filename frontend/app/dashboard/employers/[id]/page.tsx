@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ArrowRight, History, Link2, Loader2, Pencil, Play, Plus, ShieldCheck, UserX } from "lucide-react";
+import { ArrowLeft, ArrowRight, CalendarClock, History, Link2, Loader2, Pencil, Play, Plus, ShieldCheck, UserX } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
+import { PayrollScheduleDialog } from "@/components/workflows/payroll-schedule-dialog";
 import { PageError, PageNotice, SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -97,6 +98,7 @@ export default function EmployerPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [fundingLog, setFundingLog] = useState<FundingEvent[]>([]);
   const [fundAmount, setFundAmount] = useState("");
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [funding, setFunding] = useState(false);
   const [starting, setStarting] = useState(false);
   const canEdit = !!session && EDITOR_ROLES.includes(session.role);
@@ -301,6 +303,9 @@ export default function EmployerPage() {
                   <Button onClick={() => void startRun()} disabled={starting || employer.contractor_count === 0}>
                     {starting ? <Loader2 className="animate-spin" /> : <Play />} Run payroll
                   </Button>
+                  <Button variant="outline" onClick={() => setScheduleOpen(true)}>
+                    <CalendarClock /> Create payroll schedule
+                  </Button>
                   <form onSubmit={(e) => void fund(e)} className="flex flex-wrap gap-2">
                     <Input
                       type="number" min="0" step="0.01" inputMode="decimal" value={fundAmount}
@@ -315,6 +320,9 @@ export default function EmployerPage() {
                 </div>
               )}
             </section>
+
+            <PayrollScheduleDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)}
+              employers={[{ id: employer.id, name: employer.name }]} employerId={employer.id} />
 
             <ContractorsSection
               employer={employer} canEdit={canEdit} session={session}

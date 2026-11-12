@@ -1280,7 +1280,7 @@ def draft_workflow(ctx: ChatContext, description: str | None = None) -> ToolResu
     if not result.ok:
         return ToolResult(result.message, data={"drafted": False, "source": result.source})
     link = f"/dashboard/workflows/{result.workflow_id}"
-    return ToolResult(f"{result.message} Open it to review, edit and enable: {link} "
+    return ToolResult(f"{result.message} Review, edit and enable it here: [Open the workflow]({link}) "
                       "(I can't enable, run or approve workflows; that is your decision.)",
                       data={"drafted": True, "workflow_id": str(result.workflow_id), "link": link,
                             "enabled": False, "source": result.source, "attempts": result.attempts})
