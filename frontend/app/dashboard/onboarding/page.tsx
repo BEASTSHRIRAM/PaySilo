@@ -757,7 +757,7 @@ export default function OnboardingPage() {
                     </p>
                   )}
 
-                  <div className="overflow-x-auto rounded-2xl border-2 border-ink-700">
+                  <div className="relative overflow-x-auto rounded-2xl border-2 border-ink-700">
                     <table className="w-full min-w-[640px] text-left text-sm">
                       <thead>
                         <tr className="border-b-2 border-ink-700 text-sage-400">

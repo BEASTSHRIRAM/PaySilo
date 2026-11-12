@@ -90,7 +90,7 @@ export function VicStatusBanner({ status, subject }: { status: VicStatus; subjec
           <p className="text-sm text-sage-300">
             No live Visa VIC credential is configured. {subject} are simulated against the published
             Airwallex test card (US$200.00 per transaction) — no real card is charged.
-            Set <span className="font-mono font-bold text-sand-100">VIC_CREDENTIAL</span> from Airi to go live.
+            Set <span className="font-mono font-bold text-sand-100">VIC_MODE=live</span> (with the Airi CLI signed in) to go live.
           </p>
         </div>
         <Badge tone="warning" className="ml-auto h-fit shrink-0">Simulated</Badge>

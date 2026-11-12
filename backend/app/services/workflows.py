@@ -1061,7 +1061,7 @@ def _run_figures(payroll: PayrollRun) -> dict:
     return {"total_required": str(total) if total is not None else None,
             "balance": assessment.get("available_usd"),
             "shortfall": str(shortfall) if shortfall is not None else None,
-            "currency": payroll.payroll_currency or assessment.get("payroll_currency") or "USD",
+            "currency": "USD",  # every figure above is a USD amount (required_usd, shortfall_usd, available_usd)
             "status": payroll.status}
 
 

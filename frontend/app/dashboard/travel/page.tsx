@@ -825,7 +825,7 @@ export default function TravelPage() {
                     <p className="text-sm font-semibold text-sage-400">{trip.policy_summary}</p>
                   )}
 
-                  <div className="overflow-x-auto rounded-2xl border-2 border-ink-700">
+                  <div className="relative overflow-x-auto rounded-2xl border-2 border-ink-700">
                     <table className="w-full min-w-[720px] text-left text-sm">
                       <thead>
                         <tr className="border-b-2 border-ink-700 text-sage-400">
