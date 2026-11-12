@@ -121,13 +121,15 @@ def _normalise_line(line: dict) -> dict:
                 *RISK_FIELDS, "hold_reason"):
         if line.get(key):
             out[key] = str(line[key])
+    if line.get("priority") not in (None, ""):
+        out["priority"] = str(line["priority"])
     return out
 
 
 def _directory_entry(contractor: dict) -> dict:
     keep = ("name", "currency", "method", "iban", "swift_code", "account_number", "routing_code",
-            "country_code", "contractor_id", *RISK_FIELDS)
-    out = {k: str(contractor[k]) for k in keep if contractor.get(k)}
+            "country_code", "contractor_id", "priority", *RISK_FIELDS)
+    out = {k: str(contractor[k]) for k in keep if contractor.get(k) not in (None, "")}
     out["name"] = out["name"].strip()
     return out
 
@@ -139,7 +141,8 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
                   account_id: str | None = None,
                   directory: list[dict] | None = None,
                   parent_run_id: str | None = None,
-                  waive_run_fee: bool = False) -> PayrollRunState:
+                  waive_run_fee: bool = False,
+                  settlement_mode: str = "PARTIAL") -> PayrollRunState:
     return PayrollRunState(
         run_id=run_id,
         employer_key=employer_key,
@@ -168,6 +171,7 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
         continuation=parent_run_id is not None,
         parent_run_id=parent_run_id,
         run_fee_waived=bool(waive_run_fee),
+        settlement_mode=settlement_mode if settlement_mode in ("ALL_OR_NOTHING", "PARTIAL") else "PARTIAL",
     )
 
 
@@ -181,10 +185,18 @@ def _log(state: PayrollRunState, node: str, message: str, level: str = "info",
     return audit, events
 
 
+def _priority_of(line: dict) -> int:
+    try:
+        return int(line.get("priority", 100))
+    except (TypeError, ValueError):
+        return 100
+
+
 def _pay_lines(state: PayrollRunState) -> list[ContractorPayroll]:
     return [
         ContractorPayroll(name=l["name"], amount=to_decimal(l["amount"]),
-                          currency=l["currency"], method=l.get("method", "SWIFT"))
+                          currency=l["currency"], method=l.get("method", "SWIFT"),
+                          priority=_priority_of(l))
         for l in state["pay_lines"]
     ]
 
@@ -377,7 +389,14 @@ def build_graph(services: Services, checkpointer=None):
             state, "assess",
             f"SHORTFALL USD {a['shortfall_usd']} — the full payroll does not fit in this employer's own wallet. "
             "Only this employer's wallet was checked.", "warning")
-        # Kit 6: pay what its own balance supports (smallest lines first), escalate the rest.
+        if state.get("settlement_mode") == "ALL_OR_NOTHING":
+            # The employer chose not to part-pay: the whole (risk-cleared) batch or nothing.
+            _log(state, "assess",
+                 f"ALL OR NOTHING — this employer's settlement mode pays the whole batch or none of it. "
+                 f"Nothing is paid; add USD {a['shortfall_usd']} to its own wallet and the run can continue.",
+                 "warning", audit, events)
+            return {"route": "escalate", "status": "HELD_SHORTFALL", "audit": audit, "events": events}
+        # Kit 6: pay what its own balance supports (priority, then smallest first), escalate the rest.
         plan = None
         try:
             balances = awx.get_balances(account_id=state["account_id"])
@@ -405,7 +424,7 @@ def build_graph(services: Services, checkpointer=None):
             "held_count": len(held),
         })
         _log(state, "assess",
-             f"PARTIAL PAYOUT — paying the {len(paid)} smallest line(s) its own USD {partial['available_usd']} "
+             f"PARTIAL PAYOUT — paying {len(paid)} line(s) (priority, then smallest first) its own USD {partial['available_usd']} "
              f"supports (USD {partial['required_usd']} incl. run fee, reserve floor kept); "
              f"holding {len(held)} line(s) ({', '.join(l['name'] for l in held)}), short USD {full_shortfall}. "
              "Reserved pending a signed human approval.", "success", audit, events)
@@ -416,7 +435,7 @@ def build_graph(services: Services, checkpointer=None):
                         else f"the USD {partial['platform_fee_usd']} run fee covered")
         explanation = (
             f"{state['employer_name']} can pay {len(paid)} of {len(all_lines)} contractor(s) from its own wallet "
-            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with "
+            f"now ({', '.join(l['name'] for l in paid)}): by contractor priority, then smallest first, with "
             f"{run_fee_note} and the USD {partial['reserve_floor_usd']} reserve kept. "
             f"{', '.join(l['name'] for l in held)} {'is' if len(held) == 1 else 'are'} held — the full batch is "
             f"short USD {full_shortfall}. Held lines are escalated to a human and will not be covered from another "

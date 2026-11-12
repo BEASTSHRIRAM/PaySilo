@@ -66,5 +66,6 @@ class PayrollRunState(TypedDict, total=False):
     error: Optional[str]
     continuation: bool  # True for a "pay held lines" run that continues a parent run
     parent_run_id: Optional[str]
+    settlement_mode: str  # "ALL_OR_NOTHING" | "PARTIAL": what to do when the wallet cannot cover the whole batch
     run_fee_waived: bool  # the parent chain already collected the run fee: never priced or charged again
     balances: dict  # currency -> Decimal text, employer's own wallet at last check

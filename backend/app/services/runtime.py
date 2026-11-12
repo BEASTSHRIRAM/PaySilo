@@ -564,15 +564,20 @@ class PlatformRuntime:
         directory = [
             {"name": c.full_name, "currency": c.currency, "method": c.payout_method, "iban": c.iban,
              "swift_code": c.swift_code, "account_number": c.account_number, "routing_code": c.routing_code,
-             "country_code": c.country, "contractor_id": str(c.id), **facts[c.id]}
+             "country_code": c.country, "contractor_id": str(c.id), "priority": c.priority, **facts[c.id]}
             for c in active
         ]
         pay_lines = self._attach_risk_facts(pay_lines, {str(k): v for k, v in facts.items()})
+        prio = {str(c.id): c.priority for c in active}
+        if pay_lines:  # priority comes from the contractor row (server-side), never from the client
+            pay_lines = [{**l, "priority": prio[str(l["contractor_id"])]} if str(l.get("contractor_id")) in prio
+                         else l for l in pay_lines]
         state = initial_state(
             run_id=str(run.id), employer_key=employer.ledger_key, employer_name=employer.name,
             contact_name=employer.contact_name or "", funding_usd="0", pay_lines=pay_lines or [],
             raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory,
-            parent_run_id=str(parent_run_id) if parent_run_id else None, waive_run_fee=waive_run_fee)
+            parent_run_id=str(parent_run_id) if parent_run_id else None, waive_run_fee=waive_run_fee,
+            settlement_mode=employer.settlement_mode)
         with self.lock:
             config = {"configurable": {"thread_id": str(run.id)}}
             self._live_threads.add(str(run.id))
@@ -647,6 +652,7 @@ class PlatformRuntime:
         """
         result: dict = {}
         failure: BaseException | None = None
+        prev_status = run.status
         try:
             result = call() or {}
         except Exception as exc:  # noqa: BLE001 - persisted, then re-raised below
@@ -662,8 +668,24 @@ class PlatformRuntime:
         finally:
             s.commit()
         self._announce_outcome(s, run)
+        self._dispatch_workflow_status(s, run, prev_status)
         if failure is not None:
             raise failure
+
+    def _dispatch_workflow_status(self, s: Session, run: PayrollRun, prev_status: str) -> None:
+        """Fire the payroll_held / payroll_settled workflow triggers on a persisted status change. Never raises:
+        a workflow problem must not affect a payroll run."""
+        if run.status == prev_status or run.status not in ("HELD_SHORTFALL", "HELD_BY_HUMAN", "PARTIALLY_PAID",
+                                                           "SETTLED"):
+            return
+        try:
+            from .workflows import dispatch_payroll_status  # lazy: workflows import this module's consumers
+
+            dispatch_payroll_status(s, run, runtime=self)
+            s.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("Workflow dispatch for run %s failed (ignored)", run.id)
+            s.rollback()
 
     def _reject_if_open_run(self, s: Session, employer: Employer) -> None:
         """One open run per employer: a run awaiting a decision holds its reserve."""

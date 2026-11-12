@@ -36,7 +36,7 @@ def contractor_out(c: Contractor) -> ContractorOut:
         id=c.id, full_name=c.full_name, email=c.email, country=c.country, currency=c.currency,
         payout_method=c.payout_method, iban_last4=_last4(c.iban), account_last4=_last4(c.account_number),
         swift_code=c.swift_code, default_amount=money_str(c.default_amount) if c.default_amount else None,
-        is_active=c.is_active,
+        priority=c.priority, is_active=c.is_active,
         tax_status=c.tax_status, tax_form_type=c.tax_form_type,
         tax_form_status=effective_tax_form_status(c),
         tax_form_received_at=c.tax_form_received_at, tax_form_expires_at=c.tax_form_expires_at,
@@ -49,7 +49,7 @@ def contractor_out(c: Contractor) -> ContractorOut:
 def employer_out(s: Session, runtime: PlatformRuntime, e: Employer) -> EmployerOut:
     return EmployerOut(
         id=e.id, name=e.name, legal_name=e.legal_name, country=e.country, contact_name=e.contact_name,
-        contact_email=e.contact_email, funding_currency=e.funding_currency, status=e.status,
+        contact_email=e.contact_email, funding_currency=e.funding_currency, settlement_mode=e.settlement_mode, status=e.status,
         airwallex_account_id=e.airwallex_account_id, balances=runtime.balances(s, e),
         contractor_count=sum(1 for c in e.contractors if c.is_active), created_at=e.created_at,
     )
@@ -142,3 +142,84 @@ def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDe
                            payload_hash=receipt.payload_hash, tx_hash=receipt.tx_hash,
                            explorer_url=_explorer_url(runtime, receipt.tx_hash)) if receipt else None,
     )
+
+
+# ---------------------------------------------------------------- workflows
+from ..db.models import (  # noqa: E402
+    OnboardingKit,
+    TripRequest,
+    Workflow,
+    WorkflowRun,
+    WorkflowRunStep,
+    WorkflowTask,
+)
+from .schemas import WorkflowOut, WorkflowRunOut, WorkflowRunStepOut, WorkflowTaskOut  # noqa: E402
+
+
+def workflow_out(w: Workflow) -> WorkflowOut:
+    return WorkflowOut(
+        id=w.id, organization_id=w.organization_id, name=w.name, description=w.description,
+        enabled=w.enabled, trigger_type=w.trigger_type, graph=w.graph,
+        created_by_id=w.created_by_id, created_at=w.created_at, updated_at=w.updated_at)
+
+
+def workflow_step_out(st: WorkflowRunStep) -> WorkflowRunStepOut:
+    return WorkflowRunStepOut(
+        id=st.id, run_id=st.run_id, node_id=st.node_id, node_type=st.node_type, status=st.status,
+        detail=st.detail, output=st.output if isinstance(st.output, dict) else None,
+        created_at=st.created_at, started_at=st.started_at or st.created_at,
+        finished_at=st.finished_at)
+
+
+def _entity_label(s: Session | None, r: WorkflowRun) -> str | None:
+    """Human label for a run's trigger entity. Only rows of the run's own organization are ever read."""
+    import uuid as _uuid
+
+    facts = ((r.context or {}).get("facts") or {}) if isinstance(r.context, dict) else {}
+    if s is not None:
+        try:
+            eid = _uuid.UUID(str(r.entity_id))
+        except (ValueError, TypeError):
+            eid = None
+        kind = (r.entity_kind or "").lower()
+        model = {"employer": Employer, "contractor": Contractor, "payroll_run": PayrollRun, "run": PayrollRun,
+                 "benefit_request": BenefitRequest, "benefit": BenefitRequest, "kit": OnboardingKit,
+                 "onboarding_kit": OnboardingKit, "trip": TripRequest, "trip_request": TripRequest}.get(kind)
+        obj = s.get(model, eid) if model is not None and eid is not None else None
+        if obj is not None and getattr(obj, "organization_id", None) == r.organization_id:
+            if isinstance(obj, Employer):
+                return obj.name
+            if isinstance(obj, Contractor):
+                return obj.full_name
+            if isinstance(obj, PayrollRun):
+                emp = s.get(Employer, obj.employer_id)
+                return f"Payroll run: {emp.name if emp else obj.employer_id} ({obj.status})"
+            if isinstance(obj, BenefitRequest):
+                return f"{obj.item}: {obj.contractor_name}"
+            if isinstance(obj, OnboardingKit):
+                return f"Onboarding kit: {obj.contractor_name}"
+            if isinstance(obj, TripRequest):
+                return f"Trip to {obj.destination}: {obj.contractor_name}"
+    for key in ("employer_name", "contractor_name"):
+        if facts.get(key):
+            return str(facts[key])
+    return f"{r.entity_kind} {r.entity_id}"
+
+
+def workflow_run_out(r: WorkflowRun, s: Session | None = None, *, include_steps: bool = False) -> WorkflowRunOut:
+    return WorkflowRunOut(
+        id=r.id, workflow_id=r.workflow_id, organization_id=r.organization_id,
+        trigger_event=r.trigger_event, entity_kind=r.entity_kind, entity_id=r.entity_id,
+        entity_label=_entity_label(s, r),
+        dedupe_key=r.dedupe_key, status=r.status,
+        context=r.context if isinstance(r.context, dict) else None,
+        error_detail=r.error_detail, started_at=r.started_at, finished_at=r.finished_at,
+        created_at=r.created_at,
+        steps=[workflow_step_out(st) for st in r.steps] if include_steps else [])
+
+
+def workflow_task_out(t: WorkflowTask) -> WorkflowTaskOut:
+    return WorkflowTaskOut(
+        id=t.id, organization_id=t.organization_id, kind=t.kind, title=t.title, detail=t.detail,
+        employer_id=t.employer_id, entity_kind=t.entity_kind, entity_id=t.entity_id,
+        status=t.status, created_by_run_id=t.created_by_run_id, created_at=t.created_at)

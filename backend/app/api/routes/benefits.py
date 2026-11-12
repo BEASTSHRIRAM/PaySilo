@@ -21,7 +21,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,7 @@ from ..schemas import (
     VicStatusOut,
 )
 from ..serializers import benefit_budget_out, benefit_purchase_out, benefit_request_out
+from . import spend_hooks as hooks
 from .employers import load_employer
 
 router = APIRouter(prefix="/benefits", tags=["benefits"])
@@ -134,7 +135,7 @@ def list_requests(employer_id: uuid.UUID | None = None, status_filter: str | Non
 
 
 @router.post("/requests", response_model=BenefitRequestOut, status_code=status.HTTP_201_CREATED)
-def create_benefit_request(body: BenefitRequestIn,
+def create_benefit_request(request: Request, body: BenefitRequestIn,
                            tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
                            db: Session = Depends(get_db)) -> BenefitRequestOut:
     employer = load_employer(db, tenant, body.employer_id)
@@ -160,6 +161,10 @@ def create_benefit_request(body: BenefitRequestIn,
         raise HTTPException(422, detail={"code": exc.code, "message": exc.detail}) from None
     db.commit()
     db.refresh(req)
+    hooks.dispatch(request, db, tenant, "benefit.requested", "benefit_request", req.id,
+                   {"employer_id": str(req.employer_id), "employer_name": employer.name,
+                    "contractor_name": req.contractor_name, "merchant": req.merchant, "item": req.item,
+                    "amount": str(req.amount), "currency": req.currency, "status": req.status})
     return _request_out(db, req)
 
 

@@ -114,6 +114,7 @@ class ContractorPatchIn(BaseModel):
     account_number: str | None = None
     routing_code: str | None = None
     default_amount: str | None = None
+    priority: int | None = Field(default=None, ge=0, le=9999)
     tax_status: TaxStatus | None = None
     tax_form_type: TaxFormType | None = None
     tax_form_status: TaxFormStatus | None = None
@@ -174,6 +175,9 @@ def patch_contractor(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: Con
         notes.append(f"Default amount {money_str(c.default_amount) if c.default_amount else 'none'} → "
                      f"{money_str(new_amount) if new_amount else 'none'}")
         c.default_amount = new_amount
+    if body.priority is not None and body.priority != c.priority:
+        notes.append(f"Payment priority {c.priority} → {body.priority}")
+        c.priority = body.priority
     for key in BANK_FIELDS:
         setattr(c, key, getattr(valid, key))
     new_bank = bank_snapshot(c)

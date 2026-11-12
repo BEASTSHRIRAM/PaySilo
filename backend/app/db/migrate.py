@@ -136,6 +136,16 @@ def widen_notification_kind_check(conn: Connection) -> None:
     conn.execute(text(f'ALTER TABLE "notifications" ADD CONSTRAINT ck_notification_kind CHECK (kind IN ({allowed}))'))
 
 
+def ensure_settlement_mode_check(conn: Connection) -> None:
+    """Postgres: add_missing_columns adds the column but not its CHECK; (re)create ``ck_employer_settlement_mode``."""
+    from .models import SETTLEMENT_MODES
+
+    allowed = ", ".join("'" + m + "'" for m in SETTLEMENT_MODES)
+    conn.execute(text('ALTER TABLE "employers" DROP CONSTRAINT IF EXISTS ck_employer_settlement_mode'))
+    conn.execute(text('ALTER TABLE "employers" ADD CONSTRAINT ck_employer_settlement_mode '
+                      f"CHECK (settlement_mode IN ({allowed}))"))
+
+
 def migrate(engine: Engine) -> list[str]:
     added = add_missing_columns(engine)
     if engine.dialect.name == "postgresql":
@@ -144,4 +154,5 @@ def migrate(engine: Engine) -> list[str]:
             widen_benefit_purchase_check(conn)
             if inspect(conn).has_table("notifications"):
                 widen_notification_kind_check(conn)
+            ensure_settlement_mode_check(conn)
     return added

@@ -75,6 +75,8 @@ class ContractorPayroll:
     amount: Decimal
     currency: str
     method: str = "SWIFT"
+    # PARTIAL settlement order: lower pays first (ties: smallest line first). Never affects pricing.
+    priority: int = 100
 
 
 @dataclass(frozen=True)
@@ -220,9 +222,11 @@ def plan_partial_payout(
 ) -> PartialPayoutPlan | None:
     """Kit 6 shortfall rule: pay what the employer's own balance supports.
 
-    Smallest lines first, by USD-equivalent (amount + that line's payout
-    fee). Lines are added greedily while ``payroll_usd + run fee + reserve
-    floor <= available``; the rest are held. Returns ``None`` when the whole
+    Lines are walked in contractor ``priority`` order (lower first), ties
+    smallest first by USD-equivalent (amount + that line's payout fee).
+    A line is paid when ``payroll_usd + run fee + reserve floor <=
+    available`` still holds with it; an unaffordable line is held and the
+    walk goes on (a smaller, lower-priority line can still fit). Returns ``None`` when the whole
     batch is affordable (nothing to split) or when not even the smallest
     line fits (hold everything). Only ``employer_balance`` is consulted.
     """
@@ -234,14 +238,14 @@ def plan_partial_payout(
         ccy = c.currency.upper()
         line_total = to_decimal(c.amount) + policy.payout_fee(ccy, c.method)
         cost[i] = line_total * _rate(usd_value, ccy, "for payroll")
-    order = sorted(range(len(contractors)), key=lambda i: (cost[i], i))
+    order = sorted(range(len(contractors)), key=lambda i: (contractors[i].priority, cost[i], i))
     run_fee = ZERO if waive_run_fee else policy.platform_fee_per_run_usd
     budget = full.available_usd - run_fee - policy.reserve_floor_usd
     chosen: list[int] = []
     spent = Decimal("0")
     for i in order:
         if spent + cost[i] > budget:
-            break
+            continue
         chosen.append(i)
         spent += cost[i]
     # Per-currency rounding can differ by a cent from the sum of line costs:

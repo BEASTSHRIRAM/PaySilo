@@ -133,6 +133,16 @@ def sweep_all(db_factory, runtime, settings: Settings, today: date | None = None
                               if r["action"] == "queued")
         except Exception:  # noqa: BLE001
             logger.exception("Funding sweep failed for organization %s", org_id)
+        try:  # scheduled workflows (once per period per entity: their dedupe key makes a repeat a no-op)
+            from datetime import UTC, datetime
+
+            from .workflows import run_due_schedules
+
+            with db_factory() as s:
+                run_due_schedules(s, now=datetime.now(UTC), runtime=runtime, organization_id=org_id)
+                s.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("Scheduled workflows failed for organization %s", org_id)
     return queued
 
 
