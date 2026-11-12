@@ -6,7 +6,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   BookOpen, CalendarDays, ClipboardCheck, FileUp, Gift, Landmark, LayoutDashboard,
-  LogOut, Mail, Play, Scale, ShieldCheck, TriangleAlert, X, Users,
+  LogOut, Mail, PackageCheck, Plane, Play, Scale, ShieldCheck, Sunrise, TriangleAlert,
+  Workflow, X, Users,
 } from "lucide-react";
 
 import { api, type Session } from "@/lib/api";
@@ -41,6 +42,15 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
     ],
   },
   {
+    label: "Spend & automation",
+    links: [
+      { href: "/dashboard/onboarding", label: "Onboarding kits", icon: PackageCheck },
+      { href: "/dashboard/travel", label: "Travel", icon: Plane },
+      { href: "/dashboard/workflows", label: "Workflows", icon: Workflow },
+      { href: "/dashboard/workflows/brief", label: "Morning brief", icon: Sunrise },
+    ],
+  },
+  {
     label: "Trust & audit",
     links: [
       { href: "/dashboard/journals", label: "Journals", icon: BookOpen },
@@ -53,6 +63,8 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
 
 export function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
+  // Morning brief lives under /dashboard/workflows but is its own entry: Workflows must not light up on it.
+  if (href === "/dashboard/workflows") return pathname === href || (pathname.startsWith(`${href}/`) && !pathname.startsWith("/dashboard/workflows/brief"));
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
