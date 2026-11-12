@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
-  Anchor, ArrowUpRight, Check, CircleDot, ClipboardCheck, Copy, Landmark, Loader2,
+  Anchor, ArrowUpRight, Check, CircleDot, ClipboardCheck, Copy, Download, FileText, Landmark, Loader2,
   RefreshCw, ShieldCheck, X,
 } from "lucide-react";
 
 import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { LifecycleStepper, lifecycleFor } from "@/components/feb/stepper";
+import { PaymentTracePanel } from "@/components/feb/payment-trace";
 import { FebShell, PickerField } from "@/components/feb/shell";
 import { errMsg, useSession } from "@/components/feb/use-session";
 import { pickBool, pickStr, rec } from "@/components/feb/accessors";
@@ -17,7 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { NativeSelect } from "@/components/ui/select";
 import {
-  api, apiV3, ApiError,
+  api, apiV3, ApiError, proofDownloads,
   type EvidenceBundle, type RunDetail, type RunSummary,
 } from "@/lib/api";
 import { Stagger, TimelineReveal } from "@/lib/gsap-anim";
@@ -262,6 +263,9 @@ export default function ExecutionPage() {
                 <Button variant="ghost" size="sm" asChild>
                   <Link href={`/dashboard/runs/${runSummary.id}`}>Open run <ArrowUpRight /></Link>
                 </Button>
+                <Button variant="sand" size="sm" asChild>
+                  <a href={proofDownloads.statement(runSummary.id)} download><FileText /> Download statement (PDF)</a>
+                </Button>
               </div>
             )}
           </Card>
@@ -339,8 +343,15 @@ export default function ExecutionPage() {
                         <Button variant="outline" size="sm" onClick={() => void copyReceiptLink(line.id)}>
                           <Copy /> Copy receipt link
                         </Button>
+                        <Button variant={line.status === "PAID" ? "success" : "sand"} size="sm" asChild>
+                          <a href={proofDownloads.line(detail.id, line.id)} download>
+                            {line.status === "PAID" ? <Download /> : <FileText />}
+                            {line.status === "PAID" ? "Download proof" : "Download status notice"}
+                          </a>
+                        </Button>
                         {linkNote && <span role="status" className="text-xs font-semibold text-sage-400">{linkNote}</span>}
                       </div>
+                      <PaymentTracePanel key={line.id} runId={detail.id} lineId={line.id} />
                       <div className="mt-5">
                         <LifecycleStepper {...lifecycleFor(line.status, detail.status)} />
                       </div>

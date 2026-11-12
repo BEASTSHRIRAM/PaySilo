@@ -688,4 +688,37 @@ export const apiFunding = {
     return request<NotificationList>(`/notifications${qs ? `?${qs}` : ""}`);
   },
   statementCsvUrl: (employerId: string) => `/api/employers/${encodeURIComponent(employerId)}/funding-statement?format=csv`,
+
+// ====================================================================== proof of payment
+export interface PaymentTrace {
+  line_id: string; contractor: string; amount: string; currency: string; method: string;
+  transfer_id: string | null;
+  state: "SCHEDULED" | "SENT" | "PAID" | "FAILED" | "HELD" | "RETURNED";
+  paid: boolean; headline: string; diagnosis: string; next_step: string;
+  expected_window: string; failure_code: string | null;
+}
+interface VerifyLine {
+  contractor: string; amount: string; currency: string; method: string; status: string;
+  bank_masked: string | null; transfer_id: string | null; paid_at: string | null;
+}
+export interface VerifyResult {
+  valid: boolean;
+  reason?: string;
+  kind?: "line" | "statement";
+  facts?: {
+    document: "proof" | "notice" | "statement"; agency: string; employer: string; run_id: string;
+    period: string | null; pay_date: string | null; tap_verified: boolean; receipt_hash: string | null;
+    state?: string; line?: VerifyLine; lines?: VerifyLine[];
+  };
+}
+export const apiProof = {
+  trace: (runId: string, lineId: string) =>
+    request<PaymentTrace>(`/runs/${encodeURIComponent(runId)}/lines/${encodeURIComponent(lineId)}/trace`),
+  verify: (token: string) => request<VerifyResult>(`/verify/${encodeURIComponent(token)}`),
+};
+/** Direct-download URLs (PDF attachments; the session cookie is first-party). */
+export const proofDownloads = {
+  line: (runId: string, lineId: string) => `/api/runs/${encodeURIComponent(runId)}/lines/${encodeURIComponent(lineId)}/proof.pdf`,
+  statement: (runId: string) => `/api/runs/${encodeURIComponent(runId)}/statement.pdf`,
+  receipt: (lineId: string, token: string) => `/api/receipts/${encodeURIComponent(lineId)}/proof.pdf?token=${encodeURIComponent(token)}`,
 };
