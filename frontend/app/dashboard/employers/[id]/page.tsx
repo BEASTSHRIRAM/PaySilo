@@ -291,8 +291,8 @@ export default function EmployerPage() {
               )}
             </section>
 
-            <section className="grid gap-6 lg:grid-cols-2 lg:items-start">
-              <div>
+            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
+              <div className="min-w-0">
                 <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Ledger position</h2>
                 <Card className="p-5">
                   <p className="text-sm text-sage-300">
@@ -301,11 +301,11 @@ export default function EmployerPage() {
                   {balances.length === 0 ? (
                     <p className="mt-3 text-sm font-semibold text-sage-500">No ledger entries yet for this silo.</p>
                   ) : (
-                    <ul className="mt-3 grid gap-2">
+                    <ul className="mt-3 grid grid-cols-1 gap-2">
                       {balances.map(([currency, amount]) => (
                         <li key={currency} className="flex items-baseline justify-between gap-3 rounded-2xl bg-ink-950/40 px-4 py-3">
-                          <span className="truncate text-sm font-bold text-sage-300">{employer.name} · cash · {currency}</span>
-                          <span className="font-display font-semibold tabular-nums text-sand-100">{formatMoney(amount, currency)}</span>
+                          <span className="min-w-0 truncate text-sm font-bold text-sage-300">{employer.name} · cash · {currency}</span>
+                          <span className="shrink-0 font-display font-semibold tabular-nums text-sand-100">{formatMoney(amount, currency)}</span>
                         </li>
                       ))}
                     </ul>
@@ -326,7 +326,7 @@ export default function EmployerPage() {
                   />
                 ) : (
                   <Card className="p-5">
-                    <ul className="grid gap-2">
+                    <ul className="grid grid-cols-1 gap-2">
                       {fundingLog.map((f, i) => (
                         <li key={i} className="flex items-baseline justify-between gap-3 rounded-2xl bg-ink-950/40 px-4 py-3">
                           <span className="text-sm font-bold text-sage-300">Deposit · {f.at.toLocaleTimeString()}</span>

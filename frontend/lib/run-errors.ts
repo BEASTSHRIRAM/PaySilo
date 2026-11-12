@@ -11,6 +11,18 @@ export interface RunErrorInfo {
 
 const AIRWALLEX_CODE = /code=([a-z_]+)/i;
 
+/** Plain-language text for the risk gate's hold reasons (codes are decided by the backend, never by a model). */
+export const HOLD_REASON_TEXT: Record<string, { label: string; message: string }> = {
+  BANK_UNVERIFIED: {
+    label: "Bank details not verified",
+    message: "Bank details changed/not verified yet — a second person must verify them.",
+  },
+  RECENT_BANK_CHANGE_LARGE_PAYMENT: {
+    label: "New bank details, large payment",
+    message: "Bank details changed in the last 7 days and this payment is unusually large — a second person must verify them by a callback first.",
+  },
+};
+
 export function explainRunError(raw: string | null | undefined): RunErrorInfo | null {
   if (!raw) return null;
   const technical = raw.trim();
@@ -45,6 +57,14 @@ export function explainRunError(raw: string | null | undefined): RunErrorInfo | 
       title: "Bank details missing",
       message: `PaySilo can't pay ${m[1]} because there are no bank details on file. No money moved.`,
       hint: "Add an IBAN or account number (and SWIFT/BIC for SWIFT) on the employer's contractor list, then run again.",
+      technical,
+    };
+  }
+  if (/held by the risk gate|bank details changed|second person/i.test(technical)) {
+    return {
+      title: "Held until bank details are verified",
+      message: "PaySilo did not pay any line that has unverified or recently changed bank details. No money moved.",
+      hint: "Ask a second person (owner, admin or approver) to call the contractor on a number you already know and verify the details on the employer page, then start the payroll again or pay the held lines.",
       technical,
     };
   }

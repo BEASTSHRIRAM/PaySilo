@@ -97,11 +97,15 @@ export interface RunSummary {
 export interface PendingDecision {
   kind: "approval" | "escalation"; message: string;
   partial?: boolean; continuation?: boolean; parent_run_id?: string | null; run_fee_waived?: boolean;
+  /** Lines this payout deliberately does not pay (shortfall or risk gate). */
+  held_lines?: { name: string; amount: string; currency: string; method: string; hold_reason?: string }[];
 }
 export interface RunDetail extends RunSummary {
   assessment: Assessment | null;
   pay_lines: { id: string; position: number; beneficiary_name: string; amount: string; currency: string; method: string;
-    payout_fee: string | null; status: string; airwallex_transfer_id: string | null }[];
+    payout_fee: string | null; status: string; airwallex_transfer_id: string | null;
+    /** Risk gate code when the line was held: BANK_UNVERIFIED | RECENT_BANK_CHANGE_LARGE_PAYMENT. */
+    hold_reason?: string | null; hold_message?: string | null }[];
   events: { seq: number; agent: string; level: string; message: string; created_at: string }[];
   approvals: { kind: string; decision: string; decided_by_email: string; verified: boolean; tap_key_id: string | null;
     tap_signature: string | null; created_at: string }[];
@@ -661,9 +665,11 @@ export interface SweepResult {
 }
 export interface SweepResponse { queued: number; skipped: number; results: SweepResult[] }
 export type NotificationKind = "FUNDING_REMINDER" | "FUNDING_STATEMENT" | "FUNDING_OVERDUE" | "FUNDS_RECEIVED" | "APPROVAL_REQUESTED"
-  | "HELD_LINES_REMINDER" | "RUN_SETTLED" | "PAYMENT_FAILED" | "INVITE" | "PAYMENT_NOTICE" | "GENERIC";
+  | "HELD_LINES_REMINDER" | "RUN_SETTLED" | "PAYMENT_FAILED" | "INVITE" | "PAYMENT_NOTICE" | "ONBOARDING_LINK" | "BANK_CHANGE_CALLBACK" | "GENERIC";
 export interface AppNotification {
   id: string; kind: NotificationKind; channel: string; recipient: string; subject: string; body: string;
+  /** Private-link mail: the body is a redaction placeholder; the real text is only in the recipient's email. */
+  sensitive?: boolean;
   status: "QUEUED" | "SENT" | "FAILED"; provider: string | null; attempts: number; last_attempt_at: string | null; error: string | null;
   employer_id: string | null; employer_name: string | null; created_at: string; sent_at: string | null;
 }

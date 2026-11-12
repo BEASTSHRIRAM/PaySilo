@@ -3,18 +3,18 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, CornerDownRight, Loader2, PauseCircle, RotateCw, Wallet } from "lucide-react";
+import { Check, CornerDownRight, Loader2, PauseCircle, RotateCw, ShieldAlert, Wallet } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type RunDetail } from "@/lib/api";
 import { notifyDataChanged } from "@/lib/events";
-import { explainRunError } from "@/lib/run-errors";
+import { explainRunError, HOLD_REASON_TEXT } from "@/lib/run-errors";
 import { runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const AGENT_NAMES: Record<string, string> = {
-  intake: "Intake", price: "Pricing", assess: "Balance & Policy", approval: "Approval Gate", escalate: "Escalation",
+  intake: "Intake", risk: "Risk Gate", price: "Pricing", assess: "Balance & Policy", approval: "Approval Gate", escalate: "Escalation",
   execute: "FX & Payout", fee: "Fee", reconcile: "Reconciliation", attest: "Attestation",
 };
 
@@ -35,6 +35,9 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
   // run simply paid nothing, and the error card explains why.
   const heldForFunding = run.status === "HELD_SHORTFALL" || run.status === "PARTIALLY_PAID";
   const runError = explainRunError(run.error);
+  // Lines the risk gate kept out (bank details unverified / recently changed + large): shown whatever the run status.
+  const riskLines = run.pay_lines.filter((l) => l.status === "HELD" && l.hold_reason);
+  const previewRisk = run.pending?.held_lines?.filter((l) => l.hold_reason) ?? [];
 
   async function decide(decision: "approve" | "hold") {
     setBusy(decision);
@@ -143,12 +146,33 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
         </dl>
       )}
 
+      {(riskLines.length > 0 || previewRisk.length > 0) && (
+        <div role="note" className="grid gap-2 rounded-3xl border-2 border-coral-400/50 bg-coral-500/10 p-4 text-sm font-bold text-sand-100">
+          <p className="flex items-center gap-2 text-coral-300"><ShieldAlert className="size-4 shrink-0" /> Held by the risk gate, will not be paid</p>
+          <ul className="grid gap-1.5">
+            {(riskLines.length > 0
+              ? riskLines.map((l) => ({ key: l.id, name: l.beneficiary_name, amount: l.amount, currency: l.currency, reason: l.hold_reason as string }))
+              : previewRisk.map((l, i) => ({ key: `${l.name}-${i}`, name: l.name, amount: l.amount, currency: l.currency, reason: l.hold_reason as string }))
+            ).map((l) => (
+              <li key={l.key} className="break-words font-semibold text-sage-200">
+                <span className="font-extrabold text-sand-100">{l.name}</span> ({formatMoney(l.amount, l.currency)}):{" "}
+                {HOLD_REASON_TEXT[l.reason]?.message ?? "Held for review."}
+              </li>
+            ))}
+          </ul>
+          <p className="font-semibold text-sage-300">
+            {run.pending ? "Approving this run pays only the other lines. " : ""}
+            Once a second person verifies the bank details{run.pending ? ", use Pay held lines on this run afterwards" : ", start the payroll again"}.
+          </p>
+        </div>
+      )}
+
       {heldForFunding && heldLines.length > 0 && (
         <div className="grid gap-3 rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 p-4 text-sm font-bold text-sand-200">
           <p>
             {heldLines.length} of {run.pay_lines.length} line{run.pay_lines.length === 1 ? "" : "s"} held, not paid:{" "}
             {heldLines.map((l) => `${l.beneficiary_name} (${formatMoney(l.amount, l.currency)})`).join(", ")}.
-            Held lines move only after the employer is funded and a person approves again.
+            Held lines move only after the employer is funded (when short), any unverified bank details are verified, and a person approves again.
           </p>
           {run.continuation_run_id && (
             <p className="font-semibold text-sage-300">

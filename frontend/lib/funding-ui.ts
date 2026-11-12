@@ -38,5 +38,5 @@ export const FREQUENCY_LABEL = { WEEKLY: "Weekly", BIWEEKLY: "Every 2 weeks", MO
 export const KIND_LABEL: Record<string, string> = {
   FUNDING_REMINDER: "Funding reminder", FUNDING_OVERDUE: "Overdue notice", FUNDING_STATEMENT: "Funding statement",
   FUNDS_RECEIVED: "Funds received", APPROVAL_REQUESTED: "Approval needed", HELD_LINES_REMINDER: "Held payments",
-  RUN_SETTLED: "Run settled", PAYMENT_FAILED: "Payment problem", INVITE: "Invitation", PAYMENT_NOTICE: "Payment notice", GENERIC: "Message",
+  RUN_SETTLED: "Run settled", PAYMENT_FAILED: "Payment problem", INVITE: "Invitation", ONBOARDING_LINK: "Contractor onboarding link", BANK_CHANGE_CALLBACK: "Verify bank change", PAYMENT_NOTICE: "Payment notice", GENERIC: "Message",
 };
