@@ -413,3 +413,6 @@ TOOL_FUNCTIONS = {
     "demo_fund_employer": demo_fund_employer,
     "request_approval": request_approval,
 }
+
+
+from . import trace_tool  # noqa: E402,F401  (registers the read-only where_is_my_money tool)

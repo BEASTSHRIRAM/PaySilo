@@ -442,6 +442,25 @@ CREATE TABLE ledger_entries (
 CREATE INDEX ix_ledger_entries_account ON ledger_entries (account);
 CREATE INDEX ix_ledger_entries_transaction_id ON ledger_entries (transaction_id);
 
+CREATE TABLE proof_accesses (
+	id BIGSERIAL NOT NULL, 
+	organization_id UUID NOT NULL, 
+	run_id UUID NOT NULL, 
+	pay_line_id UUID, 
+	user_id UUID, 
+	kind VARCHAR(16) NOT NULL, 
+	channel VARCHAR(16) NOT NULL, 
+	document_digest VARCHAR(64) NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(run_id) REFERENCES payroll_runs (id) ON DELETE CASCADE, 
+	FOREIGN KEY(pay_line_id) REFERENCES pay_lines (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_proof_accesses_organization_id ON proof_accesses (organization_id);
+CREATE INDEX ix_proof_accesses_run_id ON proof_accesses (run_id);
+
 CREATE TABLE source_import_rows (
 	id BIGSERIAL NOT NULL, 
 	import_id UUID NOT NULL, 
@@ -521,4 +540,5 @@ ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_entries" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "proof_accesses" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_import_rows" ENABLE ROW LEVEL SECURITY;

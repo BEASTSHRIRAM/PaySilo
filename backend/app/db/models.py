@@ -556,6 +556,22 @@ class ChatSecurityEvent(TimestampMixin, Base):
     detail: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class ProofAccess(TimestampMixin, Base):
+    """Audit record: someone generated a proof-of-payment / status notice / statement PDF."""
+
+    __tablename__ = "proof_accesses"
+
+    id: Mapped[int] = mapped_column(BigId, primary_key=True, autoincrement=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("payroll_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    pay_line_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("pay_lines.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))  # NULL: public receipt link
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # proof | notice | statement
+    channel: Mapped[str] = mapped_column(String(16), nullable=False, default="dashboard")  # dashboard | receipt_link
+    document_digest: Mapped[str] = mapped_column(String(64), nullable=False)  # sha256 of the canonical payload
+
+
 # ---------------------------------------------------------------------------
 # Ledger (double-entry, append-only)
 # ---------------------------------------------------------------------------
