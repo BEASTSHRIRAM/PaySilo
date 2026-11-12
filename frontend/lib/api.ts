@@ -614,3 +614,75 @@ export const apiTrust = {
   complianceOverview: () => request<ComplianceOverview>("/compliance/overview"),
 };
 export const trustDownloads = { complianceYtdCsv: "/api/compliance/ytd.csv" };
+
+// ====================================================================
+// Funding planner + notifications outbox (feat/funding-planner)
+// ====================================================================
+export type FundingStatus = "FUNDED" | "SHORT" | "DUE_SOON" | "OVERDUE" | "NO_SCHEDULE" | "NO_LINES" | "RATE_UNAVAILABLE";
+export type PayFrequency = "WEEKLY" | "BIWEEKLY" | "MONTHLY";
+export interface FundingLine {
+  contractor_id: string; name: string; currency: string; method: string;
+  amount: string | null; fee: string | null; amount_usd: string | null; fee_usd: string | null; needs_amount: boolean;
+}
+export interface WireDetails {
+  status: "READY" | "PENDING" | "UNAVAILABLE"; currency: string; message: string | null;
+  account_name?: string | null; account_number?: string | null; account_type?: string | null;
+  swift_code?: string | null; iban?: string | null; bank_name?: string | null; bank_address?: string | null;
+  reference?: string | null; routing: { type: string; label: string; value: string }[];
+}
+export interface FundingPlan {
+  employer_id: string; employer_name: string; status: FundingStatus; message: string;
+  pay_frequency: PayFrequency | null; funding_lead_days: number;
+  scheduled_pay_date: string | null; pay_date: string | null; fund_by: string | null;
+  days_until: number | null; days_until_fund_by: number | null; today: string;
+  lines: FundingLine[]; needs_amount: FundingLine[];
+  by_currency: { currency: string; payouts: number; payroll: string; fees: string; required: string; required_usd: string }[];
+  wallet: Record<string, string>;
+  payroll_usd: string; run_fee_usd: string; reserve_floor_usd: string; required_in_wallet_usd: string;
+  available_usd: string; gap_usd: string; recommended_transfer_usd: string;
+  is_short: boolean; contact_email: string | null; contact_name: string | null; wire: WireDetails | null;
+}
+export interface FundingSummary {
+  employers: number; short: number; overdue: number; funded: number; counts: Record<string, number>;
+  total_to_collect_usd: string; total_gap_usd: string;
+}
+export interface OrgFundingPlan { today: string; summary: FundingSummary; plans: FundingPlan[] }
+export interface FundingStatement {
+  organization: string; employer: string; generated_on: string; status: FundingStatus;
+  pay_date: string | null; fund_by: string | null; lines: FundingLine[]; needs_amount: FundingLine[];
+  by_currency: FundingPlan["by_currency"]; payroll_usd: string; run_fee_usd: string; reserve_floor_usd: string;
+  required_in_wallet_usd: string; available_usd: string; gap_usd: string; recommended_transfer_usd: string;
+  wire: WireDetails | null;
+}
+export interface SweepResult {
+  employer_id: string; employer_name: string; action: "queued" | "skipped"; reason: string;
+  notification_id: string | null; status: string | null;
+}
+export interface SweepResponse { queued: number; skipped: number; results: SweepResult[] }
+export type NotificationKind = "FUNDING_REMINDER" | "FUNDING_STATEMENT" | "FUNDING_OVERDUE" | "PAYMENT_NOTICE" | "GENERIC";
+export interface AppNotification {
+  id: string; kind: NotificationKind; channel: string; recipient: string; subject: string; body: string;
+  status: "QUEUED" | "SENT" | "FAILED"; provider: string | null; simulated: boolean; error: string | null;
+  employer_id: string | null; employer_name: string | null; created_at: string; sent_at: string | null;
+}
+export interface NotificationList { total: number; limit: number; offset: number; items: AppNotification[] }
+
+export const apiFunding = {
+  plan: () => request<OrgFundingPlan>("/funding/plan"),
+  employerPlan: (employerId: string) =>
+    request<FundingPlan>(`/employers/${encodeURIComponent(employerId)}/funding-plan`),
+  updateSchedule: (employerId: string, body: { pay_frequency?: PayFrequency | null; next_pay_date?: string | null; funding_lead_days?: number }) =>
+    request<FundingPlan>(`/employers/${encodeURIComponent(employerId)}/schedule`, { method: "PATCH", body: JSON.stringify(body) }),
+  statement: (employerId: string) =>
+    request<FundingStatement>(`/employers/${encodeURIComponent(employerId)}/funding-statement`),
+  sendReminder: (employerId: string, kind: "reminder" | "statement" = "reminder") =>
+    post<AppNotification>(`/employers/${encodeURIComponent(employerId)}/funding-reminder`, { kind }),
+  runSweep: () => post<SweepResponse>("/funding/reminders/run"),
+  notifications: (params: { employer_id?: string; kind?: string; status?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "") q.set(k, String(v));
+    const qs = q.toString();
+    return request<NotificationList>(`/notifications${qs ? `?${qs}` : ""}`);
+  },
+  statementCsvUrl: (employerId: string) => `/api/employers/${encodeURIComponent(employerId)}/funding-statement?format=csv`,
+};

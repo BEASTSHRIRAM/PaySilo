@@ -4,321 +4,358 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
-  ArrowUpRight, CircleCheck, FileUp, Landmark, Loader2, Play, Plus, RefreshCw, TriangleAlert,
+  ArrowUpRight, CalendarClock, Check, ChevronDown, Copy, Download, FileText, Landmark, Loader2, Mail, Plus,
+  RefreshCw, Send, X,
 } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
 import { PageNotice, SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
-import { Badge, toneForStatus } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/ui/select";
 import {
-  api, ApiError,
-  type Assessment, type Employer, type Overview, type RunDetail, type RunSummary, type Session,
+  api, apiFunding, ApiError,
+  type FundingPlan, type OrgFundingPlan, type PayFrequency, type Session, type SweepResponse, type WireDetails,
 } from "@/lib/api";
-import { AnimatedMoney } from "@/lib/gsap-anim";
-import { MONEY_MOVED_STATUSES } from "@/lib/status";
+import { daysPhrase, FREQUENCY_LABEL, fmtDay, STATUS_LABEL, STATUS_TONE } from "@/lib/funding-ui";
 import { cn, formatMoney } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
-const num = (v: string | null | undefined): number => {
-  const n = Number(v);
-  return v !== null && v !== undefined && v !== "" && Number.isFinite(n) ? n : 0;
-};
-const has = (v: string | null | undefined): boolean => v !== null && v !== undefined && v !== "";
+const EDITOR_ROLES = new Set(["owner", "admin"]);
+const ROLE_NOTE = "Only owners and admins can change schedules, add funds or send emails.";
 
-// PARTIALLY_PAID stays non-terminal here: its held lines still need funding.
-const TERMINAL = new Set([...MONEY_MOVED_STATUSES].filter((s) => s !== "PARTIALLY_PAID").concat(["FAILED", "REFUSED", "APPROVAL_REJECTED"]));
-
-/*
- * Which run funds next? The employer's most recent run that is not in a
- * terminal state; if every run is terminal, the most recent run overall
- * (its assessment still shows the last funding picture). Runs are sorted
- * by created_at here — the API's list order is not relied on.
- */
-function pickFundingRun(runs: RunSummary[]): RunSummary | null {
-  if (runs.length === 0) return null;
-  const sorted = [...runs].sort((a, b) => b.created_at.localeCompare(a.created_at));
-  return sorted.find((r) => !TERMINAL.has(r.status)) ?? sorted[0];
-}
-
-interface EmployerFunding {
-  employer: Employer;
-  run: RunSummary | null;
-  detail: RunDetail | null;
-  error: string | null;
-}
-
-function EquationRow({ label, detail, value, currency = "USD", strong, muted }: {
-  label: string; detail?: string; value: string | null; currency?: string; strong?: boolean; muted?: boolean;
-}) {
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* clipboard blocked: the value stays selectable on screen */
+    }
+  }
   return (
-    <div className={cn("flex items-baseline justify-between gap-3 py-2", strong && "border-t-2 border-ink-600 pt-3")}>
-      <span className="min-w-0">
-        <span className={cn("block text-sm", strong ? "font-extrabold text-sand-100" : "font-bold text-sage-300")}>{label}</span>
-        {detail && <span className="block text-xs font-semibold text-sage-500">{detail}</span>}
-      </span>
-      {has(value) ? (
-        <AnimatedMoney
-          value={value as string}
-          currency={currency}
-          className={cn("font-display font-semibold tabular-nums", strong ? "text-xl text-sand-100" : "text-base", muted ? "text-sage-300" : "text-sand-100")}
-        />
-      ) : (
-        <span className="font-display text-base font-semibold text-sage-500" title="Not returned by the API for this run">—</span>
+    <button
+      type="button" onClick={() => void copy()} aria-label={`Copy ${label}`}
+      className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-sage-300 hover:bg-ink-700 hover:text-sand-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/50"
+    >
+      {copied ? <Check className="size-4 text-mint-400" /> : <Copy className="size-4" />}
+    </button>
+  );
+}
+
+function WireBlock({ wire }: { wire: WireDetails | null }) {
+  const rows: { label: string; value: string | null | undefined }[] = wire?.status === "READY"
+    ? [
+        { label: "Account name", value: wire.account_name },
+        { label: "Account number", value: wire.account_number },
+        ...wire.routing.filter((r) => r.type !== "swift").map((r) => ({ label: r.label, value: r.value })),
+        { label: "SWIFT/BIC", value: wire.swift_code },
+        { label: "Bank", value: wire.bank_name },
+        { label: "Reference", value: wire.reference },
+      ]
+    : [];
+  return (
+    <div className="rounded-3xl bg-ink-950/40 p-4">
+      <h3 className="flex items-center gap-2 font-display text-lg font-semibold text-sand-100">
+        <Landmark className="size-5 text-sage-400" /> Send funds to
+      </h3>
+      {!wire && <p className="mt-2 text-sm text-sage-400">This employer has no receiving account yet.</p>}
+      {wire && wire.status !== "READY" && (
+        <p className="mt-2 text-sm font-semibold text-sage-400">{wire.message ?? "Wire details are not available yet."}</p>
+      )}
+      {rows.length > 0 && (
+        <dl className="mt-2 divide-y divide-ink-800">
+          {rows.filter((r) => r.value).map((r) => (
+            <div key={r.label} className="flex items-center justify-between gap-2 py-1.5">
+              <div className="min-w-0">
+                <dt className="text-xs font-bold uppercase tracking-wide text-sage-500">{r.label}</dt>
+                <dd className="break-words font-mono text-sm font-semibold text-sand-100">{r.value}</dd>
+              </div>
+              <CopyButton value={r.value as string} label={r.label} />
+            </div>
+          ))}
+        </dl>
+      )}
+      {wire?.status === "READY" && (
+        <p className="mt-2 text-xs font-semibold leading-relaxed text-sage-500">
+          Funds land in this employer&apos;s own wallet only. Put the reference on the transfer so it is matched quickly.
+        </p>
       )}
     </div>
   );
 }
 
-function FundingCard({ data, onFunded }: { data: EmployerFunding; onFunded: (msg: string) => void }) {
-  const { employer, run, detail, error } = data;
-  const a: Assessment | null = detail?.assessment ?? null;
-  const [amount, setAmount] = useState("");
-  const [funding, setFunding] = useState(false);
-  const [fundError, setFundError] = useState<string | null>(null);
-  const balances = Object.entries(employer.balances);
-  const valid = Number(amount) > 0;
+function ScheduleEditor({ plan, onSaved, onCancel }: { plan: FundingPlan; onSaved: (p: FundingPlan) => void; onCancel: () => void }) {
+  const [freq, setFreq] = useState<string>(plan.pay_frequency ?? "");
+  const [date, setDate] = useState(plan.scheduled_pay_date ?? "");
+  const [lead, setLead] = useState(String(plan.funding_lead_days));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  async function submitFund(ev: React.FormEvent) {
+  async function save(ev: React.FormEvent) {
     ev.preventDefault();
-    if (!valid) return;
-    setFunding(true);
-    setFundError(null);
+    setSaving(true);
+    setError(null);
     try {
-      await api.fund(employer.id, amount);
-      setAmount("");
-      onFunded(`Added ${formatMoney(amount, employer.funding_currency)} to ${employer.name}. Balances and the funding picture have been refreshed.`);
+      const next = await apiFunding.updateSchedule(plan.employer_id, {
+        pay_frequency: (freq || null) as PayFrequency | null,
+        next_pay_date: date || null,
+        funding_lead_days: Number(lead),
+      });
+      onSaved(next);
     } catch (err) {
-      setFundError(errMsg(err));
-    } finally {
-      setFunding(false);
+      setError(errMsg(err));
+      setSaving(false);
     }
   }
 
-  // The funding equation, in USD, from the run's stored assessment.
-  // Identities (backend policy): required_usd = payroll_usd + platform_fee_usd;
-  // total needed = required_usd + reserve_floor_usd;
-  // shortfall_usd = max(0, needed - available_usd).
-  const needed = a ? num(a.required_usd) + num(a.reserve_floor_usd) : 0;
-  const headroom = a ? num(a.available_usd) - needed : 0;
-  const short = a ? num(a.shortfall_usd) > 0 : false;
-  const segments = a
-    ? [
-        { label: "Payroll incl. payout fees", value: num(a.payroll_usd), bar: "bg-sage-500", text: "text-sage-300" },
-        { label: "Platform fee", value: num(a.platform_fee_usd), bar: "bg-sand-400", text: "text-sand-300" },
-        { label: "Reserve floor", value: num(a.reserve_floor_usd), bar: "bg-clay-400", text: "text-clay-300" },
-      ]
-    : [];
-  const availablePct = a && needed > 0 ? Math.min(100, Math.max(0, (num(a.available_usd) / needed) * 100)) : 0;
+  const id = `sched-${plan.employer_id}`;
+  return (
+    <form onSubmit={(e) => void save(e)} className="grid gap-3 rounded-3xl bg-ink-950/40 p-4 sm:grid-cols-3">
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${id}-freq`}>How often</Label>
+        <NativeSelect id={`${id}-freq`} value={freq} onChange={(e) => setFreq(e.target.value)}>
+          <option value="">Not set</option>
+          {Object.entries(FREQUENCY_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </NativeSelect>
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${id}-date`}>Next pay date</Label>
+        <Input id={`${id}-date`} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${id}-lead`}>Fund this many business days before</Label>
+        <Input id={`${id}-lead`} type="number" min={0} max={10} step={1} value={lead} onChange={(e) => setLead(e.target.value)} />
+      </div>
+      {error && <p role="alert" className="text-sm font-bold text-coral-300 sm:col-span-3">{error}</p>}
+      <div className="flex flex-wrap gap-2 sm:col-span-3">
+        <Button type="submit" size="sm" variant="sage" disabled={saving || lead === ""}>
+          {saving ? <Loader2 className="animate-spin" /> : <Check />} Save schedule
+        </Button>
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}><X /> Cancel</Button>
+      </div>
+    </form>
+  );
+}
+
+function Fact({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "bad" | "good" }) {
+  return (
+    <div className="min-w-0 rounded-2xl bg-ink-950/40 px-4 py-3">
+      <p className="text-xs font-bold uppercase tracking-wide text-sage-500">{label}</p>
+      <p className={cn("mt-0.5 break-words font-display text-xl font-semibold tabular-nums",
+        tone === "bad" ? "text-coral-300" : tone === "good" ? "text-mint-400" : "text-sand-100")}>{value}</p>
+      {sub && <p className="text-xs font-semibold text-sage-500">{sub}</p>}
+    </div>
+  );
+}
+
+function PlanCard({ plan, canEdit, onChanged, notify }: {
+  plan: FundingPlan; canEdit: boolean; onChanged: (p?: FundingPlan) => void; notify: (m: string, error?: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const priced = plan.status !== "RATE_UNAVAILABLE";
+  const hasLines = plan.lines.length > 0;
+  const wallet = Object.entries(plan.wallet);
+  const late = plan.status === "OVERDUE";
+  const gapTone = plan.is_short ? "bad" : "good";
+
+  async function addFunds(ev: React.FormEvent) {
+    ev.preventDefault();
+    if (!(Number(amount) > 0)) return;
+    setBusy("fund");
+    try {
+      await api.fund(plan.employer_id, amount);
+      notify(`Added ${formatMoney(amount)} (simulated) to ${plan.employer_name}.`);
+      setAmount("");
+      onChanged();
+    } catch (err) {
+      notify(errMsg(err), true);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remind(kind: "reminder" | "statement") {
+    setBusy(kind);
+    try {
+      const n = await apiFunding.sendReminder(plan.employer_id, kind);
+      notify(`${kind === "statement" ? "Funding statement" : "Funding reminder"} to ${n.recipient} ${n.status === "SENT" ? "sent" : "queued"}${n.simulated ? " (simulated delivery)" : ""}. See Notifications.`);
+    } catch (err) {
+      notify(errMsg(err), true);
+    } finally {
+      setBusy(null);
+    }
+  }
 
   return (
-    <Card className="grid gap-6 p-5 sm:p-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="font-display text-2xl font-semibold text-sand-100">
-              <Link href={`/dashboard/employers/${employer.id}`} className="hover:underline hover:underline-offset-4">{employer.name}</Link>
-            </h2>
-            <p className="mt-0.5 text-sm font-semibold text-sage-500">
-              {employer.country} · funds in {employer.funding_currency} · {employer.contractor_count} contractor{employer.contractor_count === 1 ? "" : "s"}
-            </p>
-          </div>
-          <Badge tone={toneForStatus(employer.status)}>{employer.status}</Badge>
+    <Card className="grid gap-5 p-5 sm:p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-display text-2xl font-semibold text-sand-100">
+            <Link href={`/dashboard/employers/${plan.employer_id}`} className="hover:underline hover:underline-offset-4">{plan.employer_name}</Link>
+          </h2>
+          <p className="mt-1 max-w-2xl text-sm font-semibold text-sage-300">{plan.message}</p>
         </div>
+        <Badge tone={STATUS_TONE[plan.status]}>{STATUS_LABEL[plan.status]}</Badge>
+      </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          {balances.length === 0 && <span className="rounded-full bg-ink-950/50 px-3 py-1.5 text-sm font-bold text-sage-400">No funds yet</span>}
-          {balances.map(([cur, amt]) => (
-            <span key={cur} className="rounded-full bg-ink-950/50 px-3 py-1.5 text-sm font-bold text-sand-100">
-              <span className="text-sage-400">{cur}</span> {formatMoney(amt, cur)}
-            </span>
-          ))}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Fact label="Pay date" value={fmtDay(plan.pay_date)}
+          sub={plan.pay_frequency ? FREQUENCY_LABEL[plan.pay_frequency] : plan.pay_date ? "One-off" : "Set a schedule below"} />
+        <Fact label="Fund by" value={fmtDay(plan.fund_by)} tone={late ? "bad" : undefined}
+          sub={plan.fund_by ? `${daysPhrase(plan.days_until_fund_by)} · ${plan.funding_lead_days} business day${plan.funding_lead_days === 1 ? "" : "s"} before pay` : undefined} />
+        <Fact label="Needs in wallet" value={priced ? formatMoney(plan.required_in_wallet_usd) : "—"} sub="pay + fees + run fee + reserve" />
+        <Fact label="Has now" value={priced ? formatMoney(plan.available_usd) : "—"} sub="this employer's wallet only" />
+      </div>
+
+      {priced && hasLines && (
+        <div className={cn("flex flex-wrap items-center justify-between gap-3 rounded-3xl border-2 p-4",
+          plan.is_short ? "border-coral-600/60 bg-coral-500/10" : "border-mint-700/60 bg-mint-500/10")}>
+          <div>
+            <p className="text-sm font-bold text-sage-300">{plan.is_short ? "Gap to close" : "Gap"}</p>
+            <p className={cn("font-display text-2xl font-semibold tabular-nums", gapTone === "bad" ? "text-coral-300" : "text-mint-400")}>
+              {formatMoney(plan.gap_usd)}
+            </p>
+          </div>
+          {plan.is_short && (
+            <div className="text-right">
+              <p className="text-sm font-bold text-sage-300">Recommended transfer</p>
+              <p className="font-display text-2xl font-semibold tabular-nums text-sand-100">{formatMoney(plan.recommended_transfer_usd)}</p>
+              <p className="text-xs font-semibold text-sage-500">gap + 3% FX buffer on non-USD pay, rounded up to $50</p>
+            </div>
+          )}
         </div>
+      )}
 
-        {error && <div className="mt-5"><SectionError message={error} /></div>}
+      <div className="flex flex-wrap gap-2">
+        {wallet.length === 0 && <span className="rounded-full bg-ink-950/50 px-3 py-1.5 text-sm font-bold text-sage-400">Wallet is empty</span>}
+        {wallet.map(([cur, amt]) => (
+          <span key={cur} className="rounded-full bg-ink-950/50 px-3 py-1.5 text-sm font-bold text-sand-100">
+            <span className="text-sage-400">{cur}</span> {formatMoney(amt, cur)}
+          </span>
+        ))}
+      </div>
 
-        {!error && !run && (
-          <div className="mt-5 rounded-3xl bg-ink-950/40 p-5">
-            <p className="font-bold text-sand-100">No assessed run yet</p>
-            <p className="mt-1 max-w-lg text-sm text-sage-400">
-              The funding equation needs a priced run. Start a run or import a payroll sheet — once the pricing engine
-              assesses it, the exact amount this silo must hold appears here. No figure is estimated in the meantime.
-            </p>
-            <div className="mt-4 flex flex-wrap gap-3">
-              <Button size="sm" asChild><Link href="/dashboard"><Play /> Run payroll</Link></Button>
-              <Button size="sm" variant="outline" asChild><Link href="/dashboard/imports"><FileUp /> Import payroll</Link></Button>
-            </div>
-          </div>
-        )}
-
-        {!error && run && !a && (
-          <div className="mt-5 rounded-3xl bg-ink-950/40 p-5">
-            <p className="font-bold text-sand-100">This run has no stored assessment</p>
-            <p className="mt-1 max-w-lg text-sm text-sage-400">
-              Run {run.period_label ?? `#${run.id.slice(0, 8)}`} is {run.status.replaceAll("_", " ").toLowerCase()} and the API returned no
-              assessment for it, so the funding equation cannot be shown. Open the run for its timeline.
-            </p>
-            <Button size="sm" variant="outline" className="mt-4" asChild>
-              <Link href={`/dashboard/runs/${run.id}`}>Open run <ArrowUpRight /></Link>
-            </Button>
-          </div>
-        )}
-
-        {!error && run && a && (
-          <div className="mt-5">
-            <p className="text-sm font-semibold text-sage-400">
-              Based on {run.period_label ?? "the latest open run"} · status {run.status.replaceAll("_", " ")} ·{" "}
-              <Link href={`/dashboard/runs/${run.id}`} className="font-bold text-sand-200 underline-offset-4 hover:underline">open run</Link>
-              {" "}· assessed {new Date(run.created_at).toLocaleDateString()}
-            </p>
-
-            <div className="mt-3 divide-y divide-ink-800 rounded-3xl bg-ink-950/40 px-4 py-2">
-              <EquationRow label="Available in this silo (USD value)" detail="The employer's own wallet only — never another employer's money" value={a.available_usd} />
-              <EquationRow
-                label="Payroll, including payout fees"
-                detail={
-                  a.payroll_currency === "MIXED"
-                    ? `Salaries ${formatMoney(a.total_payroll)} + payout fees ${formatMoney(a.swift_fees)} (USD equivalents, mixed currencies)`
-                    : `Salaries ${formatMoney(a.total_payroll, a.payroll_currency)} + payout fees ${formatMoney(a.swift_fees, a.payroll_currency)}`
-                }
-                value={a.payroll_usd}
-              />
-              <EquationRow label="Platform fee for this run" value={a.platform_fee_usd} />
-              <EquationRow label="Required — leaves the wallet" detail="Payroll incl. fees + platform fee" value={a.required_usd} strong />
-              <EquationRow label="Reserve floor — must stay in the silo" value={a.reserve_floor_usd} muted />
-              <EquationRow label="Total that must be in the silo" detail="Required + reserve floor" value={needed.toFixed(2)} strong />
-            </div>
-
-            {short ? (
-              <p role="alert" className="mt-4 flex gap-2.5 rounded-3xl border-2 border-coral-600/60 bg-coral-500/10 p-4 text-[15px] font-bold leading-relaxed text-coral-200">
-                <TriangleAlert className="mt-0.5 size-5 shrink-0 text-coral-400" />
-                <span>
-                  Short by {formatMoney(a.shortfall_usd)} against this run. Add at least that much to {employer.name}&apos;s
-                  silo before the pay date — the run stays held until the silo covers the required amount plus the reserve.
-                </span>
-              </p>
-            ) : (
-              <p role="status" className="mt-4 flex gap-2.5 rounded-3xl border-2 border-sage-600/60 bg-sage-500/10 p-4 text-[15px] font-bold leading-relaxed text-sage-200">
-                <CircleCheck className="mt-0.5 size-5 shrink-0 text-sage-400" />
-                <span>
-                  Covered. After this run and the reserve floor, the silo keeps {formatMoney(headroom.toFixed(2))} of headroom.
-                </span>
-              </p>
-            )}
-
-            <div className="mt-5">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className="text-sm font-extrabold text-sand-100">What the total is made of</p>
-                <p className="text-xs font-bold text-sage-500">Total needed {formatMoney(needed.toFixed(2))}</p>
-              </div>
-              <div className="mt-2 flex h-5 w-full overflow-hidden rounded-full bg-ink-950/70" role="img"
-                   aria-label={`Composition of the ${formatMoney(needed.toFixed(2))} total: ${segments.map((s) => `${s.label} ${formatMoney(s.value.toFixed(2))}`).join(", ")}`}>
-                {segments.map((s) => (
-                  <div key={s.label} className={cn("h-full", s.bar)} style={{ width: needed > 0 ? `${(s.value / needed) * 100}%` : "0%" }} />
-                ))}
-              </div>
-              <ul className="mt-2.5 grid gap-1.5 sm:grid-cols-3">
-                {segments.map((s) => (
-                  <li key={s.label} className="flex items-baseline justify-between gap-2 text-sm">
-                    <span className={cn("flex items-center gap-1.5 font-bold", s.text)}>
-                      <span aria-hidden className={cn("size-2.5 rounded-full", s.bar)} /> {s.label}
-                    </span>
-                    <span className="font-display font-semibold tabular-nums text-sand-100">
-                      {formatMoney(s.value.toFixed(2))} · {needed > 0 ? `${((s.value / needed) * 100).toFixed(1)}%` : "—"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="mt-4 flex items-baseline justify-between gap-3">
-                <p className="text-sm font-extrabold text-sand-100">Available vs needed</p>
-                <p className="text-xs font-bold text-sage-500">
-                  {formatMoney(a.available_usd)} of {formatMoney(needed.toFixed(2))} · {needed > 0 ? `${availablePct.toFixed(0)}%` : "—"}
-                </p>
-              </div>
-              <div className="mt-2 h-3 w-full overflow-hidden rounded-full bg-ink-950/70">
-                <div className={cn("h-full rounded-full", short ? "bg-coral-500" : "bg-mint-500")} style={{ width: `${availablePct}%` }} />
-              </div>
-            </div>
-
-            {a.by_currency.length > 0 && (
-              <div className="mt-5 overflow-x-auto rounded-3xl border-2 border-ink-700">
-                <table className="w-full min-w-[560px] border-collapse text-left">
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="grid min-w-0 content-start gap-4">
+          <div>
+            <button
+              type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
+              className="flex items-center gap-2 rounded-xl text-sm font-extrabold text-sand-200 hover:text-sand-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/50"
+            >
+              <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
+              What this pays ({plan.lines.length} contractor{plan.lines.length === 1 ? "" : "s"}
+              {plan.needs_amount.length > 0 ? `, ${plan.needs_amount.length} need an amount` : ""})
+            </button>
+            {open && (
+              <div className="mt-3 overflow-x-auto rounded-3xl border-2 border-ink-700">
+                <table className="w-full min-w-[520px] border-collapse text-left text-sm">
                   <thead>
                     <tr className="bg-ink-900/70 text-xs font-extrabold uppercase tracking-widest text-sage-500">
-                      <th scope="col" className="px-4 py-2.5">Currency</th>
-                      <th scope="col" className="px-4 py-2.5 text-right">Payouts</th>
-                      <th scope="col" className="px-4 py-2.5 text-right">Salaries</th>
-                      <th scope="col" className="px-4 py-2.5 text-right">Payout fees</th>
-                      <th scope="col" className="px-4 py-2.5 text-right">Required</th>
-                      <th scope="col" className="px-4 py-2.5 text-right">Required (USD)</th>
+                      <th scope="col" className="px-3 py-2">Contractor</th>
+                      <th scope="col" className="px-3 py-2 text-right">Amount</th>
+                      <th scope="col" className="px-3 py-2">Method</th>
+                      <th scope="col" className="px-3 py-2 text-right">Fee</th>
+                      <th scope="col" className="px-3 py-2 text-right">USD value</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y-2 divide-ink-700">
-                    {a.by_currency.map((row) => (
-                      <tr key={row.currency} className="bg-ink-900/40 text-sm">
-                        <td className="px-4 py-2.5 font-extrabold text-sand-100">{row.currency}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums text-sand-200">{row.payouts}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums text-sand-200">{formatMoney(row.payroll, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums text-sand-200">{formatMoney(row.fees, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-right font-semibold tabular-nums text-sand-100">{formatMoney(row.required, row.currency)}</td>
-                        <td className="px-4 py-2.5 text-right tabular-nums text-sand-200">{formatMoney(row.required_usd)}</td>
+                    {plan.lines.map((l) => (
+                      <tr key={l.contractor_id} className="bg-ink-900/40">
+                        <td className="px-3 py-2 font-bold text-sand-100">{l.name}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sand-200">{formatMoney(l.amount, l.currency)}</td>
+                        <td className="px-3 py-2 text-sage-300">{l.currency} {l.method}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sand-200">{formatMoney(l.fee, l.currency)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums text-sand-100">{formatMoney(l.amount_usd)}</td>
+                      </tr>
+                    ))}
+                    {plan.needs_amount.map((l) => (
+                      <tr key={l.contractor_id} className="bg-ink-900/40">
+                        <td className="px-3 py-2 font-bold text-sand-100">{l.name}</td>
+                        <td colSpan={4} className="px-3 py-2 text-sm font-bold text-coral-300">
+                          Needs an amount: set a default amount on the employer page.
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                {priced && hasLines && (
+                  <dl className="grid gap-1 border-t-2 border-ink-700 bg-ink-900/60 px-3 py-3 text-sm">
+                    {[
+                      ["Pay + payout fees", plan.payroll_usd], ["PaySilo run fee", plan.run_fee_usd],
+                      ["Reserve kept in the wallet", plan.reserve_floor_usd], ["Needs in wallet", plan.required_in_wallet_usd],
+                    ].map(([k, v]) => (
+                      <div key={k} className="flex justify-between gap-3">
+                        <dt className="font-semibold text-sage-300">{k}</dt>
+                        <dd className="font-bold tabular-nums text-sand-100">{formatMoney(v)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
               </div>
             )}
           </div>
-        )}
-      </div>
 
-      <aside className="h-fit rounded-3xl bg-ink-950/40 p-5 xl:sticky xl:top-40">
-        <h3 className="flex items-center gap-2 font-display text-lg font-semibold text-sand-100">
-          <Landmark className="size-5 text-sage-400" /> Deposit instructions
-        </h3>
-        <ol className="mt-3 grid list-decimal gap-2 pl-5 text-sm leading-relaxed text-sage-300">
-          <li>Send funds to {employer.name}&apos;s connected account
-            {employer.airwallex_account_id
-              ? <> (account …{employer.airwallex_account_id.slice(-6)})</>
-              : " — PaySilo provisions it when the silo is created"}.
-          </li>
-          <li>Funds land in this silo only. They can never pay another employer&apos;s run.</li>
-          <li>In this workspace, use Add funds to record a deposit, then refresh — the equation above re-reads the live balance and the run&apos;s stored assessment.</li>
-        </ol>
+          {editing ? (
+            <ScheduleEditor plan={plan} onCancel={() => setEditing(false)} onSaved={(p) => { setEditing(false); notify("Schedule saved."); onChanged(p); }} />
+          ) : (
+            <div>
+              <Button variant="outline" size="sm" disabled={!canEdit} onClick={() => setEditing(true)} title={canEdit ? undefined : ROLE_NOTE}>
+                <CalendarClock /> Edit schedule
+              </Button>
+            </div>
+          )}
 
-        <form onSubmit={(e) => void submitFund(e)} className="mt-4 grid gap-2">
-          <label className="text-sm font-bold text-sage-300" htmlFor={`fund-${employer.id}`}>
-            Add funds ({employer.funding_currency})
-          </label>
-          <div className="flex gap-2">
-            <Input
-              id={`fund-${employer.id}`}
-              type="number" min="0" step="0.01" inputMode="decimal"
-              value={amount} onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
-            />
-            <Button type="submit" variant="sage" disabled={!valid || funding}>
-              {funding ? <Loader2 className="animate-spin" /> : <Plus />} Add
+          <div className="flex flex-wrap items-end gap-3">
+            <form onSubmit={(e) => void addFunds(e)} className="grid gap-1.5">
+              <Label htmlFor={`fund-${plan.employer_id}`}>Add funds (simulated, USD)</Label>
+              <div className="flex gap-2">
+                <Input id={`fund-${plan.employer_id}`} type="number" min="0" step="0.01" inputMode="decimal" placeholder="0.00"
+                  className="w-40" value={amount} disabled={!canEdit} onChange={(e) => setAmount(e.target.value)} />
+                <Button type="submit" size="md" variant="sage" disabled={!canEdit || !(Number(amount) > 0) || busy === "fund"}>
+                  {busy === "fund" ? <Loader2 className="animate-spin" /> : <Plus />} Add funds
+                </Button>
+              </div>
+            </form>
+            {priced && plan.is_short && Number(plan.recommended_transfer_usd) > 0 && canEdit && (
+              <Button type="button" variant="ghost" size="sm" onClick={() => setAmount(Number(plan.recommended_transfer_usd).toFixed(2))}>
+                Use recommended {formatMoney(plan.recommended_transfer_usd)}
+              </Button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={!canEdit || busy !== null || !plan.is_short} onClick={() => void remind("reminder")}
+              title={canEdit ? (plan.is_short ? undefined : "Nothing to ask for: this wallet already covers the payroll.") : ROLE_NOTE}>
+              {busy === "reminder" ? <Loader2 className="animate-spin" /> : <Send />} Send funding reminder
+            </Button>
+            <Button size="sm" variant="outline" asChild>
+              <a href={apiFunding.statementCsvUrl(plan.employer_id)} download><Download /> Statement (CSV)</a>
+            </Button>
+            <Button size="sm" variant="outline" asChild>
+              <Link href={`/dashboard/funding/${plan.employer_id}/statement`}><FileText /> Printable statement</Link>
+            </Button>
+            <Button size="sm" variant="ghost" disabled={!canEdit || busy !== null || !hasLines} onClick={() => void remind("statement")}
+              title={canEdit ? undefined : ROLE_NOTE}>
+              {busy === "statement" ? <Loader2 className="animate-spin" /> : <Mail />} Email statement
             </Button>
           </div>
-          {fundError && <p role="alert" className="text-sm font-bold text-coral-300">{fundError}</p>}
-        </form>
-
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link href={`/dashboard/employers/${employer.id}`}>Open employer <ArrowUpRight /></Link>
-          </Button>
-          <Button variant="ghost" size="sm" asChild>
-            <Link href="/dashboard/calendar">Check the pay date</Link>
-          </Button>
+          {!canEdit && <p className="text-xs font-semibold text-sage-500">{ROLE_NOTE}</p>}
+          {canEdit && !plan.contact_email && (
+            <p className="text-xs font-semibold text-coral-300">No contact email on file for this employer, so reminders cannot be sent.</p>
+          )}
         </div>
-        <p className="mt-3 text-xs font-semibold leading-relaxed text-sage-500">
-          A line shown as — means the API did not return that figure for this run. PaySilo never estimates a funding number.
-        </p>
-      </aside>
+
+        <WireBlock wire={plan.wire} />
+      </div>
     </Card>
   );
 }
@@ -326,124 +363,143 @@ function FundingCard({ data, onFunded }: { data: EmployerFunding; onFunded: (msg
 export default function FundingPage() {
   const router = useRouter();
   const [session, setSession] = useState<Session | null>(null);
-  const [overview, setOverview] = useState<Overview | null>(null);
-  const [fundings, setFundings] = useState<EmployerFunding[]>([]);
+  const [data, setData] = useState<OrgFundingPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; error: boolean } | null>(null);
+  const [sweep, setSweep] = useState<SweepResponse | null>(null);
+  const [sweeping, setSweeping] = useState(false);
 
-  const loadAll = useCallback(async (base: Overview) => {
-    const results = await Promise.all(
-      base.employers.map(async (employer): Promise<EmployerFunding> => {
-        try {
-          const runs = await api.runs(employer.id);
-          const run = pickFundingRun(runs);
-          if (!run) return { employer, run: null, detail: null, error: null };
-          const detail = await api.run(run.id);
-          return { employer, run, detail, error: null };
-        } catch (err) {
-          return { employer, run: null, detail: null, error: errMsg(err) };
-        }
-      }),
-    );
-    setFundings(results);
-  }, []);
-
-  const initialLoad = useCallback(async () => {
-    setLoadError(null);
+  const load = useCallback(async (initial = false) => {
+    setError(null);
     try {
-      const [me, ov] = await Promise.all([api.me(), api.overview()]);
-      setSession(me);
-      setOverview(ov);
-      await loadAll(ov);
+      const [me, plan] = await Promise.all([initial ? api.me() : Promise.resolve(null), apiFunding.plan()]);
+      if (me) setSession(me);
+      setData(plan);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         router.replace("/login?next=/dashboard/funding");
         return;
       }
-      setLoadError(errMsg(err));
+      setError(errMsg(err));
     }
     setLoading(false);
-  }, [loadAll, router]);
+  }, [router]);
 
-  useEffect(() => { void initialLoad(); }, [initialLoad]);
+  useEffect(() => { void load(true); }, [load]);
 
-  async function refreshAll() {
+  async function refresh() {
     setRefreshing(true);
-    setNotice(null);
+    await load();
+    setRefreshing(false);
+  }
+
+  async function runSweep() {
+    setSweeping(true);
+    setSweep(null);
     try {
-      const ov = await api.overview();
-      setOverview(ov);
-      await loadAll(ov);
+      setSweep(await apiFunding.runSweep());
     } catch (err) {
-      setLoadError(errMsg(err));
+      setToast({ message: errMsg(err), error: true });
     } finally {
-      setRefreshing(false);
+      setSweeping(false);
     }
   }
 
-  const shortCount = fundings.filter((f) => f.detail?.assessment && num(f.detail.assessment.shortfall_usd) > 0).length;
-  const totalShortfall = fundings.reduce((sum, f) => sum + (f.detail?.assessment ? num(f.detail.assessment.shortfall_usd) : 0), 0);
-  const assessedCount = fundings.filter((f) => f.detail?.assessment).length;
+  const canEdit = !!session && EDITOR_ROLES.has(session.role);
+  const s = data?.summary;
 
   return (
     <div className="min-h-dvh pb-16">
       {session ? <AppBar session={session} /> : <div className="h-[76px]" />}
 
-      <main className="mx-auto mt-8 grid max-w-6xl gap-8 px-4 sm:px-6">
+      <main className="mx-auto mt-8 grid max-w-6xl gap-6 px-4 sm:px-6">
         <section className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">Funding planner</h1>
             <p className="mt-1 max-w-2xl text-sage-300">
-              What each silo must hold before its next run: payroll, payout fees and the platform fee that leave the
-              wallet, plus the reserve that must stay. Every figure comes from the run&apos;s stored assessment.
+              What each employer must send, by when. Amounts use the same fee and reserve rules as the real run;
+              each employer is checked against its own wallet only.
             </p>
           </div>
-          <Button variant="outline" onClick={() => void refreshAll()} disabled={refreshing || loading}>
-            <RefreshCw className={refreshing ? "animate-spin" : undefined} /> Refresh
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => void refresh()} disabled={refreshing || loading}>
+              <RefreshCw className={refreshing ? "animate-spin" : undefined} /> Refresh
+            </Button>
+            <Button onClick={() => void runSweep()} disabled={!canEdit || sweeping || loading}
+              title={canEdit ? undefined : ROLE_NOTE}>
+              {sweeping ? <Loader2 className="animate-spin" /> : <Send />} Run reminder sweep
+            </Button>
+          </div>
         </section>
 
-        {loading && <SectionLoading label="Reading balances and assessments…" />}
-        {loadError && <SectionError message={loadError} onRetry={() => void initialLoad()} />}
-        {notice && <PageNotice message={notice} />}
-
-        {!loading && overview && (
-          <>
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-              <div className="rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4">
-                <p className="text-sm font-bold text-sage-400">Employers planned</p>
-                <p className="mt-1 font-display text-3xl font-semibold tabular-nums text-sand-100">{overview.employers.length}</p>
-                <p className="mt-1 text-xs font-semibold text-sage-500">{assessedCount} with an assessed run</p>
-              </div>
-              <div className="rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4">
-                <p className="text-sm font-bold text-sage-400">Short right now</p>
-                <p className={cn("mt-1 font-display text-3xl font-semibold tabular-nums", shortCount > 0 ? "text-coral-300" : "text-sand-100")}>{shortCount}</p>
-                <p className="mt-1 text-xs font-semibold text-sage-500">Employers whose silo does not cover the next run plus reserve</p>
-              </div>
-              <div className="col-span-2 rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4 lg:col-span-1">
-                <p className="text-sm font-bold text-sage-400">Total shortfall (USD)</p>
-                <p className={cn("mt-1 font-display text-3xl font-semibold tabular-nums", totalShortfall > 0 ? "text-coral-300" : "text-sand-100")}>
-                  {formatMoney(totalShortfall.toFixed(2))}
+        {loading && <SectionLoading label="Planning funding…" />}
+        {error && <SectionError message={error} onRetry={() => void load(true)} />}
+        {toast && (
+          <div role={toast.error ? "alert" : "status"} className={cn("flex items-start justify-between gap-3 rounded-2xl border-2 px-4 py-3 text-sm font-bold",
+            toast.error ? "border-coral-600/60 bg-coral-500/10 text-coral-300" : "border-sage-600/60 bg-sage-500/10 text-sage-300")}>
+            <span>{toast.message}</span>
+            <button type="button" aria-label="Dismiss" onClick={() => setToast(null)} className="shrink-0 rounded-full p-0.5 hover:bg-ink-700"><X className="size-4" /></button>
+          </div>
+        )}
+        {sweep && (
+          <Card className="grid gap-3 p-5" role="status">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="font-display text-lg font-semibold text-sand-100">Reminder sweep finished</h2>
+                <p className="text-sm font-semibold text-sage-300">
+                  {sweep.queued} email{sweep.queued === 1 ? "" : "s"} queued, {sweep.skipped} skipped.
+                  Running it again will not send duplicates.
                 </p>
-                <p className="mt-1 text-xs font-semibold text-sage-500">Sum of shortfall_usd across assessed employers</p>
               </div>
+              <button type="button" aria-label="Dismiss sweep result" onClick={() => setSweep(null)} className="shrink-0 rounded-full p-1 hover:bg-ink-700"><X className="size-4 text-sage-300" /></button>
+            </div>
+            <ul className="divide-y divide-ink-800">
+              {sweep.results.map((r) => (
+                <li key={r.employer_id} className="flex flex-wrap items-baseline justify-between gap-x-3 py-1.5 text-sm">
+                  <span className="font-bold text-sand-100">{r.employer_name}</span>
+                  <span className={cn("font-semibold", r.action === "queued" ? "text-mint-400" : "text-sage-400")}>
+                    {r.action === "queued" ? "Queued" : "Skipped"}: {r.reason}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <Button variant="outline" size="sm" asChild className="w-fit">
+              <Link href="/dashboard/notifications">Open notifications <ArrowUpRight /></Link>
+            </Button>
+          </Card>
+        )}
+
+        {!loading && data && s && (
+          <>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {[
+                { label: "Funded", value: String(s.funded), tone: "text-mint-400", sub: "wallet covers the next run" },
+                { label: "Short", value: String(s.short), tone: s.short > 0 ? "text-sand-300" : "text-sand-100", sub: "wallet is below what is needed" },
+                { label: "Overdue", value: String(s.overdue), tone: s.overdue > 0 ? "text-coral-300" : "text-sand-100", sub: "past the fund-by date" },
+                { label: "Still to collect", value: formatMoney(s.total_to_collect_usd), tone: "text-sand-100", sub: "sum of recommended transfers" },
+              ].map((x) => (
+                <div key={x.label} className="rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-4">
+                  <p className="text-sm font-bold text-sage-400">{x.label}</p>
+                  <p className={cn("mt-1 font-display text-3xl font-semibold tabular-nums", x.tone)}>{x.value}</p>
+                  <p className="mt-1 text-xs font-semibold text-sage-500">{x.sub}</p>
+                </div>
+              ))}
             </div>
 
-            {overview.employers.length === 0 ? (
-              <SectionEmpty title="No employers yet" body="Add an employer before planning funding." />
+            {data.plans.length === 0 ? (
+              <SectionEmpty title="No employers yet" body="Add an employer to plan its funding." />
             ) : (
               <div className="grid gap-6">
-                {fundings.map((f) => (
-                  <FundingCard
-                    key={f.employer.id}
-                    data={f}
-                    onFunded={(msg) => { setNotice(msg); void refreshAll(); }}
-                  />
+                {data.plans.map((p) => (
+                  <PlanCard key={p.employer_id} plan={p} canEdit={canEdit}
+                    notify={(message, isError = false) => setToast({ message, error: isError })}
+                    onChanged={() => void load()} />
                 ))}
               </div>
             )}
+            <PageNotice message="Delivery is simulated unless an email provider is configured. Reminders only ask the employer to send money: PaySilo never moves funds without an approved run." />
           </>
         )}
       </main>
