@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, ArrowRight, Loader2, Play, Plus, UserX } from "lucide-react";
+import { ArrowLeft, ArrowRight, History, Link2, Loader2, Pencil, Play, Plus, ShieldCheck, UserX } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
 import { PageError, PageNotice, SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
@@ -14,12 +14,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import {
-  api, ApiError,
+  EditContractorPanel, HistoryPanel, OnboardingLinkPanel, TrustBadges, VerifyBankDialog,
+} from "@/components/contractors/trust-panels";
+import {
+  api, apiTrust, ApiError,
   type Contractor, type ContractorIn, type EmployerDetail, type RunSummary, type Session,
 } from "@/lib/api";
 import { AnimatedMoney, Stagger } from "@/lib/gsap-anim";
 import { useDataChanged } from "@/lib/events";
-import { runStatusInfo, EDITOR_ROLES } from "@/lib/status";
+import { runStatusInfo, EDITOR_ROLES, DECIDER_ROLES } from "@/lib/status";
 import { formatMoney } from "@/lib/utils";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
@@ -240,7 +243,14 @@ export default function EmployerPage() {
               )}
             </section>
 
-            <ContractorsSection employer={employer} canEdit={canEdit} onAdded={(c) => void onContractorAdded(c)} onDeactivate={(c) => void deactivate(c)} />
+            <ContractorsSection
+              employer={employer} canEdit={canEdit} session={session}
+              onAdded={(c) => void onContractorAdded(c)} onDeactivate={(c) => void deactivate(c)}
+              onUpdated={(c, note) => {
+                setEmployer((prev) => (prev ? { ...prev, contractors: prev.contractors.map((x) => (x.id === c.id ? c : x)) } : prev));
+                setNotice(note);
+              }}
+            />
 
             <section>
               <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Run history</h2>
@@ -335,12 +345,25 @@ export default function EmployerPage() {
   );
 }
 
+type RowPanel = { id: string; kind: "edit" | "link" | "history" };
+
 function ContractorsSection({
-  employer, canEdit, onAdded, onDeactivate,
+  employer, canEdit, session, onAdded, onDeactivate, onUpdated,
 }: {
-  employer: EmployerDetail; canEdit: boolean;
+  employer: EmployerDetail; canEdit: boolean; session: Session | null;
   onAdded: (c: Contractor) => void; onDeactivate: (c: Contractor) => void;
+  onUpdated: (c: Contractor, note: string) => void;
 }) {
+  const [panel, setPanel] = useState<RowPanel | null>(null);
+  const [verifying, setVerifying] = useState<Contractor | null>(null);
+  const [watch, setWatch] = useState<Set<string>>(new Set());
+  const canVerify = !!session && DECIDER_ROLES.includes(session.role);
+  useEffect(() => {
+    apiTrust.complianceOverview()
+      .then((o) => setWatch(new Set(o.watch_1099.map((w) => w.contractor_id))))
+      .catch(() => undefined); // badges are a nicety: the list still works without them
+  }, [employer.contractors]);
+  const toggle = (id: string, kind: RowPanel["kind"]) => setPanel((p) => (p && p.id === id && p.kind === kind ? null : { id, kind }));
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -480,39 +503,69 @@ function ContractorsSection({
           </div>
           <ul className="divide-y-2 divide-ink-700">
             {employer.contractors.map((c) => (
-              <li key={c.id} className="grid gap-2 bg-ink-850/80 px-5 py-4 lg:grid-cols-[1.4fr_1fr_auto_auto_auto] lg:items-center lg:gap-4">
-                <span className="min-w-0">
-                  <span className="block truncate font-bold text-sand-100">{c.full_name}</span>
-                  <span className="block truncate text-xs font-semibold text-sage-500">
-                    {c.email ?? "No email"} · {c.country}
+              <li key={c.id} className="bg-ink-850/80">
+                <div className="grid gap-2 px-5 py-4 lg:grid-cols-[1.4fr_1fr_auto_auto_auto] lg:items-center lg:gap-4">
+                  <span className="min-w-0">
+                    <span className="block truncate font-bold text-sand-100">{c.full_name}</span>
+                    <span className="block truncate text-xs font-semibold text-sage-500">
+                      {c.email ?? "No email"} · {c.country}
+                    </span>
+                    {c.is_active && <TrustBadges c={c} watch1099={watch.has(c.id)} />}
                   </span>
-                </span>
-                <span className="text-sm font-semibold text-sage-300">
-                  {c.payout_method}
-                  {c.iban_last4 ? ` · IBAN …${c.iban_last4}` : c.account_last4 ? ` · acct …${c.account_last4}` : ""}
-                  {c.swift_code ? ` · ${c.swift_code}` : ""}
-                </span>
-                <span className="font-display font-semibold tabular-nums text-sand-100 lg:text-right">
-                  {c.default_amount ? formatMoney(c.default_amount, c.currency) : "—"}
-                </span>
-                <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge>
-                <span>
-                  {canEdit && c.is_active &&
-                    (confirmingId === c.id ? (
-                      <span className="flex gap-2">
-                        <Button size="sm" variant="primary" onClick={() => { setConfirmingId(null); onDeactivate(c); }}>Confirm</Button>
-                        <Button size="sm" variant="ghost" onClick={() => setConfirmingId(null)}>Keep</Button>
-                      </span>
-                    ) : (
-                      <Button size="sm" variant="ghost" onClick={() => setConfirmingId(c.id)}>
-                        <UserX /> Deactivate
-                      </Button>
-                    ))}
-                </span>
+                  <span className="text-sm font-semibold text-sage-300">
+                    {c.payout_method}
+                    {c.iban_last4 ? ` · IBAN …${c.iban_last4}` : c.account_last4 ? ` · acct …${c.account_last4}` : ""}
+                    {c.swift_code ? ` · ${c.swift_code}` : ""}
+                  </span>
+                  <span className="font-display font-semibold tabular-nums text-sand-100 lg:text-right">
+                    {c.default_amount ? formatMoney(c.default_amount, c.currency) : "—"}
+                  </span>
+                  <Badge tone={c.is_active ? "success" : "neutral"}>{c.is_active ? "Active" : "Inactive"}</Badge>
+                  <span>
+                    {canEdit && c.is_active &&
+                      (confirmingId === c.id ? (
+                        <span className="flex gap-2">
+                          <Button size="sm" variant="primary" onClick={() => { setConfirmingId(null); onDeactivate(c); }}>Confirm</Button>
+                          <Button size="sm" variant="ghost" onClick={() => setConfirmingId(null)}>Keep</Button>
+                        </span>
+                      ) : (
+                        <Button size="sm" variant="ghost" onClick={() => setConfirmingId(c.id)}>
+                          <UserX /> Deactivate
+                        </Button>
+                      ))}
+                  </span>
+                </div>
+                {c.is_active && (
+                  <div className="flex flex-wrap gap-2 px-5 pb-4">
+                    {c.bank_verification_status === "PENDING_VERIFICATION" && canVerify && (
+                      <Button size="sm" variant="sage" onClick={() => setVerifying(c)}><ShieldCheck /> Verify bank change</Button>
+                    )}
+                    {canEdit && <Button size="sm" variant="outline" onClick={() => toggle(c.id, "edit")}><Pencil /> Edit</Button>}
+                    {canEdit && <Button size="sm" variant="outline" onClick={() => toggle(c.id, "link")}><Link2 /> Onboarding link</Button>}
+                    <Button size="sm" variant="ghost" onClick={() => toggle(c.id, "history")}><History /> History</Button>
+                  </div>
+                )}
+                {panel?.id === c.id && (
+                  <div className="px-3 pb-4 sm:px-5">
+                    {panel.kind === "edit" && (
+                      <EditContractorPanel employerId={employer.id} contractor={c} onClose={() => setPanel(null)}
+                        onSaved={(updated, note) => { setPanel(null); onUpdated(updated, note); }} />
+                    )}
+                    {panel.kind === "link" && <OnboardingLinkPanel employerId={employer.id} contractor={c} onClose={() => setPanel(null)} />}
+                    {panel.kind === "history" && <HistoryPanel employerId={employer.id} contractor={c} onClose={() => setPanel(null)} />}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
         </div>
+      )}
+      {verifying && session && (
+        <VerifyBankDialog
+          employerId={employer.id} contractor={verifying} currentUserId={session.user.id}
+          onClose={() => setVerifying(null)}
+          onVerified={(c) => { setVerifying(null); onUpdated(c, `Bank details for ${c.full_name} verified.`); }}
+        />
       )}
     </section>
   );

@@ -53,6 +53,7 @@ from ...services.contractor_trust import (
     ytd_paid,
 )
 from ...services.runtime import PlatformRuntime
+from ...services.trust_notify import notify
 from ..deps import APPROVER_ROLES, EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, get_settings, require_roles
 from ..schemas import ContractorIn, ContractorOut
 from ..serializers import contractor_out
@@ -206,6 +207,9 @@ def patch_contractor(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: Con
         _log(db, c, "bank", bank_change_summary(old_bank, new_bank), tenant.user.id)
         validation = BankValidationOut(**validate_bank(runtime, emp, c))
     db.commit()
+    if bank_changed:  # approvers get a "confirm with the contractor by callback" request
+        notify("bank_change_callback_request", to_email=None, organization_id=c.organization_id,
+               context={"contractor_id": str(c.id), "employer": emp.name})
     return ContractorPatchOut(contractor=contractor_out(c), bank_change_pending=c.bank_verification_status == "PENDING_VERIFICATION",
                               bank_validation=validation)
 
@@ -295,6 +299,8 @@ def create_onboarding_link(employer_id: uuid.UUID, contractor_id: uuid.UUID,
     db.add(inv)
     _log(db, c, "onboarding", f"Onboarding link created (valid {INVITE_TTL_DAYS} days)", tenant.user.id)
     db.commit()
+    notify("contractor_onboarding_link", to_email=c.email, organization_id=c.organization_id,
+           context={"invite_path": f"/onboard/{token}", "contractor": c.full_name, "employer": emp.name})
     return _invite_out(inv, token)
 
 

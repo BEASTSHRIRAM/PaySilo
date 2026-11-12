@@ -536,3 +536,81 @@ export const v3Downloads = {
 // Pages in this lane import { api } for the pre-existing calls above and
 // { apiV3 } for the calls in this section; the two are kept as separate
 // objects so this section stays append-only for the cross-lane merge.
+
+// ====================================================================== contractor trust (onboarding, tax, bank-change control)
+// Statuses and dates only - never tax ids, documents or full bank values.
+export type TaxStatus = "US_PERSON" | "NON_US" | "UNKNOWN";
+export type TaxFormType = "W9" | "W8BEN" | "W8BENE" | "NONE";
+export type TaxFormStatus = "MISSING" | "RECEIVED" | "EXPIRED";
+
+// Declaration merging: adds the trust fields to the existing Contractor type.
+export interface Contractor {
+  tax_status: TaxStatus; tax_form_type: TaxFormType; tax_form_status: TaxFormStatus;
+  tax_form_received_at: string | null; tax_form_expires_at: string | null;
+  bank_verification_status: "VERIFIED" | "PENDING_VERIFICATION";
+  bank_details_changed_at: string | null; bank_change_requested_by_id: string | null;
+  bank_verified_at: string | null; onboarded_at: string | null;
+}
+export interface BankValidation { valid: boolean; checked: boolean; errors: string[] }
+export interface ContractorPatch {
+  full_name?: string; email?: string | null; country?: string; currency?: string; payout_method?: "SWIFT" | "LOCAL";
+  iban?: string | null; swift_code?: string | null; account_number?: string | null; routing_code?: string | null;
+  default_amount?: string | null; tax_status?: TaxStatus; tax_form_type?: TaxFormType; tax_form_status?: TaxFormStatus;
+  tax_form_received_at?: string | null; tax_form_expires_at?: string | null;
+}
+export interface ContractorPatchResult { contractor: Contractor; bank_change_pending: boolean; bank_validation: BankValidation | null }
+export interface OnboardingLink {
+  id: string; invite_path: string | null; email: string | null; status: string; expires_at: string; created_at: string;
+}
+export interface ContractorHistory {
+  changes: { id: string; group: "bank" | "profile" | "tax" | "onboarding"; summary: string; changed_by: string | null; created_at: string }[];
+  payments: { run_id: string; period_label: string | null; amount: string; currency: string; status: string; created_at: string }[];
+  invites: OnboardingLink[];
+}
+export interface PayoutOption { key: string; currency: string; method: string; label: string; fields: string[] }
+export interface PublicOnboarding {
+  contractor_name: string; first_name: string; employer_name: string; agency_name: string; country: string;
+  payout_options: PayoutOption[]; expires_at: string;
+}
+export interface OnboardingSubmit {
+  option: string; country: string; iban?: string | null; swift_code?: string | null; account_number?: string | null;
+  routing_code?: string | null; tax_status: "US_PERSON" | "NON_US"; confirmed_accurate: boolean;
+}
+export interface ComplianceRow {
+  contractor_id: string; employer_id: string; employer_name: string; full_name: string; country: string;
+}
+export interface ComplianceOverview {
+  year: number; threshold_usd: string; disclaimer: string;
+  counts: { tax_forms: number; bank_pending: number; watch_1099: number; contractors: number };
+  tax_forms: (ComplianceRow & {
+    issue: "missing" | "expired" | "expiring_soon" | "status_unknown"; tax_status: TaxStatus; tax_form_type: TaxFormType;
+    tax_form_status: TaxFormStatus; tax_form_expires_at: string | null; days_to_expiry: number | null;
+  })[];
+  bank_pending: (ComplianceRow & { changed_at: string | null; age_hours: number | null; requested_by_id: string | null; requested_by: string | null })[];
+  watch_1099: (ComplianceRow & { paid_ytd_usd: string; payments: number; w9_on_file: boolean })[];
+  ytd: (ComplianceRow & {
+    tax_status: TaxStatus; tax_form_status: TaxFormStatus; tax_form_type: TaxFormType; paid_ytd_usd: string; payments: number;
+    paid_by_currency: Record<string, string>; unpriced_lines: number; over_1099_threshold: boolean;
+  })[];
+}
+
+const eid = encodeURIComponent;
+export const apiTrust = {
+  patchContractor: (employerId: string, contractorId: string, body: ContractorPatch) =>
+    request<ContractorPatchResult>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  bankCheck: (employerId: string, contractorId: string) =>
+    request<BankValidation>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}/bank-check`),
+  verifyBank: (employerId: string, contractorId: string) =>
+    post<Contractor>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}/verify-bank`, { callback_confirmed: true }),
+  createOnboardingLink: (employerId: string, contractorId: string) =>
+    post<OnboardingLink>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}/onboarding-link`),
+  revokeOnboardingLink: (employerId: string, contractorId: string, inviteId: string) =>
+    post<OnboardingLink>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}/onboarding-link/${eid(inviteId)}/revoke`),
+  history: (employerId: string, contractorId: string) =>
+    request<ContractorHistory>(`/employers/${eid(employerId)}/contractors/${eid(contractorId)}/history`),
+  onboardingInfo: (token: string) => request<PublicOnboarding>(`/onboarding/${eid(token)}`),
+  onboardingSubmit: (token: string, body: OnboardingSubmit) =>
+    post<{ status: string; message: string }>(`/onboarding/${eid(token)}/submit`, body),
+  complianceOverview: () => request<ComplianceOverview>("/compliance/overview"),
+};
+export const trustDownloads = { complianceYtdCsv: "/api/compliance/ytd.csv" };
