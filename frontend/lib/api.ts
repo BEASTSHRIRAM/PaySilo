@@ -688,6 +688,7 @@ export const apiFunding = {
     return request<NotificationList>(`/notifications${qs ? `?${qs}` : ""}`);
   },
   statementCsvUrl: (employerId: string) => `/api/employers/${encodeURIComponent(employerId)}/funding-statement?format=csv`,
+};
 
 // ====================================================================== proof of payment
 export interface PaymentTrace {
