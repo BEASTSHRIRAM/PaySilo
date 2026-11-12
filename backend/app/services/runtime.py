@@ -81,6 +81,16 @@ class RuntimeConflict(Exception):
     """A request that is valid in shape but not in the run's current state."""
 
 
+class HeldLineUnavailable(Exception):
+    """A held line cannot be paid as recorded (contractor deleted, deactivated or re-denominated)."""
+
+
+# A "pay held lines" continuation that ended in one of these moved no money and holds nothing,
+# so it does not block another attempt. (FAILED is retried via /retry; anything else is open or paid.)
+CONTINUATION_NON_BLOCKING = {"REFUSED", "HELD_SHORTFALL", "HELD_BY_HUMAN", "APPROVAL_REJECTED"}
+CONTINUABLE = {"PARTIALLY_PAID", "HELD_SHORTFALL"}
+
+
 def _namespace(account: str) -> str:
     return account.split(":", 1)[0]
 
@@ -302,6 +312,8 @@ class PlatformRuntime:
     def ensure_account(self, s: Session, employer: Employer) -> Employer:
         """Create + activate the employer's own connected account (its silo)."""
         if employer.airwallex_account_id:
+            if not employer.airwallex_global_account_id:
+                self._ensure_global_account(s, employer)  # account predates global accounts
             return employer
         with self.lock:
             account = self.recorder.create_connected_account(
@@ -313,7 +325,25 @@ class PlatformRuntime:
                 self._onboard_live_account(employer, account.get("status"))
             employer.status = "ACTIVE"
             self._flush_calls(s, employer.organization_id, employer.id, None)
+        self._ensure_global_account(s, employer)
         return employer
+
+    def _ensure_global_account(self, s: Session, employer: Employer) -> str:
+        """Give the employer its own funding (global) account; deposits land here.
+
+        The request id is deterministic, so a retry returns the same account.
+        """
+        if employer.airwallex_global_account_id:
+            return employer.airwallex_global_account_id
+        with self.lock:
+            ga = self.recorder.create_global_account(
+                request_id=request_id_for(str(employer.id), f"global-account:{employer.funding_currency}"),
+                account_id=employer.airwallex_account_id, currency=employer.funding_currency,
+                country_code="US" if employer.funding_currency == "USD" else (employer.country or "US"),
+                nick_name=f"{employer.name} {employer.funding_currency}"[:60])
+            employer.airwallex_global_account_id = ga["id"]
+            self._flush_calls(s, employer.organization_id, employer.id, None)
+        return employer.airwallex_global_account_id
 
     def _onboard_live_account(self, employer: Employer, account_status: str | None = None) -> None:
         """Onboard a live connected account and force it to ACTIVE.
@@ -361,7 +391,8 @@ class PlatformRuntime:
         with self.lock:
             self.recorder.deposit(request_id=request_id,
                                   account_id=employer.airwallex_account_id, amount=amount,
-                                  currency=employer.funding_currency)
+                                  currency=employer.funding_currency,
+                                  global_account_id=employer.airwallex_global_account_id or "")
             self.ledger.post([(f"{employer.ledger_key}:cash:{employer.funding_currency}", amount),
                               (f"external:bank:{employer.funding_currency}", -amount)],
                              memo=f"deposit {reference}")
@@ -418,11 +449,112 @@ class PlatformRuntime:
             return self._start_run_locked(s, org=org, user=user, employer=employer, pay_lines=pay_lines,
                                           raw_input=raw_input, source=source, period_label=period_label)
 
+    # ------------------------------------------------------- held lines
+    @staticmethod
+    def held_pay_lines(run: PayrollRun) -> list[PayLine]:
+        return [pl for pl in sorted(run.pay_lines, key=lambda p: p.position) if pl.status == "HELD"]
+
+    def continuations_of(self, s: Session, run: PayrollRun) -> list[PayrollRun]:
+        """Runs that continue ``run`` (same organization), newest first."""
+        return list(s.scalars(select(PayrollRun)
+                              .where(PayrollRun.parent_run_id == run.id,
+                                     PayrollRun.organization_id == run.organization_id)
+                              .order_by(PayrollRun.created_at.desc())))
+
+    def run_fee_collected(self, s: Session, run: PayrollRun) -> bool:
+        """True when the run fee was already collected on ``run`` or any run up its parent chain."""
+        seen: set[uuid.UUID] = set()
+        current: PayrollRun | None = run
+        while current is not None and current.id not in seen:
+            if current.fee_charged_usd and current.fee_charged_usd > 0:
+                return True
+            seen.add(current.id)
+            current = (s.scalar(select(PayrollRun).where(PayrollRun.id == current.parent_run_id,
+                                                         PayrollRun.organization_id == run.organization_id))
+                       if current.parent_run_id else None)
+        return False
+
+    def pay_held_blocker(self, s: Session, run: PayrollRun) -> str | None:
+        """Why ``run``'s held lines cannot be paid right now (None when they can). Role-independent."""
+        held = self.held_pay_lines(run)
+        if run.status not in CONTINUABLE:
+            return (f"Only a partially paid or held-for-shortfall run has held lines to pay; this run is "
+                    f"{run.status}.")
+        if not held:
+            return "This run has no held lines to pay."
+        if run.employer.status != "ACTIVE":
+            return f"{run.employer.name} is not active."
+        for cont in self.continuations_of(s, run):
+            if cont.status in CONTINUATION_NON_BLOCKING:
+                continue
+            if cont.status == "RESERVED" and cont.pending_interrupt is not None and not self.is_resumable(cont):
+                continue  # paused before a restart and lost: holds nothing
+            if cont.status == "FAILED":
+                return (f"The continuation (run {str(cont.id)[:8]}) failed part-way; retry that run "
+                        "instead of starting another.")
+            return (f"Held lines of this run are already being paid or were paid by run "
+                    f"{str(cont.id)[:8]} ({cont.status}).")
+        ids = [pl.contractor_id for pl in held if pl.contractor_id]
+        if ids:
+            later = s.execute(
+                select(PayLine.beneficiary_name)
+                .join(PayrollRun, PayLine.run_id == PayrollRun.id)
+                .where(PayrollRun.employer_id == run.employer_id,
+                       PayrollRun.organization_id == run.organization_id,
+                       PayrollRun.created_at > run.created_at, PayrollRun.id != run.id,
+                       PayLine.status == "PAID", PayLine.contractor_id.in_(ids))).scalars().all()
+            if later:
+                names = ", ".join(sorted(set(later)))
+                return (f"A later payroll already paid {names}; paying the held line would pay them "
+                        "twice. Start a normal run instead.")
+        return None
+
+    def _continuation_lines(self, s: Session, run: PayrollRun) -> list[dict]:
+        """Rebuild the held lines from the CURRENT contractor records (corrected bank details count)."""
+        lines, problems = [], []
+        for pl in self.held_pay_lines(run):
+            c = (s.scalar(select(Contractor).where(Contractor.id == pl.contractor_id,
+                                                   Contractor.employer_id == run.employer_id))
+                 if pl.contractor_id else None)
+            if c is None:
+                problems.append(f"{pl.beneficiary_name} is no longer a contractor of {run.employer.name}")
+            elif not c.is_active:
+                problems.append(f"{c.full_name} is deactivated")
+            elif c.currency != pl.currency:
+                problems.append(f"{c.full_name} is now paid in {c.currency}, not {pl.currency}")
+            else:
+                lines.append(self.contractor_line(c, pl.amount))
+        if problems:
+            raise HeldLineUnavailable(
+                "Cannot pay the held lines: " + "; ".join(problems) + ". Fix the contractor or start a new run.")
+        return lines
+
+    def start_continuation(self, s: Session, *, org: Organization, user: User, run: PayrollRun) -> PayrollRun:
+        """Start a NEW run that pays only ``run``'s HELD lines (the original is never touched).
+
+        Goes through the same pricing -> TAP-approval -> payout path as any run. The run fee is waived
+        when it was already collected up the parent chain.
+        """
+        employer = run.employer
+        self.ensure_account(s, employer)
+        with self.lock:
+            reason = self.pay_held_blocker(s, run)
+            if reason:
+                raise RuntimeConflict(reason)
+            lines = self._continuation_lines(s, run)
+            self._reject_if_open_run(s, employer)
+            return self._start_run_locked(
+                s, org=org, user=user, employer=employer, pay_lines=lines, raw_input=None,
+                source="continuation", period_label=run.period_label, parent_run_id=run.id,
+                waive_run_fee=self.run_fee_collected(s, run))
+
     def _start_run_locked(self, s: Session, *, org: Organization, user: User, employer: Employer,
                           pay_lines: list[dict] | None, raw_input: str | None, source: str,
-                          period_label: str | None) -> PayrollRun:
+                          period_label: str | None, parent_run_id: uuid.UUID | None = None,
+                          waive_run_fee: bool = False) -> PayrollRun:
         run = PayrollRun(organization_id=org.id, employer_id=employer.id, created_by_id=user.id,
-                         source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED")
+                         source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED",
+                         parent_run_id=parent_run_id)
         s.add(run)
         s.flush()
         directory = [
@@ -434,7 +566,8 @@ class PlatformRuntime:
         state = initial_state(
             run_id=str(run.id), employer_key=employer.ledger_key, employer_name=employer.name,
             contact_name=employer.contact_name or "", funding_usd="0", pay_lines=pay_lines or [],
-            raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory)
+            raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory,
+            parent_run_id=str(parent_run_id) if parent_run_id else None, waive_run_fee=waive_run_fee)
         with self.lock:
             config = {"configurable": {"thread_id": str(run.id)}}
             self._live_threads.add(str(run.id))

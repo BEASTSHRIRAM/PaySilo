@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ...db.models import PayrollRun
-from ...services.runtime import PlatformRuntime, RuntimeConflict
+from ...services.runtime import HeldLineUnavailable, PlatformRuntime, RuntimeConflict
 from ..deps import APPROVER_ROLES, EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
 from ..schemas import DecisionIn, RunDetailOut, RunIn, RunOut
 from ..serializers import run_detail_out, run_out
@@ -75,6 +75,27 @@ def start_run(body: RunIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES))
     return run_detail_out(db, runtime, load_run(db, tenant, run.id))
 
 
+@router.post("/{run_id}/pay-held", response_model=RunDetailOut, status_code=status.HTTP_201_CREATED)
+def pay_held(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+             db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """Start a NEW run that pays only this run's HELD lines from the employer's own wallet.
+
+    The new run is linked to this one (``parent_run_id``), priced and approved like any run (it waits
+    for a TAP-signed human decision), and never touches the contractors this run already paid.
+    """
+    parent = load_run(db, tenant, run_id)  # org-scoped: another organization's run is a 404
+    try:
+        run = runtime.start_continuation(db, org=tenant.organization, user=tenant.user, run=parent)
+    except RuntimeConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    except HeldLineUnavailable as exc:
+        db.rollback()
+        raise HTTPException(422, str(exc)) from None
+    db.expire_all()
+    return run_detail_out(db, runtime, load_run(db, tenant, run.id))
+
+
 @router.get("/{run_id}", response_model=RunDetailOut)
 def get_run(run_id: uuid.UUID, tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db),
             runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
@@ -88,6 +109,22 @@ def decide(run_id: uuid.UUID, body: DecisionIn, tenant: Tenant = Depends(require
     try:
         runtime.decide(db, run=run, employer=run.employer, user=tenant.user, decision=body.decision)
     except RuntimeConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    db.expire_all()
+    return run_detail_out(db, runtime, load_run(db, tenant, run_id))
+
+
+@router.post("/{run_id}/retry", response_model=RunDetailOut)
+def retry(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+          db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """Resume a FAILED run from its checkpoint. Completed payouts are skipped and every
+    money call reuses its request_id, so nobody is paid twice."""
+    run = load_run(db, tenant, run_id)
+    if run.status != "FAILED":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a failed run can be retried.")
+    try:
+        runtime.resume_failed(db, run=run, employer=run.employer)
+    except (RuntimeConflict, ValueError) as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run_id))

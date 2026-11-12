@@ -102,6 +102,9 @@ class PayrollAssessment:
     available_usd: Decimal
     shortfall_usd: Decimal  # vs required_usd + reserve floor
     can_run: bool
+    # True when the run fee was already collected on the original payroll (a
+    # continuation run): ``platform_fee_usd`` is then zero by design.
+    run_fee_waived: bool = False
 
 
 def _rate(usd_value: dict[str, Decimal], currency: str, where: str) -> Decimal:
@@ -118,8 +121,13 @@ def assess_payroll(
     usd_value: dict[str, Decimal],
     employer_balance: dict[str, Decimal],
     policy: PayrollPolicy = PAYROLL_POLICY,
+    waive_run_fee: bool = False,
 ) -> PayrollAssessment:
     """Price payroll fees-first and decide affordability from ONE wallet.
+
+    ``waive_run_fee`` is for a continuation run whose payroll already paid the
+    run fee: the fee is neither priced nor required again (the reserve floor
+    and payout fees still are).
 
     Only ``employer_balance`` — that employer's own wallet — is consulted.
     There is deliberately no parameter for "platform total": the aggregated
@@ -166,7 +174,7 @@ def assess_payroll(
         available += amount * _rate(usd_value, currency, "in the employer wallet")
     available_usd = round_money(available)
 
-    platform_fee = round_money(policy.platform_fee_per_run_usd) if requirements else ZERO
+    platform_fee = round_money(policy.platform_fee_per_run_usd) if requirements and not waive_run_fee else ZERO
     required_usd = round_money(payroll_usd + platform_fee)
     needed_usd = round_money(required_usd + policy.reserve_floor_usd) if requirements else ZERO
     shortfall_usd = round_money(max(Decimal("0"), needed_usd - available_usd))
@@ -183,6 +191,7 @@ def assess_payroll(
         available_usd=available_usd,
         shortfall_usd=shortfall_usd,
         can_run=bool(requirements) and shortfall_usd == 0,
+        run_fee_waived=bool(waive_run_fee),
     )
 
 
@@ -207,6 +216,7 @@ def plan_partial_payout(
     usd_value: dict[str, Decimal],
     employer_balance: dict[str, Decimal],
     policy: PayrollPolicy = PAYROLL_POLICY,
+    waive_run_fee: bool = False,
 ) -> PartialPayoutPlan | None:
     """Kit 6 shortfall rule: pay what the employer's own balance supports.
 
@@ -216,7 +226,7 @@ def plan_partial_payout(
     batch is affordable (nothing to split) or when not even the smallest
     line fits (hold everything). Only ``employer_balance`` is consulted.
     """
-    full = assess_payroll(contractors, usd_value, employer_balance, policy)
+    full = assess_payroll(contractors, usd_value, employer_balance, policy, waive_run_fee=waive_run_fee)
     if full.can_run or not contractors:
         return None
     cost: dict[int, Decimal] = {}
@@ -225,7 +235,8 @@ def plan_partial_payout(
         line_total = to_decimal(c.amount) + policy.payout_fee(ccy, c.method)
         cost[i] = line_total * _rate(usd_value, ccy, "for payroll")
     order = sorted(range(len(contractors)), key=lambda i: (cost[i], i))
-    budget = full.available_usd - policy.platform_fee_per_run_usd - policy.reserve_floor_usd
+    run_fee = ZERO if waive_run_fee else policy.platform_fee_per_run_usd
+    budget = full.available_usd - run_fee - policy.reserve_floor_usd
     chosen: list[int] = []
     spent = Decimal("0")
     for i in order:
@@ -237,7 +248,8 @@ def plan_partial_payout(
     # verify with the real assessment and drop the largest line until it fits.
     while chosen:
         paid = sorted(chosen)
-        assessment = assess_payroll([contractors[i] for i in paid], usd_value, employer_balance, policy)
+        assessment = assess_payroll([contractors[i] for i in paid], usd_value, employer_balance, policy,
+                                    waive_run_fee=waive_run_fee)
         if assessment.can_run:
             held = tuple(i for i in range(len(contractors)) if i not in paid)
             return PartialPayoutPlan(paid=tuple(paid), held=held, assessment=assessment, full=full)

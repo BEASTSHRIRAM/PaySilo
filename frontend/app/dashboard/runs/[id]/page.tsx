@@ -14,7 +14,7 @@ import { Card } from "@/components/ui/card";
 import { api, ApiError, type RunDetail, type Session } from "@/lib/api";
 import { TimelineReveal } from "@/lib/gsap-anim";
 import { useDataChanged } from "@/lib/events";
-import { runStatusInfo, DECIDER_ROLES } from "@/lib/status";
+import { runStatusInfo, DECIDER_ROLES, RUN_STARTER_ROLES } from "@/lib/status";
 
 const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong. Try again.");
 
@@ -65,6 +65,7 @@ export default function RunPage() {
   });
 
   const canDecide = !!session && DECIDER_ROLES.includes(session.role);
+  const canPayHeld = !!session && RUN_STARTER_ROLES.includes(session.role);
 
   return (
     <div className="min-h-dvh pb-16">
@@ -113,7 +114,7 @@ export default function RunPage() {
             )}
 
             <Card className="p-5 sm:p-6">
-              <RunPanel key={run.id} run={run} canDecide={canDecide} onChange={setRun} />
+              <RunPanel key={run.id} run={run} canDecide={canDecide} canPayHeld={canPayHeld} onChange={setRun} />
             </Card>
 
             {run.approvals.length > 0 && (

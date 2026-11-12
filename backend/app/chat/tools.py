@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..db.models import Employer, PayrollRun
 from ..money import money_str, to_decimal
-from ..services.runtime import PlatformRuntime, RuntimeConflict
+from ..services.runtime import CONTINUABLE, HeldLineUnavailable, PlatformRuntime, RuntimeConflict
 
 EDITOR_ROLES = {"owner", "admin"}
 
@@ -138,9 +138,11 @@ def approval_payload(run: PayrollRun) -> dict:
         summary = (f"{run.employer.name} is held: payroll is short by {fmt_usd(a.get('shortfall_usd', '0'))}. "
                    "It can only be held — fund the employer's own wallet, then start a new run.")
     else:
-        summary = (f"{run.employer.name} payroll of {fmt_usd(a.get('required_usd', '0'))} (including the "
-                   f"{fmt_usd(a.get('platform_fee_usd', '149'))} run fee) is ready and waiting for a "
-                   "TAP-signed human approval. Approving happens on the run, not in chat.")
+        fee = ("no run fee: already collected on the original payroll" if a.get("run_fee_waived")
+               else f"including the {fmt_usd(a.get('platform_fee_usd', '149'))} run fee")
+        kind = "continuation payroll (held lines only)" if run.parent_run_id else "payroll"
+        summary = (f"{run.employer.name} {kind} of {fmt_usd(a.get('required_usd', '0'))} ({fee}) is ready and "
+                   "waiting for a TAP-signed human approval. Approving happens on the run, not in chat.")
     return {"run_id": str(run.id), "employer_id": str(run.employer_id),
             "employer_name": run.employer.name, "summary": summary}
 
@@ -295,6 +297,53 @@ def start_payroll_run(ctx: ChatContext, employer: str | None = None) -> ToolResu
     if approval:
         text += " The run is paused for a human decision — chat cannot approve it."
     return ToolResult(text, approval=approval, data={"run_id": str(run.id), "status": run.status})
+
+
+def pay_held_lines(ctx: ChatContext, employer: str | None = None, run_id: str | None = None) -> ToolResult:
+    """Start a continuation run that pays only a run's HELD lines. Like ``start_payroll_run`` it PAUSES
+    for a human TAP-signed approval; chat cannot approve or move money."""
+    if ctx.role not in EDITOR_ROLES:
+        return ToolResult(f"Your role ({ctx.role}) cannot start payroll runs, so it cannot pay held lines.")
+    emp = resolve_employer(ctx, employer)
+    if emp is None:
+        if employer:
+            return employer_not_resolved(ctx, employer)
+        return ToolResult("Which employer's held lines should I pay? Name one of this organization's employers.")
+    if emp.status != "ACTIVE":
+        return ToolResult(f"{emp.name} is not active, so its held lines cannot be paid.")
+    parent = resolve_run(ctx, run_id) if (run_id or not employer) else None
+    if parent is not None and parent.employer_id != emp.id:
+        parent = None  # a run reference from another employer's page never redirects the named employer
+    if parent is None:
+        runs = list(ctx.db.scalars(
+            select(PayrollRun).options(selectinload(PayrollRun.employer), selectinload(PayrollRun.pay_lines))
+            .where(PayrollRun.organization_id == ctx.organization_id, PayrollRun.employer_id == emp.id,
+                   PayrollRun.status.in_(CONTINUABLE)).order_by(PayrollRun.created_at.desc())))
+        parent = next((r for r in runs if ctx.runtime.pay_held_blocker(ctx.db, r) is None),
+                      runs[0] if runs else None)
+        if parent is None:
+            return ToolResult(f"{emp.name} has no held lines to pay: no run is partially paid or held for a "
+                              "shortfall.", data={"employer_name": emp.name, "started": False})
+    from ..db.models import Organization, User
+
+    org = ctx.db.get(Organization, ctx.organization_id)
+    user = ctx.db.get(User, ctx.user_id)
+    try:
+        run = ctx.runtime.start_continuation(ctx.db, org=org, user=user, run=parent)
+    except (RuntimeConflict, HeldLineUnavailable) as exc:
+        ctx.db.rollback()
+        return ToolResult(f"I did not start it: {exc}", data={"employer_name": emp.name, "started": False})
+    ctx.db.expire_all()
+    run = resolve_run(ctx, str(run.id))
+    text = (f"Started a continuation run for {emp.name} (run {str(run.id)[:8]}, continuing run "
+            f"{str(parent.id)[:8]}). It pays only the held lines from {emp.name}'s own wallet; anyone already "
+            f"paid is not paid again. It is now {run.status}. "
+            + (explain_run(ctx, str(run.id)).text if run.assessment else ""))
+    approval = approval_payload(run) if run.pending_interrupt else None
+    if approval:
+        text += " The run is paused for a human decision — chat cannot approve it."
+    return ToolResult(text, approval=approval, data={"run_id": str(run.id), "status": run.status,
+                                                     "parent_run_id": str(parent.id), "started": True})
 
 
 def demo_fund_employer(ctx: ChatContext, employer: str | None = None, amount: str | None = None) -> ToolResult:
@@ -604,6 +653,7 @@ TOOL_LABELS = {
     "explain_run": "Explaining a payroll run",
     "get_run_timeline": "Reading the run timeline",
     "start_payroll_run": "Starting a payroll run",
+    "pay_held_lines": "Paying held lines in a continuation run (pauses for human approval)",
     "demo_fund_employer": "Funding an employer wallet (demo)",
     "request_approval": "Requesting a human approval",
     "read_benefits": "Reading Silo Benefits budgets and requests",
@@ -634,6 +684,7 @@ TOOL_FUNCTIONS = {
     "explain_run": explain_run,
     "get_run_timeline": get_run_timeline,
     "start_payroll_run": start_payroll_run,
+    "pay_held_lines": pay_held_lines,
     "demo_fund_employer": demo_fund_employer,
     "request_approval": request_approval,
     "read_benefits": read_benefits,

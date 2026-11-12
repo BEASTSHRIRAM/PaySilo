@@ -76,3 +76,5 @@ export const TERMINAL_RUN_STATUSES = new Set([
 
 export const DECIDER_ROLES = ["owner", "admin", "approver"];
 export const EDITOR_ROLES = ["owner", "admin", "editor"];
+/** Who may start a run (and so "Pay held lines"): mirrors the backend's owner/admin editor roles. */
+export const RUN_STARTER_ROLES = ["owner", "admin"];

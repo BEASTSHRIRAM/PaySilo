@@ -67,7 +67,9 @@ SYSTEM_PROMPT = (
     "and you must never ask for or invent another organization's data. Amounts and statuses must "
     "come from tool results, never from memory. You cannot approve a payroll run or move money: "
     "approvals are TAP-signed human decisions on the run itself. If a run is waiting, use "
-    "request_approval to surface it. For Silo Benefits, read_benefits is read-only and "
+    "request_approval to surface it. When a payroll ended partially paid or held, pay_held_lines starts a "
+    "continuation run for only the held contractors (like start_payroll_run it pauses for a human "
+    "TAP-signed approval; anyone already paid is never paid again). For Silo Benefits, read_benefits is read-only and "
     "propose_benefit_purchase only creates a REQUESTED benefit request for a human approver "
     "in the Benefits screen: you cannot approve or purchase benefits, and must never imply "
     "that you did. Keep answers concise and in plain English."
@@ -97,7 +99,7 @@ _AMOUNT_RE = re.compile(r"(?:USD\s*)?\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.
 
 _HELP_INTRO = (
     "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
-    "(including exactly why a payroll is held), show a run's timeline, start a run — which "
+    "(including exactly why a payroll is held), show a run's timeline, start a run or pay a run's held lines — which "
     "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
     "own wallet. I can also read Silo Benefits budgets and recent benefit requests, and "
     "propose a benefit purchase — which only creates a request that a human must approve "
@@ -360,6 +362,9 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
     employer_ref = _employer_ref_in(ctx, message) or context.get("employer_name")
     run_ref = context.get("run_id")
 
+    if re.search(r"\bpay\b", text) and re.search(r"\bheld\b", text) and "why" not in text:
+        return ([("pay_held_lines", {"employer": employer_ref, "run_id": run_ref})],
+                "Matched the pay-held-lines intent (a continuation run that pauses for human approval)", None)
     if "benefit" in text:
         _emp_match, worker_match = _contractor_ref_in(ctx, message)
         is_proposal = (

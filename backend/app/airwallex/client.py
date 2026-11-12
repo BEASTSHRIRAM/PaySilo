@@ -46,6 +46,12 @@ import httpx
 from ..config import Settings, load_settings
 from ..money import round_money, to_decimal
 
+# SANDBOX-ONLY placeholder postcodes for payee addresses PaySilo does not collect.
+SANDBOX_PLACEHOLDER_POSTCODES = {"DE": "10115", "US": "10001", "GB": "SW1A 1AA", "FR": "75001",
+                                 "NL": "1012 AB", "ES": "28001", "IT": "00100", "IE": "D01 F5P2"}
+# Countries whose payee address needs a state/province (live-verified: US, ES —
+# "beneficiary.address.state" validation_failed without it). Sandbox placeholders.
+SANDBOX_PLACEHOLDER_STATES = {"US": "NY", "ES": "Madrid"}
 DUPLICATE_CODES = {"request_id_duplicate", "duplicate_request_id"}
 
 
@@ -69,7 +75,15 @@ def _body_json(resp: httpx.Response) -> dict | list | None:
 def _is_duplicate(status_code: int, body: dict | list | None) -> bool:
     if status_code == 409:
         return True
-    return isinstance(body, dict) and body.get("code") in DUPLICATE_CODES
+    if not isinstance(body, dict):
+        return False
+    if body.get("code") in DUPLICATE_CODES:
+        return True
+    # Live-verified for FX conversions: a reused request_id is HTTP 400
+    # invalid_argument "request_id '...' has been used in the past".
+    return (body.get("code") == "invalid_argument"
+            and "request_id" in str(body.get("message", ""))
+            and "used in the past" in str(body.get("message", "")))
 
 
 class AirwallexClient:
@@ -190,7 +204,7 @@ class AirwallexClient:
     def _request(self, method: str, path: str, *, on_behalf_of: str | None = None,
                  json: dict | None = None, params: dict | None = None,
                  request_id: str | None = None, duplicate_item_path: str | None = None,
-                 duplicate_collection: str | None = None) -> dict | list:
+                 duplicate_collection: str | None = None, retry: bool = True) -> dict | list:
         """One API call, with idempotent retries on transient failures.
 
         A retry re-sends the *identical* payload, including the caller's
@@ -199,7 +213,7 @@ class AirwallexClient:
         duplicate response is never retried: the original resource is
         fetched and returned instead (see ``_recover_duplicate``).
         """
-        attempts = 3 if method.upper() == "POST" else 1
+        attempts = 3 if (method.upper() == "POST" and retry) else 1
         resp: httpx.Response | None = None
         rate_limit_tries = 0
         fee_wait_total = 0.0
@@ -259,6 +273,12 @@ class AirwallexClient:
             )
         code = body.get("code") if isinstance(body, dict) else None
         message = body.get("message") if isinstance(body, dict) else None
+        details = body.get("details") if isinstance(body, dict) else None
+        errors = details.get("errors") if isinstance(details, dict) else None
+        if isinstance(errors, list) and errors:  # name the offending fields (no values)
+            fields = ", ".join(str(e.get("source")) for e in errors if isinstance(e, dict) and e.get("source"))
+            if fields:
+                message = f"{message or 'validation failed'} [fields: {fields}]"
         raise AirwallexError(
             f"{method} {path} failed (HTTP {resp.status_code}"
             + (f", code={code}" if code else "")
@@ -288,30 +308,57 @@ class AirwallexClient:
         if not ein:
             digits = "".join(c for c in str(int(uuid.uuid5(uuid.NAMESPACE_URL, request_id).int)) if c.isdigit())
             ein = f"{digits[:2]}-{digits[2:9]}"
-        first, _, last = (contact_name or business_name).strip().partition(" ")
-        details: dict = {
-            "business_details": {
-                "business_name": business_name,
-                # array[string] per the Accounts API (a bare string is rejected with invalid_argument)
-                "operating_country": [country_code],
-                "business_identifiers": [{"country_code": country_code, "number": ein, "type": "EIN"}],
-            },
-            "business_person_details": [{"first_name": first or business_name,
-                                         "last_name": last or first or business_name,
-                                         "roles": ["AUTHORISED_PERSON"]}],
-        }
         if not email:
             # The live API rejects account creation without a primary contact
             # (400 field_required: primary_contact), although the docs mark it optional.
             raise AirwallexError("Airwallex needs a primary contact for a connected account: "
                                  "add the employer's contact email and try again.")
-        create_payload: dict = {"account_details": details, "primary_contact": {"email": email}}
+        first, _, last = (contact_name or business_name).strip().partition(" ")
+        first, last = first or business_name, last or first or business_name
+        # SANDBOX-ONLY placeholders: PaySilo does not collect KYB data, but the live
+        # API will not activate an account without a full business + person profile.
+        # Every value below other than the employer's own name/contact is synthetic
+        # and must be replaced by real onboarding data before production.
+        address = {"address_line1": "100 Market St", "suburb": "San Francisco", "state": "CA",
+                   "postcode": "94105", "country_code": country_code}
+        details: dict = {
+            "legal_entity_type": "BUSINESS",
+            "business_details": {
+                "business_name": business_name,
+                "business_structure": "COMPANY",
+                # array[string] per the Accounts API (a bare string is rejected with invalid_argument)
+                "operating_country": [country_code],
+                "registration_address": address,
+                "business_identifiers": [{"country_code": country_code, "number": ein, "type": "EIN"}],
+                "description_of_goods_or_services": "Contractor and payroll services",
+                "industry_category_code": "ICCV3_0813XX",  # from GET /reference/industry_categories
+                "account_usage": {
+                    "product_reference": ["RECEIVE_TRANSFERS", "CONVERT_FUNDS", "MAKE_TRANSFERS"],
+                    "estimated_monthly_revenue": {"amount": "50000", "currency": "USD"},
+                },
+            },
+            "business_person_details": [{
+                "first_name": first, "last_name": last,
+                "date_of_birth": "1985-04-12", "nationality": country_code,  # placeholder
+                "residential_address": address,
+                "roles": ["AUTHORISED_PERSON", "DIRECTOR", "BENEFICIAL_OWNER"],
+                "identifications": {"primary": {
+                    "identification_type": "PASSPORT", "issuing_country_code": country_code,
+                    "passport": {"number": "X12345678", "expire_at": "2031-01-01"}}},  # placeholder
+            }],
+        }
+        create_payload: dict = {
+            "account_details": details, "primary_contact": {"email": email},
+            "customer_agreements": {"agreed_to_data_usage": True,
+                                    "agreed_to_terms_and_conditions": True},
+        }
         created = self._request("POST", "/accounts/create", json=create_payload)
         account_id = created.get("id")
         if not account_id:
             raise AirwallexError("POST /accounts/create returned no account id.")
-        # Fill gaps: the update repeats the identifiers (full replacement lists).
-        self._request("POST", f"/accounts/{account_id}/update", json=create_payload)
+        # Live-verified: the update takes ONLY account_details (a business account
+        # cannot update primary_contact) and repeats the full details before submit.
+        self._request("POST", f"/accounts/{account_id}/update", json={"account_details": details})
         self._request("POST", f"/accounts/{account_id}/submit", json={})
         if confirm_wait_seconds:
             self._sleep(confirm_wait_seconds)  # the guide: wait ~2s after submit
@@ -368,14 +415,47 @@ class AirwallexClient:
         return self.get_balances(account_id=account_id).get(currency, Decimal("0.00"))
 
     # -- funding (sandbox simulation) ------------------------------------------
-    def deposit(self, *, request_id: str, account_id: str, amount: object, currency: str = "USD") -> dict:
+    def create_global_account(self, *, request_id: str, account_id: str, currency: str = "USD",
+                              country_code: str = "US", nick_name: str = "") -> dict:
+        """Open the employer's own receiving (global) account.
+
+        Live-verified: ``POST /global_accounts/create`` with ``x-on-behalf-of``;
+        ``required_features`` of one LOCAL ``currency`` returns 201 ACTIVE with
+        an ``id`` (uuid). Deposits are simulated into this id.
+        """
+        return self._request(
+            "POST", "/global_accounts/create", on_behalf_of=account_id,
+            json={"request_id": request_id, "country_code": country_code,
+                  "nick_name": nick_name or f"PaySilo {currency} wallet",
+                  "required_features": [{"currency": currency, "transfer_method": "LOCAL"}]},
+            request_id=request_id,
+            duplicate_item_path="/global_accounts/{id}",
+            duplicate_collection="/global_accounts",
+        )
+
+    def deposit(self, *, request_id: str, account_id: str, amount: object, currency: str = "USD",
+                global_account_id: str = "") -> dict:
+        """Simulate an inbound bank deposit (sandbox).
+
+        Live-verified: ``POST /simulation/deposit/create`` needs the target
+        ``global_account_id``; the deposit comes back PENDING but the amount is
+        already in the wallet's ``available_amount``. The deposit currency is
+        that of the global account (``currency`` is not sent). NOT idempotent.
+        """
+        if not global_account_id:
+            raise AirwallexError(
+                "deposit needs the employer's global_account_id (create one with "
+                "create_global_account first).")
         return self._request(
             "POST", "/simulation/deposit/create", on_behalf_of=account_id,
-            json={"request_id": request_id, "amount": str(round_money(to_decimal(amount))),
-                  "currency": currency},
-            request_id=request_id,
-            duplicate_item_path="/deposits/{id}",
-            duplicate_collection="/deposits",
+            json={"global_account_id": global_account_id,
+                  "amount": float(round_money(to_decimal(amount))),
+                  "payer_name": "PaySilo sandbox funding",
+                  "reference": request_id[:30]},
+            # Live-verified: this simulation endpoint IGNORES request_id (the same id
+            # twice created two deposits), so a blind retry would double-fund. Never
+            # retry here; the runtime's AirwallexRequest guard owns idempotency.
+            retry=False,
         )
 
     # -- FX ---------------------------------------------------------------------
@@ -385,7 +465,10 @@ class AirwallexClient:
             "POST", "/fx/quotes/create", on_behalf_of=on_behalf_of,
             json={"request_id": request_id, "sell_currency": sell_currency,
                   "buy_currency": buy_currency,
-                  "buy_amount": str(round_money(to_decimal(buy_amount)))},
+                  "buy_amount": str(round_money(to_decimal(buy_amount))),
+                  # Required by the live API. MIN_1 = quote valid for one minute;
+                  # PaySilo converts immediately after quoting.
+                  "validity": "MIN_1"},
             request_id=request_id,
             duplicate_item_path="/fx/quotes/{id}",
             duplicate_collection="/fx/quotes",
@@ -419,7 +502,8 @@ class AirwallexClient:
     def create_beneficiary(self, *, request_id: str, on_behalf_of: str, name: str,
                            currency: str = "EUR", country_code: str = "DE", method: str = "SWIFT",
                            iban: str = "", swift_code: str = "", account_number: str = "",
-                           routing_code: str = "") -> dict:
+                           routing_code: str = "", street_address: str = "", city: str = "",
+                           postcode: str = "", state: str = "") -> dict:
         bank_account: dict = {"account_name": name, "account_currency": currency,
                               "bank_country_code": country_code}
         if iban:
@@ -431,8 +515,26 @@ class AirwallexClient:
         if routing_code:
             bank_account["account_routing_type1"] = "aba" if currency == "USD" else "sort_code"
             bank_account["account_routing_value1"] = routing_code
+        if currency == "USD" and method == "LOCAL":
+            # Live-verified: US ACH payees need the account category and clearing system.
+            bank_account["bank_account_category"] = "Checking"
+            bank_account["local_clearing_system"] = "ACH"
+        # The live API requires beneficiary.address.{country_code,street_address,city}
+        # (400 validation_failed otherwise). PaySilo does not collect payee street
+        # addresses, so unless the caller supplies them these are SANDBOX-ONLY
+        # placeholders, to be replaced with real payee data before production.
+        address = {"country_code": country_code,
+                   "street_address": street_address or "1 Placeholder Street",
+                   "city": city or "Placeholder City"}
+        # Some countries (DE: "beneficiary.address.postcode") also require a postcode.
+        postcode = postcode or SANDBOX_PLACEHOLDER_POSTCODES.get(country_code, "10001")
+        address["postcode"] = postcode
+        state = state or SANDBOX_PLACEHOLDER_STATES.get(country_code, "")
+        if state:
+            address["state"] = state
         payload = {"request_id": request_id,
-                   "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account},
+                   "beneficiary": {"entity_type": "PERSONAL", "bank_details": bank_account,
+                                   "address": address},
                    "transfer_methods": [method]}
         self._request("POST", "/beneficiaries/validate", on_behalf_of=on_behalf_of, json=payload)
         return self._request("POST", "/beneficiaries/create", on_behalf_of=on_behalf_of, json=payload,
@@ -451,8 +553,8 @@ class AirwallexClient:
                          "transfer_currency": currency, "transfer_method": method,
                          "source_currency": currency, "fee_paid_by": "PAYER",
                          "reason": "professional_services"}
-        if reference:
-            payload["reference"] = reference
+        # ``reference`` is mandatory on the live API (400 validation_failed otherwise).
+        payload["reference"] = reference or "PaySilo payroll"
         return self._request(
             "POST", "/transfers/create", on_behalf_of=on_behalf_of, json=payload,
             request_id=request_id,
@@ -462,13 +564,22 @@ class AirwallexClient:
 
     def transition_transfer(self, *, request_id: str, on_behalf_of: str, transfer_id: str,
                             target_status: str = "PAID") -> dict:
-        return self._request(
-            "POST", f"/simulation/transfers/{transfer_id}/transition",
-            on_behalf_of=on_behalf_of,
-            json={"request_id": request_id, "target_status": target_status},
-            request_id=request_id,
-            duplicate_item_path="/transfers/{id}",
-        )
+        """Sandbox: drive a transfer to ``target_status``.
+
+        Live-verified: the body field is ``next_status`` and a PROCESSING
+        transfer cannot jump straight to PAID (HTTP 500 operation_failed) --
+        it must go PROCESSING -> SENT -> PAID. Each hop is idempotent in
+        effect (we read the status first), so a retry never re-sends a hop.
+        """
+        path = f"/simulation/transfers/{transfer_id}/transition"
+        current = self.get_transfer(transfer_id=transfer_id, on_behalf_of=on_behalf_of)
+        status = current.get("status")
+        if status == target_status:
+            return current
+        if target_status == "PAID" and status != "SENT":
+            self._request("POST", path, on_behalf_of=on_behalf_of, json={"next_status": "SENT"})
+        return self._request("POST", path, on_behalf_of=on_behalf_of,
+                             json={"next_status": target_status})
 
     # -- platform charges ---------------------------------------------------------
     def get_charge(self, *, charge_id: str, on_behalf_of: str | None = None) -> dict:

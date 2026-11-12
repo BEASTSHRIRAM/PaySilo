@@ -82,7 +82,8 @@ class AirwallexSimulator:
 
     # -- connected accounts ------------------------------------------------
     def create_connected_account(self, *, request_id: str, business_name: str, contact_name: str = "",
-                                 email: str = "") -> dict:
+                                 email: str = "", ein: str = "", country_code: str = "US",
+                                 confirm_wait_seconds: float = 0.0) -> dict:
         def _create() -> dict:
             account_id = f"acct_{next(self._seq):03d}_{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex[:8]}"
             self._accounts[account_id] = {
@@ -92,6 +93,16 @@ class AirwallexSimulator:
                 "balances": {},
             }
             return {"id": account_id, "business_name": business_name, "status": "ACTIVE"}
+
+        return self._once(request_id, _create)
+
+    def create_global_account(self, *, request_id: str, account_id: str, currency: str = "USD",
+                              country_code: str = "US", nick_name: str = "") -> dict:
+        self._account(account_id)
+
+        def _create() -> dict:
+            return {"id": f"ga_{next(self._seq):04d}_{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex[:8]}",
+                    "account_id": account_id, "currency": currency, "status": "ACTIVE"}
 
         return self._once(request_id, _create)
 
@@ -129,7 +140,8 @@ class AirwallexSimulator:
         return self.get_balances(account_id=account_id).get(currency, Decimal("0.00"))
 
     # -- funding -----------------------------------------------------------
-    def deposit(self, *, request_id: str, account_id: str, amount: object, currency: str = "USD") -> dict:
+    def deposit(self, *, request_id: str, account_id: str, amount: object, currency: str = "USD",
+                global_account_id: str = "") -> dict:
         amount = round_money(to_decimal(amount))
 
         def _deposit() -> dict:

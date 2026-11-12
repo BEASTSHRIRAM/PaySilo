@@ -33,6 +33,10 @@ reserve. Delta Studios BV (USD 5,000) owes Noor van Dijk EUR 2,200 and
 Pieter Jansen EUR 3,600: Noor is paid, Pieter is held and escalated, and the
 run ends **PARTIALLY_PAID** with USD 2,461.12 left in Delta's own wallet.
 
+Once Delta tops up its own wallet, **Pay held lines** pays Pieter in a linked
+continuation run: Noor is never paid twice and the USD 149 run fee is not
+charged a second time (see "Held lines and continuation runs").
+
 > **The model reads, the code decides, the API moves the money.**
 > The only LLM use in PaySilo is intake (reading messy payroll sheets) and
 > plain-language explanation. Pricing, fees, affordability, tenant
@@ -175,6 +179,37 @@ Failed runs resume from their checkpoint too: progress markers
 a retry skips work that already completed and can never pay a
 contractor twice.
 
+### Held lines and continuation runs
+
+A run that ends `PARTIALLY_PAID` (or `HELD_SHORTFALL`) keeps its unpaid lines as
+`HELD` pay lines. After the employer tops up **its own** wallet, **Pay held
+lines** (`POST /runs/{run_id}/pay-held`, owner/admin) starts a **new run** linked
+to the original (`payroll_runs.parent_run_id`, `source = "continuation"`):
+
+- It contains only the parent's `HELD` lines, with the held amounts but the
+  contractors' *current* bank details. It goes through the normal pricing,
+  Visa TAP-signed approval and payout path, with request ids derived from the
+  new run id, so contractors already paid are never paid again.
+- The USD 149 run fee is per payroll, not per click: if it was already collected
+  on the parent or any run up the chain, the continuation neither prices nor
+  charges it again. If nothing was collected yet (parent `HELD_SHORTFALL`), it is
+  charged normally. The approval card states which applies.
+- Allowed only for a `PARTIALLY_PAID` / `HELD_SHORTFALL` parent with held lines,
+  an active employer, no open or money-moved continuation of that parent (a
+  refused, held, rejected or shortfall continuation can be tried again; a
+  `FAILED` one is retried with `/retry`), and no later payroll that already paid
+  the held contractor. The one-open-run-per-employer rule still applies. A held
+  contractor who was deactivated or deleted returns 422 naming them.
+- A continuation that is itself `PARTIALLY_PAID` can be continued again.
+- Silo chat has a matching `pay_held_lines` tool ("pay the held lines for Delta
+  Studios"); like `start_payroll_run` it only starts the run, which then waits for
+  a human approval.
+
+Demo: after Delta's partial run (wallet USD 2,461.12), add USD 4,000, press
+**Pay held lines** and approve: Pieter's EUR 3,600 (USD 3,901.88 with the EUR
+12.85 fee) is paid, no second run fee, wallet USD 2,559.24, run `SETTLED`; the
+original run stays `PARTIALLY_PAID` and links to the continuation.
+
 ### Safety rules (enforced in code, tested in the suite)
 
 - **Tenant isolation is absolute.** Organisation and employer context
@@ -244,7 +279,7 @@ Expected demo outcome (demo FX 1 EUR = 1.08 USD; SWIFT fee EUR 12.85 per payout;
 | **Delta Studios BV** | USD 5,000 | Noor EUR 2,200 + Pieter EUR 3,600 | Kit 6 partial payout: Noor paid, Pieter held → **PARTIALLY_PAID**, fee USD 149, wallet USD 2,461.12 |
 | **Cobalt Retail LLC** | USD 0 → +10,000 deposit | — | its deposit never unblocks Borealis; the cross-tenant refusal is in the audit log |
 
-API: `POST /runs` (stops at the approval/escalation interrupt), `POST /runs/{run_id}/decision` with `{"decision": "approve" | "hold"}`, `GET /runs/{run_id}`, `POST /chat` (SSE).
+API: `POST /runs` (stops at the approval/escalation interrupt), `POST /runs/{run_id}/pay-held` (continuation run for held lines), `POST /runs/{run_id}/decision` with `{"decision": "approve" | "hold"}`, `GET /runs/{run_id}`, `POST /chat` (SSE).
 
 ### Frontend
 

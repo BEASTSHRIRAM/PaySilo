@@ -874,7 +874,7 @@ def list_exceptions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0
                                                                   if run.shortfall_usd else ""),
                 "detail": run.explanation or run.error or f"Run status is {run.status}.",
                 "owner": owner,
-                "next_action": ("Fund the employer's own wallet, then start a new run."
+                "next_action": ("Fund the employer's own wallet, then pay the held lines."
                                 if is_short else "Review the held run and decide."),
                 "evidence_label": f"Run {run.id} assessment", "created_at": created,
             })

@@ -139,16 +139,16 @@ def explain_assessment(employer_name: str, assessment: PayrollAssessment) -> str
     else:
         need = (f"{a.payroll_currency} {money_str(a.total_required)} (salaries {money_str(a.total_payroll)} "
                 f"+ payout fees {money_str(a.swift_fees)}), about USD {money_str(a.payroll_usd)}")
+    fee = (f"no run fee (already collected on the original payroll)" if a.run_fee_waived
+           else f"the USD {money_str(a.platform_fee_usd)} run fee")
     if a.can_run:
         return (
-            f"{employer_name} can run this payroll: it needs {need}, plus the USD "
-            f"{money_str(a.platform_fee_usd)} run fee, and must keep a USD {money_str(a.reserve_floor_usd)} "
+            f"{employer_name} can run this payroll: it needs {need}, plus {fee}, and must keep a USD {money_str(a.reserve_floor_usd)} "
             f"reserve. Its own wallet holds USD {money_str(a.available_usd)}. No other employer's money "
             "was considered."
         )
     return (
-        f"{employer_name} cannot run this payroll yet: it needs {need}, plus the USD "
-        f"{money_str(a.platform_fee_usd)} run fee and a USD {money_str(a.reserve_floor_usd)} reserve, "
+        f"{employer_name} cannot run this payroll yet: it needs {need}, plus {fee} and a USD {money_str(a.reserve_floor_usd)} reserve, "
         f"but its own wallet holds only USD {money_str(a.available_usd)} — short by USD "
         f"{money_str(a.shortfall_usd)}. The payroll is held and escalated to a human. It will not be "
         "covered from another employer's funds."

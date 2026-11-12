@@ -83,3 +83,25 @@ is NOT in the published reference for conversions create, so it is not sent.
 Not verified: the exact `/accounts/{id}/update` body (we reuse the create
 `account_details` shape) and whether `/accounts/create` honours `request_id`
 (we do not send one; the graph persists the account id per employer).
+
+### Update: live-sandbox verification (2026-11-09/10)
+
+Two fresh employer accounts and one reused account were driven end to end
+against `api.sandbox.airwallex.com` with this client. **Live-verified shapes**
+(fixtures are now sanitised copies of real responses, ids/amounts synthetic):
+`balances_current` (bare JSON array), `simulation_deposit_create` (PENDING,
+already in `available_amount`), `global_account_create`, `fx_quote_create`
+(`quote_id`, `validity` required, we send `MIN_1`), `fx_conversion_create`
+(`conversion_id`, SETTLED), `beneficiary_create` / `beneficiary_validate`
+(`"OK"`; `beneficiary.address.{country_code,street_address,city,postcode}`
+required for SWIFT), `transfer_*` (`reference` required; SCHEDULED/PROCESSING,
+then `next_status` SENT then PAID; PROCESSING -> PAID directly is HTTP 500),
+`charge_*` (NEW, then PENDING/SETTLED; `fee: 0`), `connected_account_*`, and
+the full activation payload (see `create_connected_account`).
+Also live: a reused conversion `request_id` is HTTP 400 `invalid_argument`
+(handled as a duplicate); `/simulation/deposit/create` IGNORES `request_id`
+(not idempotent, never retried by the client); the SWIFT payout fee is
+EUR 13.38-13.39 on the sandbox (rate-dependent), not a flat 12.85, so
+`policy.py`'s 12.85 under-prices it. Still self-authored: `auth_login`,
+`hosted_flow_*`, `*_duplicate_409` bodies. Not observed:
+`unconfigured_client_fee` (never returned in these runs).
