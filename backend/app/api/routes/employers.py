@@ -15,8 +15,17 @@ from ...db.models import Contractor, Employer
 from ...services import autopilot, notify
 from ...services.runtime import PlatformRuntime, RuntimeConflict
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
-from ..schemas import ContractorIn, ContractorOut, EmployerDetailOut, EmployerIn, EmployerOut, FundIn
+from ..schemas import (
+    ContractorIn,
+    ContractorOut,
+    EmployerDetailOut,
+    EmployerIn,
+    EmployerOut,
+    EmployerPatchIn,
+    FundIn,
+)
 from ..serializers import contractor_out, employer_detail_out, employer_out
+from . import spend_hooks as hooks
 
 router = APIRouter(prefix="/employers", tags=["employers"])
 
@@ -40,7 +49,7 @@ def list_employers(tenant: Tenant = Depends(current_tenant), db: Session = Depen
 
 
 @router.post("", response_model=EmployerDetailOut, status_code=status.HTTP_201_CREATED)
-def create_employer(body: EmployerIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+def create_employer(request: Request, body: EmployerIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                     db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> EmployerDetailOut:
     emp = Employer(organization_id=tenant.organization.id, **body.model_dump())
     db.add(emp)
@@ -56,6 +65,10 @@ def create_employer(body: EmployerIn, tenant: Tenant = Depends(require_roles(EDI
         db.rollback()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Airwallex could not create this employer's account: {exc}") from None
     db.commit()
+    hooks.dispatch(request, db, tenant, "employer.created", "employer", emp.id, {
+        "employer_id": str(emp.id), "employer_name": emp.name, "contact_email": emp.contact_email,
+        "contact_name": emp.contact_name, "currency": emp.funding_currency, "status": emp.status,
+        "settlement_mode": emp.settlement_mode})
     return employer_detail_out(db, runtime, load_employer(db, tenant, emp.id))
 
 
@@ -65,25 +78,39 @@ def get_employer(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tenant
     return employer_detail_out(db, runtime, load_employer(db, tenant, employer_id))
 
 
+@router.patch("/{employer_id}", response_model=EmployerOut)
+def patch_employer(employer_id: uuid.UUID, body: EmployerPatchIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+                   db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> EmployerOut:
+    """Change how a short wallet is handled (owner/admin). Takes effect for runs started afterwards."""
+    emp = load_employer(db, tenant, employer_id)
+    if body.settlement_mode is not None:
+        emp.settlement_mode = body.settlement_mode
+    db.commit()
+    return employer_out(db, runtime, emp)
+
+
 @router.post("/{employer_id}/fund", response_model=EmployerOut)
 def fund_employer(request: Request, employer_id: uuid.UUID, body: FundIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                   db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> EmployerOut:
     """Simulated deposit into this employer's OWN wallet (sandbox simulation API)."""
     emp = load_employer(db, tenant, employer_id)
+    reference = body.reference or uuid.uuid4().hex
     try:
-        runtime.fund(db, emp, Decimal(body.amount), reference=body.reference or uuid.uuid4().hex)
+        runtime.fund(db, emp, Decimal(body.amount), reference=reference)
     except RuntimeConflict as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.commit()
     # Money arrived: prepare (never approve) a continuation for held lines and queue the approval emails.
-    autopilot.on_funds_arrived(db, runtime, request.app.state.settings, tenant.organization, emp, str(body.amount))
+    autopilot.on_funds_arrived(db, runtime, request.app.state.settings, tenant.organization, emp, str(body.amount),
+                               reference=reference)
     notify.dispatch_async(request.app.state.db.sessionmaker, request.app.state.settings)
     return employer_out(db, runtime, emp)
 
 
 @router.post("/{employer_id}/contractors", response_model=ContractorOut, status_code=status.HTTP_201_CREATED)
-def add_contractor(employer_id: uuid.UUID, body: ContractorIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+def add_contractor(request: Request, employer_id: uuid.UUID, body: ContractorIn,
+                   tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                    db: Session = Depends(get_db)) -> ContractorOut:
     emp = load_employer(db, tenant, employer_id)
     data = body.model_dump()
@@ -91,6 +118,12 @@ def add_contractor(employer_id: uuid.UUID, body: ContractorIn, tenant: Tenant = 
     contractor = Contractor(organization_id=tenant.organization.id, employer_id=emp.id, **data)
     db.add(contractor)
     db.commit()
+    hooks.dispatch(request, db, tenant, "contractor.created", "contractor", contractor.id, {
+        "contractor_id": str(contractor.id), "contractor_name": contractor.full_name,
+        "contractor_email": contractor.email, "employer_id": str(emp.id), "employer_name": emp.name,
+        "currency": contractor.currency,
+        "amount": str(contractor.default_amount) if contractor.default_amount is not None else None,
+        "status": "ACTIVE" if contractor.is_active else "INACTIVE"})
     return contractor_out(contractor)
 
 

@@ -18,7 +18,7 @@ import {
 } from "@/components/contractors/trust-panels";
 import {
   api, apiTrust, ApiError,
-  type Contractor, type ContractorIn, type EmployerDetail, type RunSummary, type Session,
+  type Contractor, type ContractorIn, type EmployerDetail, type RunSummary, type Session, type SettlementMode,
 } from "@/lib/api";
 import { AnimatedMoney, Stagger } from "@/lib/gsap-anim";
 import { useDataChanged } from "@/lib/events";
@@ -32,6 +32,55 @@ interface FundingEvent { amount: string; currency: string; at: Date }
 function FieldError({ errors, name }: { errors: Record<string, string>; name: string }) {
   const msg = errors[name];
   return msg ? <p className="mt-1 text-sm font-bold text-coral-300">{msg}</p> : null;
+}
+
+const MODE_OPTIONS: { value: SettlementMode; title: string; body: string }[] = [
+  {
+    value: "ALL_OR_NOTHING",
+    title: "All or nothing",
+    body: "If the wallet cannot cover the whole batch (plus fees, the USD 149 run fee and the USD 1,000 reserve), nobody is paid and the run is held until it is funded.",
+  },
+  {
+    value: "PARTIAL",
+    title: "Partial",
+    body: "Pay what fits, lowest priority number first, then smallest first, and hold the rest.",
+  },
+];
+
+function SettlementModeCard({
+  mode, canEdit, saving, onChange,
+}: { mode: SettlementMode; canEdit: boolean; saving: boolean; onChange: (m: SettlementMode) => void }) {
+  return (
+    <Card className="grid gap-3 p-4">
+      <div>
+        <p className="font-display text-lg font-semibold text-sand-100">If the wallet is short</p>
+        <p className="text-sm text-sage-400">
+          {canEdit ? "Choose what happens when this silo cannot cover a payroll batch. It applies to runs started from now on." : "Owners and admins can change this. It applies to runs started from now on."}
+        </p>
+      </div>
+      <div role="radiogroup" aria-label="If the wallet is short" className="grid gap-3 sm:grid-cols-2">
+        {MODE_OPTIONS.map((o) => {
+          const selected = mode === o.value;
+          return (
+            <div key={o.value} className={`grid content-start gap-2 rounded-2xl border-2 p-3 ${selected ? "border-sage-500 bg-sage-500/10" : "border-ink-600 bg-ink-900/40"}`}>
+              {canEdit ? (
+                <Button
+                  type="button" role="radio" aria-checked={selected} size="sm"
+                  variant={selected ? "sage" : "outline"} className="w-full sm:w-fit"
+                  disabled={saving} onClick={() => { if (!selected) onChange(o.value); }}
+                >
+                  {o.title}
+                </Button>
+              ) : (
+                <p className="font-extrabold text-sand-100">{o.title}{selected ? <span className="ml-2 text-xs font-bold uppercase text-sage-400">Current</span> : null}</p>
+              )}
+              <p className="text-sm font-semibold text-sage-300">{o.body}</p>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
 export default function EmployerPage() {
@@ -104,6 +153,25 @@ export default function EmployerPage() {
       setError(errMsg(err));
     } finally {
       setFunding(false);
+    }
+  }
+
+  const [savingMode, setSavingMode] = useState(false);
+  async function changeMode(mode: SettlementMode) {
+    if (!employer) return;
+    setSavingMode(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await api.setSettlementMode(employer.id, mode);
+      setEmployer((prev) => (prev ? { ...prev, settlement_mode: updated.settlement_mode } : prev));
+      setNotice(updated.settlement_mode === "PARTIAL"
+        ? "Short wallet: PaySilo will now pay what fits and hold the rest."
+        : "Short wallet: PaySilo will now pay nobody and hold the run until it is funded.");
+    } catch (err) {
+      setError(errMsg(err));
+    } finally {
+      setSavingMode(false);
     }
   }
 
@@ -183,8 +251,13 @@ export default function EmployerPage() {
                     {employer.contact_email ? ` · ${employer.contact_email}` : ""}
                   </p>
                 </div>
-                <Badge tone={toneForStatus(employer.status)}>{employer.status}</Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="sand">{employer.settlement_mode === "PARTIAL" ? "Partial payout" : "All or nothing"}</Badge>
+                  <Badge tone={toneForStatus(employer.status)}>{employer.status}</Badge>
+                </div>
               </div>
+
+              <SettlementModeCard mode={employer.settlement_mode} canEdit={canEdit} saving={savingMode} onChange={(m) => void changeMode(m)} />
 
               <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
                 <div className="min-w-0">

@@ -71,7 +71,11 @@ INVITATION_STATUSES = ("PENDING", "ACCEPTED", "REVOKED")
 PAY_FREQUENCIES = ("WEEKLY", "BIWEEKLY", "MONTHLY")
 NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE", "FUNDS_RECEIVED",
                       "APPROVAL_REQUESTED", "HELD_LINES_REMINDER", "RUN_SETTLED", "PAYMENT_FAILED", "INVITE",
-                      "PAYMENT_NOTICE", "ONBOARDING_LINK", "BANK_CHANGE_CALLBACK", "GENERIC")
+                      "PAYMENT_NOTICE", "ONBOARDING_LINK", "BANK_CHANGE_CALLBACK", "GENERIC",
+                      # spend categories + workflow mails
+                      "SPEND_APPROVAL_REQUESTED", "KIT_COMPLETED", "TRIP_ITINERARY", "PURCHASE_RECEIPT",
+                      "EMPLOYER_WELCOME", "PAYSLIP_RECEIPT", "WORKFLOW_ALERT")
+SETTLEMENT_MODES = ("ALL_OR_NOTHING", "PARTIAL")
 NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED")
 
 
@@ -204,6 +208,7 @@ class Employer(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "name", name="uq_employer_org_name"),
         CheckConstraint(_in("status", EMPLOYER_STATUSES), name="ck_employer_status"),
+        CheckConstraint(_in("settlement_mode", SETTLEMENT_MODES), name="ck_employer_settlement_mode"),
         CheckConstraint("pay_frequency IS NULL OR " + _in("pay_frequency", PAY_FREQUENCIES),
                         name="ck_employer_pay_frequency"),
     )
@@ -226,6 +231,12 @@ class Employer(TimestampMixin, Base):
     pay_frequency: Mapped[str | None] = mapped_column(String(12))
     next_pay_date: Mapped[date | None] = mapped_column(Date)
     funding_lead_days: Mapped[int] = mapped_column(Integer, nullable=False, default=2, server_default="2")
+    # What happens when the wallet cannot cover the whole batch. PARTIAL: pay what fits (priority, then
+    # smallest first) and hold the rest. ALL_OR_NOTHING: pay nothing and hold the run until it is funded.
+    # The column default (PARTIAL) is what existing rows get; new employers created through the API
+    # default to ALL_OR_NOTHING unless the creator chooses otherwise.
+    settlement_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="PARTIAL",
+                                                 server_default="PARTIAL")
 
     organization: Mapped[Organization] = relationship(back_populates="employers")
     contractors: Mapped[list[Contractor]] = relationship(back_populates="employer", cascade="all, delete-orphan",
@@ -262,6 +273,8 @@ class Contractor(TimestampMixin, Base):
     account_number: Mapped[str | None] = mapped_column(String(34))
     routing_code: Mapped[str | None] = mapped_column(String(20))
     default_amount: Mapped[Decimal | None] = mapped_column(Money)
+    # Settlement order in PARTIAL mode: lower pays first; ties fall back to smallest-first.
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
     airwallex_beneficiary_id: Mapped[str | None] = mapped_column(String(64))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
@@ -795,3 +808,416 @@ class BenefitPurchase(TimestampMixin, Base):
     provider_mandate_id: Mapped[str | None] = mapped_column(String(80))
     approval_url: Mapped[str | None] = mapped_column(Text)
     mandate_status: Mapped[str | None] = mapped_column(String(40))
+
+
+# ---------------------------------------------------------------------------
+# VIC spend categories — Onboarding Kit + Travel & Accommodation.
+# Appended at the END of this module (additive only), mirroring Silo
+# Benefits: each category has its OWN budget and its OWN journal book
+# (onboarding_* / travel_* ledger accounts) and can never touch an
+# employer's cash / wage accounts.
+# ---------------------------------------------------------------------------
+
+ONBOARDING_KIT_STATUSES = ("DRAFT", "APPROVED", "DENIED", "PARTIALLY_PURCHASED", "COMPLETED")
+KIT_ITEM_KINDS = ("BACKGROUND_CHECK", "SAAS_SEAT", "GIFT_CARD", "PERIPHERAL", "CUSTOM")
+KIT_ITEM_STATUSES = ("PENDING", "PURCHASED", "FAILED")
+KIT_SOURCES = ("MANUAL", "CHAT", "WORKFLOW")
+TRIP_STATUSES = ("REQUESTED", "APPROVED", "DENIED", "PARTIALLY_PURCHASED", "COMPLETED")
+TRIP_COMPONENT_KINDS = ("TRANSPORT", "LODGING", "PER_DIEM", "OTHER")
+TRIP_COMPONENT_STATUSES = ("PENDING", "PURCHASED", "FAILED")
+SPEND_PURCHASE_STATUSES = ("PENDING", "SUCCEEDED", "FAILED")
+
+
+class OnboardingBudget(TimestampMixin, Base):
+    """One employer's onboarding budget in one currency (mirrors BenefitBudget)."""
+
+    __tablename__ = "onboarding_budgets"
+    __table_args__ = (
+        UniqueConstraint("employer_id", "currency", name="uq_onboarding_budget_employer_ccy"),
+        CheckConstraint("monthly_cap > 0", name="ck_onboarding_budget_cap_positive"),
+        CheckConstraint("spent_this_period >= 0", name="ck_onboarding_budget_spent_nonneg"),
+        CheckConstraint("per_tx_limit IS NULL OR per_tx_limit > 0", name="ck_onboarding_budget_per_tx_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    monthly_cap: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    per_tx_limit: Mapped[Decimal | None] = mapped_column(Money)
+    spent_this_period: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    period: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class TravelBudget(TimestampMixin, Base):
+    """One employer's travel budget in one currency, plus per-trip category caps."""
+
+    __tablename__ = "travel_budgets"
+    __table_args__ = (
+        UniqueConstraint("employer_id", "currency", name="uq_travel_budget_employer_ccy"),
+        CheckConstraint("monthly_cap > 0", name="ck_travel_budget_cap_positive"),
+        CheckConstraint("spent_this_period >= 0", name="ck_travel_budget_spent_nonneg"),
+        CheckConstraint("per_tx_limit IS NULL OR per_tx_limit > 0", name="ck_travel_budget_per_tx_positive"),
+        CheckConstraint("cap_transport > 0 AND cap_lodging > 0 AND cap_per_diem > 0 AND cap_other > 0",
+                        name="ck_travel_budget_caps_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    monthly_cap: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    per_tx_limit: Mapped[Decimal | None] = mapped_column(Money)
+    spent_this_period: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("0.00"))
+    period: Mapped[str] = mapped_column(String(7), nullable=False)  # YYYY-MM
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cap_transport: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("750.00"))
+    cap_lodging: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("600.00"))
+    cap_per_diem: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("300.00"))
+    cap_other: Mapped[Decimal] = mapped_column(Money, nullable=False, default=Decimal("200.00"))
+
+
+class OnboardingKit(TimestampMixin, Base):
+    """One contractor's onboarding kit: a set of items approved as ONE snapshot."""
+
+    __tablename__ = "onboarding_kits"
+    __table_args__ = (
+        CheckConstraint(_in("status", ONBOARDING_KIT_STATUSES), name="ck_onboarding_kit_status"),
+        CheckConstraint(_in("source", KIT_SOURCES), name="ck_onboarding_kit_source"),
+        Index("ix_onboarding_kits_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    contractor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contractors.id", ondelete="SET NULL"))
+    contractor_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="DRAFT")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="MANUAL")
+    draft_reason: Mapped[str | None] = mapped_column(Text)
+    approval_hash: Mapped[str | None] = mapped_column(String(64))
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_by_email: Mapped[str | None] = mapped_column(String(254))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deny_reason: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_email: Mapped[str | None] = mapped_column(String(254))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+
+    items: Mapped[list[KitItem]] = relationship(back_populates="kit", cascade="all, delete-orphan",
+                                                order_by="KitItem.position")
+
+
+class KitItem(Base):
+    __tablename__ = "kit_items"
+    __table_args__ = (
+        CheckConstraint(_in("kind", KIT_ITEM_KINDS), name="ck_kit_item_kind"),
+        CheckConstraint(_in("status", KIT_ITEM_STATUSES), name="ck_kit_item_status"),
+        CheckConstraint("amount > 0", name="ck_kit_item_amount_positive"),
+        Index("ix_kit_items_kit", "kit_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    kit_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("onboarding_kits.id", ondelete="CASCADE"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    label: Mapped[str] = mapped_column(String(300), nullable=False)
+    merchant: Mapped[str] = mapped_column(String(200), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    kit: Mapped[OnboardingKit] = relationship(back_populates="items")
+
+
+class KitPurchase(TimestampMixin, Base):
+    """One purchase attempt for one kit item. Append-only (mirrors BenefitPurchase)."""
+
+    __tablename__ = "kit_purchases"
+    __table_args__ = (
+        CheckConstraint(_in("status", SPEND_PURCHASE_STATUSES), name="ck_kit_purchase_status"),
+        CheckConstraint(_in("mode", VIC_MODES), name="ck_kit_purchase_mode"),
+        CheckConstraint("amount > 0", name="ck_kit_purchase_amount_positive"),
+        Index("ix_kit_purchases_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    kit_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("onboarding_kits.id", ondelete="CASCADE"), nullable=False, index=True)
+    item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kit_items.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)  # SIMULATED | VIC
+    credential_ref: Mapped[str] = mapped_column(String(80), nullable=False)  # masked ref only
+    provider_ref: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(10), nullable=False)  # PENDING | SUCCEEDED | FAILED
+    failure_code: Mapped[str | None] = mapped_column(String(40))
+    failure_detail: Mapped[str | None] = mapped_column(Text)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    journal_txn_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_transactions.id", ondelete="SET NULL"))
+    # Live Airi mandate (same two-phase flow as BenefitPurchase). Never any card data.
+    provider_mandate_id: Mapped[str | None] = mapped_column(String(80))
+    approval_url: Mapped[str | None] = mapped_column(Text)
+    mandate_status: Mapped[str | None] = mapped_column(String(40))
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_email: Mapped[str | None] = mapped_column(String(254))
+
+
+class TripRequest(TimestampMixin, Base):
+    """One contractor trip: a set of components approved as ONE snapshot."""
+
+    __tablename__ = "trip_requests"
+    __table_args__ = (
+        CheckConstraint(_in("status", TRIP_STATUSES), name="ck_trip_request_status"),
+        Index("ix_trip_requests_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    contractor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("contractors.id", ondelete="SET NULL"))
+    contractor_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    destination: Mapped[str] = mapped_column(String(200), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    purpose: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="REQUESTED")
+    approval_hash: Mapped[str | None] = mapped_column(String(64))
+    approval_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_by_email: Mapped[str | None] = mapped_column(String(254))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deny_reason: Mapped[str | None] = mapped_column(Text)
+    caps_overridden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_email: Mapped[str | None] = mapped_column(String(254))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+
+    components: Mapped[list[TripComponent]] = relationship(back_populates="trip", cascade="all, delete-orphan",
+                                                           order_by="TripComponent.position")
+
+
+class TripComponent(Base):
+    __tablename__ = "trip_components"
+    __table_args__ = (
+        CheckConstraint(_in("kind", TRIP_COMPONENT_KINDS), name="ck_trip_component_kind"),
+        CheckConstraint(_in("status", TRIP_COMPONENT_STATUSES), name="ck_trip_component_status"),
+        CheckConstraint("amount > 0", name="ck_trip_component_amount_positive"),
+        Index("ix_trip_components_trip", "trip_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    trip_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    label: Mapped[str] = mapped_column(String(300), nullable=False)
+    merchant: Mapped[str] = mapped_column(String(200), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDING")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    trip: Mapped[TripRequest] = relationship(back_populates="components")
+
+
+class TripPurchase(TimestampMixin, Base):
+    """One purchase attempt for one trip component. Append-only."""
+
+    __tablename__ = "trip_purchases"
+    __table_args__ = (
+        CheckConstraint(_in("status", SPEND_PURCHASE_STATUSES), name="ck_trip_purchase_status"),
+        CheckConstraint(_in("mode", VIC_MODES), name="ck_trip_purchase_mode"),
+        CheckConstraint("amount > 0", name="ck_trip_purchase_amount_positive"),
+        Index("ix_trip_purchases_org_employer", "organization_id", "employer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    employer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("employers.id", ondelete="CASCADE"), nullable=False, index=True)
+    trip_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    component_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_components.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)  # SIMULATED | VIC
+    credential_ref: Mapped[str] = mapped_column(String(80), nullable=False)  # masked ref only
+    provider_ref: Mapped[str | None] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(10), nullable=False)  # PENDING | SUCCEEDED | FAILED
+    failure_code: Mapped[str | None] = mapped_column(String(40))
+    failure_detail: Mapped[str | None] = mapped_column(Text)
+    amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    journal_txn_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_transactions.id", ondelete="SET NULL"))
+    # Live Airi mandate (same two-phase flow as BenefitPurchase). Never any card data.
+    provider_mandate_id: Mapped[str | None] = mapped_column(String(80))
+    approval_url: Mapped[str | None] = mapped_column(Text)
+    mandate_status: Mapped[str | None] = mapped_column(String(40))
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_email: Mapped[str | None] = mapped_column(String(254))
+
+
+# ---------------------------------------------------------------------------
+# Spend Workflows — deterministic workflow engine (additive only).
+# Domain events fire saved node graphs; human gates park runs durably.
+# NO LLM at runtime and NO approve/purchase/pay actions exist in the
+# graph vocabulary — a gate waits for a human decision recorded elsewhere.
+# ---------------------------------------------------------------------------
+
+WORKFLOW_RUN_STATUSES = ("RUNNING", "WAITING", "COMPLETED", "FAILED")
+WORKFLOW_STEP_STATUSES = ("OK", "FAILED", "SKIPPED", "WAITING", "RESUMED")
+WORKFLOW_APPROVAL_STATUSES = ("PENDING", "APPROVED", "REJECTED")
+WORKFLOW_TASK_KINDS = ("EXCEPTION", "REMINDER")
+WORKFLOW_TASK_STATUSES = ("OPEN", "DONE")
+WORKFLOW_TRIGGER_TYPES = (
+    "trigger.employer_added", "trigger.contractor_joined", "trigger.payroll_held",
+    "trigger.payroll_settled", "trigger.benefit_requested", "trigger.trip_proposed",
+    "trigger.kit_approved", "trigger.kit_completed", "trigger.schedule",
+    "trigger.funds_received",
+)
+
+
+class Workflow(TimestampMixin, Base):
+    """One saved node graph. ``trigger_type`` is denormalised from the graph."""
+
+    __tablename__ = "workflows"
+    __table_args__ = (Index("ix_workflows_org_trigger", "organization_id", "trigger_type"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    trigger_type: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    graph: Mapped[dict | None] = mapped_column(JsonType)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # ``created_by`` in the lane contract = created_by_id (house naming).
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)
+
+    runs: Mapped[list[WorkflowRun]] = relationship(back_populates="workflow", cascade="all, delete-orphan")
+
+
+class WorkflowRun(TimestampMixin, Base):
+    """One execution of a workflow for one entity. Dedupe is DB-enforced."""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        # dedupe_key encodes workflow+event+entity AND, for schedules, the
+        # period stamp — so uniqueness lives on the key itself.
+        UniqueConstraint("dedupe_key", name="uq_workflow_run_dedupe"),
+        CheckConstraint(_in("status", WORKFLOW_RUN_STATUSES), name="ck_workflow_run_status"),
+        Index("ix_workflow_runs_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    trigger_event: Mapped[str] = mapped_column(String(80), nullable=False)
+    entity_kind: Mapped[str] = mapped_column(String(80), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="RUNNING")
+    context: Mapped[dict | None] = mapped_column(JsonType)
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    workflow: Mapped[Workflow] = relationship(back_populates="runs")
+    steps: Mapped[list[WorkflowRunStep]] = relationship(back_populates="run", cascade="all, delete-orphan",
+                                                        order_by="WorkflowRunStep.created_at")
+
+
+class WorkflowRunStep(TimestampMixin, Base):
+    """Append-only record of one node execution inside one run."""
+
+    __tablename__ = "workflow_run_steps"
+    __table_args__ = (
+        CheckConstraint(_in("status", WORKFLOW_STEP_STATUSES), name="ck_workflow_step_status"),
+        Index("ix_workflow_steps_run", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    node_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    output: Mapped[dict | None] = mapped_column(JsonType)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    # NULL while a step is parked (WAITING); set when the step concludes.
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    run: Mapped[WorkflowRun] = relationship(back_populates="steps")
+
+
+class WorkflowApproval(TimestampMixin, Base):
+    """The durable record a wait gate parks on. Decided by a human elsewhere."""
+
+    __tablename__ = "workflow_approvals"
+    __table_args__ = (
+        CheckConstraint(_in("status", WORKFLOW_APPROVAL_STATUSES), name="ck_workflow_approval_status"),
+        Index("ix_workflow_approvals_entity", "organization_id", "entity_kind", "entity_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True)
+    entity_kind: Mapped[str] = mapped_column(String(80), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkflowTask(TimestampMixin, Base):
+    """An operator task produced by a workflow (exception or reminder)."""
+
+    __tablename__ = "workflow_tasks"
+    __table_args__ = (
+        CheckConstraint(_in("kind", WORKFLOW_TASK_KINDS), name="ck_workflow_task_kind"),
+        CheckConstraint(_in("status", WORKFLOW_TASK_STATUSES), name="ck_workflow_task_status"),
+        Index("ix_workflow_tasks_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    employer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("employers.id", ondelete="SET NULL"))
+    entity_kind: Mapped[str | None] = mapped_column(String(80))
+    entity_id: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
+    created_by_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="SET NULL"))

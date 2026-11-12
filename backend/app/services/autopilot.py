@@ -102,6 +102,41 @@ def request_approval(db: Session, settings: Settings, org: Organization, employe
     return new
 
 
+def continue_held_for(db: Session, runtime: PlatformRuntime, settings: Settings, org: Organization,
+                      employer: Employer, parent: PayrollRun, actor: User | None = None) -> dict:
+    """The ONE guarded path that prepares a continuation for one parent run (autopilot and workflows share it).
+
+    Idempotent: a parent that already has ANY continuation is never given a second one; the existing run is
+    reported instead (``action="existing"``). Creates only; never approves, signs or pays.
+    Returns ``{"action": "created"|"existing"|"skipped", "reason": str, "run_id": str|None}``.
+    """
+    existing = runtime.continuations_of(db, parent)
+    if existing:
+        return {"action": "existing", "run_id": str(existing[0].id),
+                "reason": "Held lines already have a continuation run; a person decides from here."}
+    blocker = runtime.pay_held_blocker(db, parent)
+    if blocker:
+        return {"action": "skipped", "reason": blocker, "run_id": None}
+    if not wallet_covers_held(db, runtime, parent):
+        return {"action": "skipped", "reason": "The wallet does not cover the held lines yet.", "run_id": None}
+    actor = actor or _actor(db, org)
+    if actor is None:
+        return {"action": "skipped", "reason": "No organization owner to attribute the run to.", "run_id": None}
+    try:
+        run = runtime.start_continuation(db, org=org, user=actor, run=parent)
+    except (RuntimeConflict, HeldLineUnavailable) as exc:
+        db.rollback()
+        return {"action": "skipped", "reason": str(exc), "run_id": None}
+    db.commit()
+    if run.status == "RESERVED":  # paused at the approval step: ask the humans who can decide
+        request_approval(db, settings, org, employer, run, continuation=True)
+        db.commit()
+        return {"action": "created", "run_id": str(run.id),
+                "reason": "Continuation created and waiting for approval; approvers were emailed."}
+    return {"action": "created", "run_id": str(run.id),
+            "reason": f"Continuation created but it is {run.status}; no approval is pending."}
+
+
 def auto_continue(db: Session, runtime: PlatformRuntime, settings: Settings, org: Organization,
                   employer: Employer) -> dict:
     """If the employer's wallet can now cover the held lines of a PARTIALLY_PAID run, prepare the continuation.
@@ -118,41 +153,42 @@ def auto_continue(db: Session, runtime: PlatformRuntime, settings: Settings, org
     if actor is None:
         return {**result, "reason": "No organization owner to attribute the run to."}
     for parent in parents:
-        if runtime.continuations_of(db, parent):
-            result["reason"] = "Held lines already have a continuation run; a person decides from here."
-            continue
-        blocker = runtime.pay_held_blocker(db, parent)
-        if blocker:
-            result["reason"] = blocker
-            continue
-        if not wallet_covers_held(db, runtime, parent):
-            result["reason"] = "The wallet does not cover the held lines yet."
-            continue
-        try:
-            run = runtime.start_continuation(db, org=org, user=actor, run=parent)
-        except (RuntimeConflict, HeldLineUnavailable) as exc:
-            db.rollback()
-            result["reason"] = str(exc)
-            continue
-        db.commit()
-        if run.status == "RESERVED":  # paused at the approval step: ask the humans who can decide
-            request_approval(db, settings, org, employer, run, continuation=True)
-            db.commit()
-            return {"action": "created", "run_id": str(run.id),
-                    "reason": "Continuation created and waiting for approval; approvers were emailed."}
-        return {"action": "created", "run_id": str(run.id),
-                "reason": f"Continuation created but it is {run.status}; no approval is pending."}
+        outcome = continue_held_for(db, runtime, settings, org, employer, parent, actor)
+        if outcome["action"] == "created":
+            return outcome
+        result["reason"] = outcome["reason"]
     return result
 
 
+def _emit_funds_received(db: Session, runtime: PlatformRuntime, org: Organization, employer: Employer,
+                         amount: str, outcome: dict, reference: str | None) -> None:
+    """Fire the ``funds.received`` workflow event (after any automatic continuation exists, so a workflow
+    step can link to it). Guarded: a workflow problem never hides the deposit."""
+    try:
+        from .workflows import dispatch_event
+
+        dispatch_event(
+            db, organization_id=org.id, event_type="funds.received", entity_kind="employer",
+            entity_id=str(employer.id), runtime=runtime,
+            dedupe_suffix=reference or f"{amount}:{datetime.now(UTC).isoformat()}",
+            facts={"employer_id": str(employer.id), "employer_name": employer.name, "amount": amount,
+                   "currency": employer.funding_currency, "contact_email": employer.contact_email,
+                   "continuation_run_id": outcome.get("run_id") if outcome.get("action") == "created" else None})
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Workflow funds.received dispatch failed for employer %s (ignored)", employer.id)
+        db.rollback()
+
+
 def on_funds_arrived(db: Session, runtime: PlatformRuntime, settings: Settings, org: Organization,
-                     employer: Employer, amount: str) -> dict:
+                     employer: Employer, amount: str, reference: str | None = None) -> dict:
     """Hook after a deposit lands: tell the employer, then auto-continue held lines if now affordable.
 
     Never raises: a failure here must not undo or hide the deposit.
     """
     try:
         outcome = auto_continue(db, runtime, settings, org, employer)
+        _emit_funds_received(db, runtime, org, employer, amount, outcome, reference)
         if employer.contact_email:
             subject, text, html = tpl.funds_received(employer.name, f"USD {amount}", org.name,
                                                      continuation_started=outcome["action"] == "created")

@@ -8,6 +8,8 @@ export class ApiError extends Error {
     public fields: Record<string, string> = {},
     /** Machine-readable code when the backend sent `detail: {code, message}` (e.g. a 409 policy refusal). */
     public code: string | null = null,
+    /** Verbatim server validation errors, e.g. 422 {detail: {code: "INVALID_GRAPH", errors: [...]}}. */
+    public validationErrors: string[] = [],
   ) {
     super(message);
   }
@@ -21,9 +23,12 @@ function parseError(status: number, body: unknown): ApiError {
   if (detail && typeof detail === "object" && !Array.isArray(detail)) {
     // Structured refusal: {code, message} — keep the server message verbatim
     // and expose the code so callers (e.g. Benefits) can branch on it.
-    const d = detail as { code?: unknown; message?: string; needs_contractor?: { row_number: number; beneficiary_name?: string | null }[] };
+    const d = detail as { code?: unknown; message?: string; errors?: unknown; needs_contractor?: { row_number: number; beneficiary_name?: string | null }[] };
     const code = typeof d.code === "string" && d.code ? d.code : null;
-    if (code) return new ApiError(status, typeof d.message === "string" && d.message ? d.message : code, {}, code);
+    const validationErrors: string[] = Array.isArray(d.errors)
+      ? d.errors.map((e) => (typeof e === "string" ? e : JSON.stringify(e)))
+      : [];
+    if (code) return new ApiError(status, typeof d.message === "string" && d.message ? d.message : code, {}, code, validationErrors);
     const names = (d.needs_contractor ?? []).map((r) => r.beneficiary_name || `row ${r.row_number}`).join(", ");
     if (d.message) return new ApiError(status, names ? `${d.message} Missing contractors: ${names}.` : d.message);
   }
@@ -81,11 +86,15 @@ export interface SignupPayload {
 export interface Contractor {
   id: string; full_name: string; email: string | null; country: string; currency: string; payout_method: string;
   iban_last4: string | null; account_last4: string | null; swift_code: string | null; default_amount: string | null;
+  /** Payment priority for Partial settlement: lower pays first (default 100). */
+  priority: number;
   is_active: boolean;
 }
+/** What happens when an employer's own wallet cannot cover the whole batch. */
+export type SettlementMode = "ALL_OR_NOTHING" | "PARTIAL";
 export interface Employer {
   id: string; name: string; legal_name: string | null; country: string; contact_name: string | null;
-  contact_email: string | null; funding_currency: string; status: string; airwallex_account_id: string | null;
+  contact_email: string | null; funding_currency: string; settlement_mode: SettlementMode; status: string; airwallex_account_id: string | null;
   balances: Record<string, string>; contractor_count: number; created_at: string;
 }
 export interface EmployerDetail extends Employer { contractors: Contractor[] }
@@ -259,6 +268,9 @@ export const api = {
   overview: () => request<Overview>("/overview"),
   employer: (id: string) => request<EmployerDetail>(`/employers/${id}`),
   createEmployer: (body: EmployerIn) => post<EmployerDetail>("/employers", body),
+  /** Owner/admin only. Takes effect for runs started afterwards. */
+  setSettlementMode: (id: string, settlement_mode: SettlementMode) =>
+    request<Employer>(`/employers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ settlement_mode }) }),
   fund: (id: string, amount: string) => post<Employer>(`/employers/${id}/fund`, { amount }),
   addContractor: (employerId: string, body: ContractorIn) =>
     post<Contractor>(`/employers/${employerId}/contractors`, body),
@@ -725,7 +737,7 @@ export interface BankValidation { valid: boolean; checked: boolean; errors: stri
 export interface ContractorPatch {
   full_name?: string; email?: string | null; country?: string; currency?: string; payout_method?: "SWIFT" | "LOCAL";
   iban?: string | null; swift_code?: string | null; account_number?: string | null; routing_code?: string | null;
-  default_amount?: string | null; tax_status?: TaxStatus; tax_form_type?: TaxFormType; tax_form_status?: TaxFormStatus;
+  default_amount?: string | null; priority?: number; tax_status?: TaxStatus; tax_form_type?: TaxFormType; tax_form_status?: TaxFormStatus;
   tax_form_received_at?: string | null; tax_form_expires_at?: string | null;
 }
 export interface ContractorPatchResult { contractor: Contractor; bank_change_pending: boolean; bank_validation: BankValidation | null }
@@ -894,4 +906,438 @@ export const proofDownloads = {
   line: (runId: string, lineId: string) => `/api/runs/${encodeURIComponent(runId)}/lines/${encodeURIComponent(lineId)}/proof.pdf`,
   statement: (runId: string) => `/api/runs/${encodeURIComponent(runId)}/statement.pdf`,
   receipt: (lineId: string, token: string) => `/api/receipts/${encodeURIComponent(lineId)}/proof.pdf?token=${encodeURIComponent(token)}`,
+};
+
+// ==================================================================
+// Workflows + Morning Brief. Workflows react to events and prepare work;
+// they can never approve, sign, pay or purchase. A person decides at the
+// "Wait for approval" gates on the real screens.
+// ==================================================================
+
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  trigger_type: string;
+  updated_at: string;
+}
+
+export interface WorkflowGraphNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  data: Record<string, unknown>;
+}
+
+export interface WorkflowGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+}
+
+export interface WorkflowGraph {
+  nodes: WorkflowGraphNode[];
+  edges: WorkflowGraphEdge[];
+}
+
+export interface WorkflowDetail extends WorkflowSummary {
+  graph: WorkflowGraph | null;
+  created_at?: string;
+}
+
+export interface WorkflowCreateIn {
+  name: string;
+  description: string;
+  enabled?: boolean;
+  graph: WorkflowGraph;
+}
+
+export interface WorkflowUpdateIn {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  graph?: WorkflowGraph;
+}
+
+export type WorkflowRunStatus = "RUNNING" | "WAITING" | "COMPLETED" | "FAILED";
+
+export interface WorkflowRun {
+  id: string;
+  workflow_id: string;
+  trigger_event: string;
+  entity_kind: string;
+  entity_id: string;
+  entity_label: string | null;
+  status: WorkflowRunStatus | string;
+  error_detail: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export type WorkflowStepStatus = "OK" | "FAILED" | "SKIPPED" | "WAITING" | "RESUMED";
+
+export interface WorkflowRunStep {
+  node_id: string;
+  node_type: string;
+  status: WorkflowStepStatus | string;
+  detail: string;
+  created_at: string;
+  /** Engine output; condition steps carry output.branch ("true" | "false"). */
+  output?: Record<string, unknown> | null;
+}
+
+export interface WorkflowRunDetail extends WorkflowRun {
+  steps: WorkflowRunStep[];
+}
+
+export interface WorkflowRunListParams {
+  workflow_id?: string;
+  status?: string;
+}
+
+/** One line of the Morning Brief. `reason` explains why a held line is held (null when simply short of funds). */
+export interface MorningBriefLine { contractor_name: string; amount: string; currency: string; reason: string | null }
+
+/** One employer card of GET /workflows/brief: an open payroll decision or held lines. Money is decimal strings. */
+export interface MorningBriefItem {
+  /** A workflow run parked at a gate on this payroll run, if any. */
+  workflow_run_id: string | null;
+  workflow_name: string | null;
+  run_id: string;
+  run_status: string;
+  employer_id: string;
+  employer_name: string | null;
+  settlement_mode: SettlementMode | string | null;
+  pay_date: string | null;
+  total_required: string | null;
+  balance: string | null;
+  shortfall: string | null;
+  currency: string | null;
+  /** The run is waiting for the signed human decision (POST /runs/{id}/decision). */
+  can_approve: boolean;
+  will_pay: MorningBriefLine[];
+  will_hold: MorningBriefLine[];
+}
+
+function workflowRunsQuery(params?: WorkflowRunListParams): string {
+  const q = new URLSearchParams();
+  if (params?.workflow_id) q.set("workflow_id", params.workflow_id);
+  if (params?.status) q.set("status", params.status);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export const apiWorkflows = {
+  list: () => request<WorkflowSummary[]>("/workflows"),
+  create: (body: WorkflowCreateIn) => post<WorkflowDetail>("/workflows", body),
+  get: (id: string) => request<WorkflowDetail>(`/workflows/${encodeURIComponent(id)}`),
+  update: (id: string, body: WorkflowUpdateIn) =>
+    request<WorkflowDetail>(`/workflows/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  remove: (id: string) => request<void>(`/workflows/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  runs: (params?: WorkflowRunListParams) =>
+    request<WorkflowRun[]>(`/workflows/runs${workflowRunsQuery(params)}`),
+  run: (runId: string) => request<WorkflowRunDetail>(`/workflows/runs/${encodeURIComponent(runId)}`),
+  brief: () => request<MorningBriefItem[]>("/workflows/brief"),
+};
+
+// ==================================================================
+// Spend lane: Onboarding kits and Travel. Both run through the same two-phase
+// Visa VIC (Airi) path as Silo Benefits: starting a purchase opens a PENDING
+// Airi mandate, a person authorizes it in Airi, then presses Complete (or
+// Cancel). Money fields are decimal strings; ids are strings.
+// ==================================================================
+
+/** One purchase attempt in a spend category: BenefitPurchase's shape plus the parent refs. */
+export interface SpendPurchase {
+  id: string;
+  kit_id?: string | null;
+  item_id?: string | null;
+  trip_id?: string | null;
+  component_id?: string | null;
+  employer_id: string;
+  attempt_no: number;
+  mode: "SIMULATED" | "VIC";
+  credential_ref: string;
+  provider_ref: string | null;
+  status: "SUCCEEDED" | "FAILED" | "PENDING";
+  /** Live Airi mandate (no card data is ever stored). */
+  provider_mandate_id: string | null;
+  approval_url: string | null;
+  mandate_status: string | null;
+  failure_code: string | null;
+  failure_detail: string | null;
+  amount: string;
+  currency: string;
+  journal_txn_id: number | null;
+  created_at: string;
+}
+
+export interface SpendPurchaseAllError { code: string; message: string; item_id?: string; component_id?: string }
+
+export interface SpendListParams {
+  employer_id?: string;
+  status?: string;
+}
+
+function spendQuery(params?: SpendListParams): string {
+  const q = new URLSearchParams();
+  if (params?.employer_id) q.set("employer_id", params.employer_id);
+  if (params?.status) q.set("status", params.status);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+// ------------------------------------------------------------------ onboarding kits
+/** GET /onboarding-kits/budgets[]. */
+export interface OnboardingBudget {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit: string | null;
+  spent_this_period: string;
+  remaining: string;
+  period: string;
+  enabled: boolean;
+  /** True while payroll for this employer is held: wages come first. */
+  locked: boolean;
+  lock_reason: string | null;
+}
+
+export interface OnboardingBudgetIn {
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit?: string | null;
+  enabled: boolean;
+}
+
+export type OnboardingKitStatus = "DRAFT" | "APPROVED" | "DENIED" | "PARTIALLY_PURCHASED" | "COMPLETED";
+export type OnboardingItemStatus = "PENDING" | "PURCHASED" | "FAILED";
+
+export interface OnboardingItem {
+  id: string;
+  kind: string;
+  label: string;
+  merchant: string;
+  amount: string;
+  currency: string;
+  status: OnboardingItemStatus;
+  failure_code: string | null;
+  failure_detail: string | null;
+  latest_purchase: SpendPurchase | null;
+}
+
+/** How a kit or trip came to exist: typed by hand, proposed in Silo chat, or drafted by a workflow. */
+export type SpendSource = "MANUAL" | "CHAT" | "WORKFLOW";
+
+export interface OnboardingKit {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  contractor_id: string | null;
+  contractor_name: string;
+  status: OnboardingKitStatus;
+  source: SpendSource;
+  /** Why the workflow drafted this kit (WORKFLOW kits); null otherwise. */
+  draft_reason: string | null;
+  approval_hash: string | null;
+  approval_expires_at: string | null;
+  decided_by_email: string | null;
+  decided_at: string | null;
+  deny_reason: string | null;
+  created_by_email: string | null;
+  created_at: string;
+  items: OnboardingItem[];
+}
+
+export interface OnboardingItemIn {
+  kind: string;
+  label: string;
+  merchant: string;
+  amount: string;
+  currency: string;
+}
+
+export interface OnboardingKitIn {
+  employer_id: string;
+  contractor_id?: string | null;
+  contractor_name?: string | null;
+  items: OnboardingItemIn[];
+}
+
+export interface OnboardingDecisionIn {
+  decision: "approve" | "deny";
+  reason?: string;
+}
+
+export interface OnboardingPurchaseAllResult { kit: OnboardingKit; purchases: SpendPurchase[]; errors: SpendPurchaseAllError[] }
+
+export const apiOnboarding = {
+  status: () => request<VicStatus>("/onboarding-kits/status"),
+  budgets: () => request<OnboardingBudget[]>("/onboarding-kits/budgets"),
+  updateBudget: (employerId: string, body: OnboardingBudgetIn) =>
+    request<OnboardingBudget>(`/onboarding-kits/budgets/${encodeURIComponent(employerId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  kits: (params?: SpendListParams) =>
+    request<OnboardingKit[]>(`/onboarding-kits/kits${spendQuery(params)}`),
+  createKit: (body: OnboardingKitIn) => post<OnboardingKit>("/onboarding-kits/kits", body),
+  decide: (id: string, body: OnboardingDecisionIn) =>
+    post<OnboardingKit>(`/onboarding-kits/kits/${encodeURIComponent(id)}/decision`, body),
+  /** Starts a purchase; returns 200 even when the attempt FAILED, and a PENDING row in live mode. Inspect `.status`. */
+  purchaseItem: (kitId: string, itemId: string) =>
+    post<SpendPurchase>(`/onboarding-kits/kits/${encodeURIComponent(kitId)}/items/${encodeURIComponent(itemId)}/purchase`),
+  purchaseAll: (kitId: string) =>
+    post<OnboardingPurchaseAllResult>(`/onboarding-kits/kits/${encodeURIComponent(kitId)}/purchase-all`),
+  /** Phase B of a live purchase: an explicit human click. */
+  completePurchase: (purchaseId: string, purchaseConfirmed: boolean) =>
+    post<SpendPurchase>(`/onboarding-kits/purchases/${encodeURIComponent(purchaseId)}/complete`, {
+      purchase_confirmed: purchaseConfirmed,
+    }),
+  cancelPurchase: (purchaseId: string) =>
+    post<SpendPurchase>(`/onboarding-kits/purchases/${encodeURIComponent(purchaseId)}/cancel`),
+  purchases: (params?: SpendListParams) =>
+    request<SpendPurchase[]>(`/onboarding-kits/purchases${spendQuery(params)}`),
+};
+
+// ------------------------------------------------------------------ travel
+/** GET /travel/budgets[]: the onboarding budget shape plus the four category caps. */
+export interface TravelBudget {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit: string | null;
+  spent_this_period: string;
+  remaining: string;
+  period: string;
+  enabled: boolean;
+  locked: boolean;
+  lock_reason: string | null;
+  cap_transport: string;
+  cap_lodging: string;
+  cap_per_diem: string;
+  cap_other: string;
+}
+
+export interface TravelBudgetIn {
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit?: string | null;
+  enabled: boolean;
+  cap_transport?: string;
+  cap_lodging?: string;
+  cap_per_diem?: string;
+  cap_other?: string;
+}
+
+export type TravelTripStatus = "REQUESTED" | "APPROVED" | "DENIED" | "PARTIALLY_PURCHASED" | "COMPLETED";
+export type TravelComponentKind = "TRANSPORT" | "LODGING" | "PER_DIEM" | "OTHER";
+export type TravelComponentStatus = "PENDING" | "PURCHASED" | "FAILED";
+
+export interface TravelComponent {
+  id: string;
+  kind: TravelComponentKind;
+  label: string;
+  merchant: string;
+  amount: string;
+  currency: string;
+  status: TravelComponentStatus;
+  /** True when the amount sits above the employer's cap for this kind. */
+  over_cap: boolean;
+  /** The cap for this kind as a decimal string. */
+  cap: string;
+  /** True when the amount exceeds the credential's per-transaction limit: it is blocked and never split. */
+  tx_limit_blocked: boolean;
+  failure_code: string | null;
+  failure_detail: string | null;
+  latest_purchase: SpendPurchase | null;
+}
+
+export interface TravelTrip {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  contractor_id: string | null;
+  contractor_name: string;
+  destination: string;
+  start_date: string;
+  end_date: string;
+  purpose: string;
+  status: TravelTripStatus;
+  /** True when a decider approved this trip with a cap override. */
+  caps_overridden: boolean;
+  /** Plain-English policy read: cap breaches and the credential-limit block, in words. */
+  policy_summary: string;
+  approval_hash: string | null;
+  approval_expires_at: string | null;
+  decided_by_email: string | null;
+  decided_at: string | null;
+  deny_reason: string | null;
+  created_by_email: string | null;
+  created_at: string;
+  components: TravelComponent[];
+}
+
+export interface TravelComponentIn {
+  kind: TravelComponentKind;
+  label: string;
+  merchant: string;
+  amount: string;
+  currency: string;
+}
+
+export interface TravelTripIn {
+  employer_id: string;
+  contractor_id?: string | null;
+  contractor_name?: string | null;
+  destination: string;
+  start_date: string;
+  end_date: string;
+  purpose: string;
+  components: TravelComponentIn[];
+}
+
+export interface TravelDecisionIn {
+  decision: "approve" | "deny";
+  override_caps?: boolean;
+  reason?: string;
+}
+
+export interface TravelPurchaseAllResult { trip: TravelTrip; purchases: SpendPurchase[]; errors: SpendPurchaseAllError[] }
+
+export const apiTravel = {
+  status: () => request<VicStatus>("/travel/status"),
+  budgets: () => request<TravelBudget[]>("/travel/budgets"),
+  updateBudget: (employerId: string, body: TravelBudgetIn) =>
+    request<TravelBudget>(`/travel/budgets/${encodeURIComponent(employerId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  trips: (params?: SpendListParams) =>
+    request<TravelTrip[]>(`/travel/trips${spendQuery(params)}`),
+  createTrip: (body: TravelTripIn) => post<TravelTrip>("/travel/trips", body),
+  decide: (id: string, body: TravelDecisionIn) =>
+    post<TravelTrip>(`/travel/trips/${encodeURIComponent(id)}/decision`, body),
+  /** Starts a purchase; returns 200 even when the attempt FAILED, and a PENDING row in live mode. Inspect `.status`. */
+  purchaseComponent: (tripId: string, componentId: string) =>
+    post<SpendPurchase>(`/travel/trips/${encodeURIComponent(tripId)}/components/${encodeURIComponent(componentId)}/purchase`),
+  purchaseAll: (tripId: string) =>
+    post<TravelPurchaseAllResult>(`/travel/trips/${encodeURIComponent(tripId)}/purchase-all`),
+  completePurchase: (purchaseId: string, purchaseConfirmed: boolean) =>
+    post<SpendPurchase>(`/travel/purchases/${encodeURIComponent(purchaseId)}/complete`, {
+      purchase_confirmed: purchaseConfirmed,
+    }),
+  cancelPurchase: (purchaseId: string) =>
+    post<SpendPurchase>(`/travel/purchases/${encodeURIComponent(purchaseId)}/cancel`),
+  purchases: (params?: SpendListParams) =>
+    request<SpendPurchase[]>(`/travel/purchases${spendQuery(params)}`),
 };

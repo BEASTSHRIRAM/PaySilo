@@ -142,6 +142,8 @@ class EmployerIn(BaseModel):
     contact_name: str | None = Field(default=None, max_length=120)
     contact_email: EmailStr | None = None
     funding_currency: str = Field(default="USD", min_length=3, max_length=3)
+    # New employers default to the safe mode: a short wallet pays nothing and holds the run.
+    settlement_mode: Literal["ALL_OR_NOTHING", "PARTIAL"] = "ALL_OR_NOTHING"
 
     @field_validator("country", "funding_currency")
     @classmethod
@@ -167,6 +169,7 @@ class ContractorIn(BaseModel):
     account_number: str | None = Field(default=None, min_length=4, max_length=34)
     routing_code: str | None = Field(default=None, max_length=20)
     default_amount: str | None = None
+    priority: int = Field(default=100, ge=0, le=9999)
 
     @field_validator("country", "currency")
     @classmethod
@@ -204,6 +207,7 @@ class ContractorOut(BaseModel):
     account_last4: str | None = None
     swift_code: str | None
     default_amount: str | None
+    priority: int = 100
     is_active: bool
     # contractor trust (status/dates only - never tax ids, never full bank values)
     tax_status: str = "UNKNOWN"
@@ -226,11 +230,18 @@ class EmployerOut(BaseModel):
     contact_name: str | None
     contact_email: str | None
     funding_currency: str
+    settlement_mode: str = "PARTIAL"
     status: str
     airwallex_account_id: str | None
     balances: dict[str, str]
     contractor_count: int
     created_at: datetime
+
+
+class EmployerPatchIn(BaseModel):
+    """Owner/admin edits of an employer's settlement behaviour. Only fields sent are changed."""
+
+    settlement_mode: Literal["ALL_OR_NOTHING", "PARTIAL"] | None = None
 
 
 class EmployerDetailOut(EmployerOut):
@@ -520,3 +531,122 @@ class BenefitRequestOut(BaseModel):
 class BenefitDecisionIn(BaseModel):
     decision: Literal["approve", "deny"]
     reason: str | None = Field(default=None, max_length=2000)
+
+
+# ---------------------------------------------------------------- workflows
+class WorkflowIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool = True
+    graph: dict
+
+    @field_validator("name", "description")
+    @classmethod
+    def _strip_wf(cls, v: str | None) -> str | None:
+        v = v.strip() if isinstance(v, str) else v
+        return v or None
+
+
+class WorkflowUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    enabled: bool | None = None
+    graph: dict | None = None
+
+
+class WorkflowOut(BaseModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    name: str
+    description: str | None
+    enabled: bool
+    trigger_type: str
+    graph: dict | None
+    created_by_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowRunStepOut(BaseModel):
+    id: uuid.UUID
+    run_id: uuid.UUID
+    node_id: str
+    node_type: str
+    status: str
+    detail: str
+    # Parsed JSON object (the ORM stores JSON, the API returns the object,
+    # never a raw string). condition.field_check outputs always carry
+    # {branch: "true"|"false", field, operator, value, actual, result}.
+    output: dict | None
+    created_at: datetime
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class WorkflowRunOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    organization_id: uuid.UUID
+    trigger_event: str
+    entity_kind: str
+    entity_id: str
+    entity_label: str | None = None
+    dedupe_key: str
+    status: str
+    context: dict | None
+    error_detail: str | None
+    started_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+    steps: list[WorkflowRunStepOut] = []
+
+
+class WorkflowTaskOut(BaseModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    kind: str
+    title: str
+    detail: str
+    employer_id: uuid.UUID | None
+    entity_kind: str | None
+    entity_id: str | None
+    status: str
+    created_by_run_id: uuid.UUID | None
+    created_at: datetime
+
+
+class WorkflowApprovalOut(BaseModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    workflow_run_id: uuid.UUID | None
+    entity_kind: str
+    entity_id: str
+    status: str
+    decided_by_id: uuid.UUID | None
+    decided_at: datetime | None
+    created_at: datetime
+
+
+class WorkflowBriefLineOut(BaseModel):
+    contractor_name: str
+    amount: str
+    currency: str
+    reason: str | None = None  # why a held line is held (risk gate); None when it is simply short of funds
+
+
+class WorkflowBriefEntryOut(BaseModel):
+    workflow_run_id: str | None = None  # a workflow run parked at a gate on this payroll run, if any
+    workflow_name: str | None = None
+    run_id: str
+    run_status: str
+    employer_id: str
+    employer_name: str | None
+    settlement_mode: str | None = None
+    pay_date: str | None = None
+    total_required: str | None
+    balance: str | None
+    shortfall: str | None
+    currency: str | None
+    can_approve: bool = False  # the run is waiting for the signed human decision (POST /runs/{id}/decision)
+    will_pay: list[WorkflowBriefLineOut] = []
+    will_hold: list[WorkflowBriefLineOut] = []

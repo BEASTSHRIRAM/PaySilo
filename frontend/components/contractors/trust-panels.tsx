@@ -180,7 +180,7 @@ export function EditContractorPanel({
   const c = contractor;
   const [form, setForm] = useState({
     full_name: c.full_name, email: c.email ?? "", country: c.country, currency: c.currency, payout_method: c.payout_method as "SWIFT" | "LOCAL",
-    default_amount: c.default_amount ?? "", iban: "", swift_code: "", account_number: "", routing_code: "",
+    default_amount: c.default_amount ?? "", priority: String(c.priority ?? 100), iban: "", swift_code: "", account_number: "", routing_code: "",
     tax_status: c.tax_status as TaxStatus, tax_form_type: c.tax_form_type as TaxFormType,
     tax_form_status: (c.tax_form_status === "EXPIRED" ? "RECEIVED" : c.tax_form_status) as TaxFormStatus,
     tax_form_received_at: c.tax_form_received_at ?? "", tax_form_expires_at: c.tax_form_expires_at ?? "",
@@ -207,6 +207,7 @@ export function EditContractorPanel({
     if (form.currency.trim().toUpperCase() !== c.currency) body.currency = form.currency.trim().toUpperCase();
     if (form.payout_method !== c.payout_method) body.payout_method = form.payout_method;
     if ((form.default_amount.trim() || null) !== c.default_amount) body.default_amount = form.default_amount.trim() || null;
+    if (form.priority.trim() !== "" && Number(form.priority) !== (c.priority ?? 100)) body.priority = Math.max(0, Math.min(9999, Math.floor(Number(form.priority)) || 0));
     for (const k of ["iban", "swift_code", "account_number", "routing_code"] as const) {
       if (form[k].trim()) body[k] = form[k].trim(); // blank = keep what is stored
     }
@@ -254,6 +255,11 @@ export function EditContractorPanel({
           <div><Label htmlFor="e-email">Email</Label><Input id="e-email" type="email" value={form.email} onChange={set("email")} className="mt-1.5" />{fe("email")}</div>
           <div><Label htmlFor="e-country">Country (2-letter code)</Label><Input id="e-country" value={form.country} onChange={set("country")} maxLength={2} className="mt-1.5" />{fe("country")}</div>
           <div><Label htmlFor="e-amount">Default amount</Label><Input id="e-amount" type="number" min="0" step="0.01" value={form.default_amount} onChange={set("default_amount")} className="mt-1.5" />{fe("default_amount")}</div>
+          <div className="sm:col-span-2">
+            <Label htmlFor="e-priority">Payment priority</Label>
+            <Input id="e-priority" type="number" min="0" max="9999" step="1" value={form.priority} onChange={set("priority")} className="mt-1.5 sm:max-w-40" />{fe("priority")}
+            <p className="mt-1 text-xs font-semibold text-sage-500">Lower numbers are paid first (default 100). It only matters when the employer is set to Partial and the wallet is short.</p>
+          </div>
         </fieldset>
 
         <fieldset className="grid gap-4 sm:grid-cols-2">

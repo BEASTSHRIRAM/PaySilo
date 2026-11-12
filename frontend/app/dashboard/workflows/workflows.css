@@ -1,0 +1,91 @@
+/* PaySilo overrides for React Flow — desert-dusk tokens, no default blue. */
+.paysilo-flow {
+  background: #fffaf3;
+  border-radius: 1.5rem;
+}
+.paysilo-flow .react-flow__background {
+  background: #fffaf3;
+}
+.paysilo-flow .react-flow__controls {
+  border: 1px solid rgba(36, 72, 85, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(17, 38, 46, 0.12);
+}
+.paysilo-flow .react-flow__controls-button {
+  background: #fff;
+  border-bottom: 1px solid rgba(36, 72, 85, 0.12);
+  fill: #244855;
+}
+.paysilo-flow .react-flow__controls-button:hover {
+  background: #fbe9d0;
+}
+.paysilo-flow .react-flow__minimap {
+  border: 1px solid rgba(36, 72, 85, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+.paysilo-flow .react-flow__edge.selected .react-flow__edge-path,
+.paysilo-flow .react-flow__edge:focus .react-flow__edge-path {
+  stroke: #e64833;
+  stroke-width: 2.5;
+}
+.paysilo-flow .react-flow__edge-path {
+  stroke: #244855;
+  stroke-width: 1.8;
+}
+.paysilo-flow .react-flow__connection-path {
+  stroke: #e64833;
+  stroke-width: 2;
+}
+.paysilo-flow .react-flow__handle {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #fff;
+  background: #244855;
+  box-shadow: 0 0 0 1px rgba(36, 72, 85, 0.35);
+}
+.paysilo-flow .react-flow__handle:hover {
+  background: #e64833;
+}
+.paysilo-flow .react-flow__node.selected > div {
+  box-shadow: 0 0 0 3px #e64833, 0 8px 20px rgba(17, 38, 46, 0.16);
+}
+.paysilo-flow .react-flow__attribution {
+  background: rgba(255, 250, 243, 0.85);
+  color: #6f8f8e;
+  font-size: 10px;
+}
+/* Edge hover thickens (bezier, neutral ink at rest). */
+.paysilo-flow .react-flow__edge:hover .react-flow__edge-path {
+  stroke-width: 3;
+}
+.paysilo-flow .react-flow__edge.wf-edge-taken .react-flow__edge-path {
+  stroke: #3a8c6b;
+  stroke-width: 3;
+}
+.paysilo-flow .react-flow__edge.wf-edge-taken-failed .react-flow__edge-path {
+  stroke: #e64833;
+  stroke-width: 3;
+}
+/* WAITING gate: amber pulsing ring around the node card. */
+@keyframes wf-pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(229, 191, 140, 0.85), 0 6px 16px rgba(17, 38, 46, 0.1); }
+  70% { box-shadow: 0 0 0 12px rgba(229, 191, 140, 0), 0 6px 16px rgba(17, 38, 46, 0.1); }
+  100% { box-shadow: 0 0 0 0 rgba(229, 191, 140, 0), 0 6px 16px rgba(17, 38, 46, 0.1); }
+}
+.wf-node-waiting {
+  animation: wf-pulse-ring 1.8s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf-node-waiting { animation: none; box-shadow: 0 0 0 3px #e5bf8c; }
+}
+.paysilo-flow .react-flow__edge-textbg {
+  fill: #fffaf3;
+}
+.paysilo-flow .react-flow__edge-text {
+  fill: #244855;
+  font-weight: 700;
+  font-size: 11px;
+}

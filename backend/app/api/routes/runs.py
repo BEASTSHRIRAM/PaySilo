@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -13,6 +13,7 @@ from ...services.runtime import HeldLineUnavailable, PlatformRuntime, RuntimeCon
 from ..deps import APPROVER_ROLES, EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
 from ..schemas import DecisionIn, RunDetailOut, RunIn, RunOut
 from ..serializers import run_detail_out, run_out
+from . import spend_hooks as hooks
 from .employers import load_employer
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -103,13 +104,16 @@ def get_run(run_id: uuid.UUID, tenant: Tenant = Depends(current_tenant), db: Ses
 
 
 @router.post("/{run_id}/decision", response_model=RunDetailOut)
-def decide(run_id: uuid.UUID, body: DecisionIn, tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+def decide(request: Request, run_id: uuid.UUID, body: DecisionIn, tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
            db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
     run = load_run(db, tenant, run_id)
     try:
         runtime.decide(db, run=run, employer=run.employer, user=tenant.user, decision=body.decision)
     except RuntimeConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    # The REAL human decision (a Visa TAP-signed approval) is what resumes a workflow gate parked on this run.
+    hooks.resolve_gate(request, db, tenant, "run", run.id, "APPROVED" if body.decision == "approve" else "REJECTED",
+                       tenant.user)
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run_id))
 
