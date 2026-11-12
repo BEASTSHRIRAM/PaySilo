@@ -18,7 +18,11 @@ adapter is two-phase (mandate -> human authorizes in Airi -> explicit
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 import uuid
+from collections import deque
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -26,7 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Employer
-from ...partners.vic import vic_status
+from ...partners.vic import AiriVicAdapter, VicError, VicUnavailable, vic_status
 from ...services.benefits import (
     BenefitError,
     cancel_purchase,
@@ -46,6 +50,8 @@ from ..schemas import (
     BenefitCompleteIn,
     BenefitPurchaseOut,
     BenefitRequestIn,
+    AiriLoginOut,
+    AiriStatusOut,
     BenefitRequestOut,
     VicStatusOut,
 )
@@ -54,6 +60,29 @@ from . import spend_hooks as hooks
 from .employers import load_employer
 
 router = APIRouter(prefix="/benefits", tags=["benefits"])
+logger = logging.getLogger(__name__)
+audit_log = logging.getLogger("paysilo.audit")
+
+
+class _ConnectLimiter:
+    """Sliding window: ``limit`` connects per ``window`` seconds per organization (in memory)."""
+
+    def __init__(self, limit: int = 5, window: float = 600.0) -> None:
+        self.limit, self.window = limit, window
+        self._hits: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> int:
+        """Record a hit; returns 0 when allowed, else seconds to wait."""
+        with self._lock:
+            now = time.monotonic()
+            q = self._hits.setdefault(key, deque())
+            while q and now - q[0] > self.window:
+                q.popleft()
+            if len(q) >= self.limit:
+                return max(1, int(self.window - (now - q[0])))
+            q.append(now)
+            return 0
 
 
 def _benefit_error(exc: BenefitError) -> HTTPException:
@@ -86,6 +115,73 @@ def get_status(tenant: Tenant = Depends(current_tenant),
                runtime: PlatformRuntime = Depends(get_runtime),
                settings: Settings = Depends(get_settings)) -> VicStatusOut:
     return VicStatusOut(**vic_status(settings, runtime.vic))
+
+
+# ---------------------------------------------------------------- Connect Airi
+# Server-side sign-in of the airi-cli (one Airi account per server, shared by every
+# organization). Owner/admin only. The device code is returned to the caller but never
+# logged or audited; the audit line records who connected / disconnected.
+
+def _airi(runtime: PlatformRuntime) -> AiriVicAdapter:
+    adapter = runtime.vic
+    if not isinstance(adapter, AiriVicAdapter):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail={
+            "code": "VIC_SIMULATED",
+            "message": "VIC_MODE is simulated, so there is no Airi sign-in to manage. "
+                       "Set VIC_MODE=live on the server to connect Airi."})
+    return adapter
+
+
+def _airi_call(fn, *args):
+    try:
+        return fn(*args)
+    except VicUnavailable as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            detail={"code": "AIRI_CLI_UNAVAILABLE", "message": str(exc)}) from None
+    except VicError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            detail={"code": exc.code, "message": exc.detail}) from None
+
+
+@router.get("/airi/status", response_model=AiriStatusOut)
+def airi_status(tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+                runtime: PlatformRuntime = Depends(get_runtime)) -> AiriStatusOut:
+    return AiriStatusOut(**_airi_call(_airi(runtime).auth_status))
+
+
+@router.post("/airi/connect", response_model=AiriLoginOut)
+def airi_connect(request: Request, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+                 runtime: PlatformRuntime = Depends(get_runtime)) -> AiriLoginOut:
+    adapter = _airi(runtime)
+    limiter = getattr(request.app.state, "airi_connect_limiter", None)
+    if limiter is None:
+        limiter = request.app.state.airi_connect_limiter = _ConnectLimiter()
+    wait = limiter.hit(str(tenant.organization.id))
+    if wait:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"Too many connect attempts. Try again in {wait} seconds.",
+                            headers={"Retry-After": str(wait)})
+    result = _airi_call(adapter.start_login, "PaySilo")
+    audit_log.info("airi.connect.started org=%s user=%s state=%s", tenant.organization.id, tenant.user.id,
+                   result["state"])
+    return AiriLoginOut(**result)
+
+
+@router.post("/airi/poll", response_model=AiriLoginOut)
+def airi_poll(tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+              runtime: PlatformRuntime = Depends(get_runtime)) -> AiriLoginOut:
+    adapter = _airi(runtime)
+    result = _airi_call(adapter.poll_login, 8.0)
+    if result["state"] in ("connected", "denied", "expired", "failed"):
+        audit_log.info("airi.connect.%s org=%s user=%s", result["state"], tenant.organization.id, tenant.user.id)
+    return AiriLoginOut(**result)
+
+
+@router.post("/airi/disconnect", response_model=AiriLoginOut)
+def airi_disconnect(tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+                    runtime: PlatformRuntime = Depends(get_runtime)) -> AiriLoginOut:
+    result = _airi_call(_airi(runtime).logout)
+    audit_log.info("airi.disconnected org=%s user=%s", tenant.organization.id, tenant.user.id)
+    return AiriLoginOut(**result)
 
 
 @router.get("/budgets", response_model=list[BenefitBudgetOut])

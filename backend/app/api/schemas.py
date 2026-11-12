@@ -418,6 +418,23 @@ class VicStatusOut(BaseModel):
     cli_available: bool
     authenticated: bool = True
     two_phase: bool = False
+    session_expires: str | None = None
+
+
+class AiriStatusOut(BaseModel):
+    cli_available: bool
+    authenticated: bool
+    session_expires: str | None = None
+    pending: bool = False
+
+
+class AiriLoginOut(BaseModel):
+    state: str  # connected | pending | expired | denied | failed | disconnected
+    verification_uri: str | None = None
+    user_code: str | None = None
+    expires_in: int | None = None
+    session_expires: str | None = None
+    message: str | None = None
 
 
 class BenefitBudgetOut(BaseModel):

@@ -40,8 +40,10 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -224,6 +226,25 @@ def _first(d: dict, *keys: str):
     return None
 
 
+_AIRI_HOSTS = ("airi.com", "airwallex.com")
+
+
+def validate_verification_url(url: str) -> str:
+    """Only https links on airi.com / airwallex.com (or their subdomains) reach the browser."""
+    ok = False
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").lower()
+        ok = (parts.scheme == "https" and not parts.username and parts.port in (None, 443)
+              and any(host == h or host.endswith("." + h) for h in _AIRI_HOSTS))
+    except ValueError:
+        ok = False
+    if not ok:
+        raise VicError("AIRI_LOGIN_REJECTED", "The Airi CLI returned a sign-in link that is not on an "
+                                              "Airi or Airwallex domain, so it was refused.")
+    return url.strip()
+
+
 def merchant_url_for(merchant: str) -> str | None:
     """A merchant URL only when the merchant is given as a domain/URL; never invented."""
     m = merchant.strip()
@@ -253,6 +274,11 @@ class AiriVicAdapter:
         self._probe_at = 0.0
         self._probe_val: tuple[bool, bool] = (False, False)
         self.cli_available = False
+        self.session_expires: str | None = None  # RFC3339 from whoami; no other whoami field is kept
+        # One Airi account per server: the in-flight login lives in process memory, globally.
+        self._login_lock = threading.RLock()
+        self._poll_lock = threading.Lock()
+        self._pending: dict | None = None  # {uri, code, expires_at (monotonic)}
 
     # -- process plumbing ---------------------------------------------------
     def _argv(self, args: list[str]) -> list[str]:
@@ -274,6 +300,104 @@ class AiriVicAdapter:
             raise VicUnavailable(f"The Airi CLI could not be run: {_safe(str(exc))}") from None
         return _Cli(proc.returncode, proc.stdout or "", proc.stderr or "")
 
+    # -- connect / disconnect (server-side Airi sign-in) ---------------------
+    # Only ``authenticated`` and ``session_expires`` are read from ``whoami``;
+    # personal fields (email, phone) are never kept. The device code and the
+    # verification URL are never logged.
+    def auth_status(self) -> dict:
+        present, authed = self.probe(force=True)
+        return {"cli_available": present, "authenticated": authed,
+                "session_expires": self.session_expires if authed else None,
+                "pending": self._pending_view() is not None}
+
+    def _pending_view(self) -> dict | None:
+        with self._login_lock:
+            p = self._pending
+            if p and time.monotonic() >= p["expires_at"]:
+                self._pending = None
+                return None
+            return p
+
+    @staticmethod
+    def _pending_out(p: dict) -> dict:
+        return {"state": "pending", "verification_uri": p["uri"], "user_code": p["code"],
+                "expires_in": max(0, int(p["expires_at"] - time.monotonic()))}
+
+    def _connected(self) -> dict:
+        self.probe(force=True)
+        return {"state": "connected", "session_expires": self.session_expires}
+
+    def start_login(self, client_name: str = "PaySilo") -> dict:
+        """Begin (or reuse) a non-blocking device login. Returns immediately."""
+        with self._login_lock:
+            present, authed = self.probe(force=True)
+            if not present:
+                raise VicUnavailable("The Airi CLI is not available on this server "
+                                     "(check AIRI_CLI_COMMAND / install @airwallex/airi-cli).")
+            if authed:
+                self._pending = None
+                return {"state": "connected", "session_expires": self.session_expires}
+            p = self._pending_view()
+            if p:  # never create a second code while one is pending
+                return self._pending_out(p)
+            out = self._run(["auth", "login", "--client-name", _safe(client_name, 40) or "PaySilo",
+                             "-o", "json"], timeout=30)
+            data = _json(out.stdout)
+            if out.returncode != 0 or not isinstance(data, dict):
+                raise VicError("AIRI_LOGIN_FAILED", "The Airi CLI could not start a sign-in "
+                                                    "(unexpected response).")
+            if data.get("authenticated") is True:
+                return self._connected()
+            uri = _first(data, "verification_uri_complete", "verification_uri", "verification_url")
+            code = _first(data, "user_code", "code")
+            if not uri or not code:
+                raise VicError("AIRI_LOGIN_FAILED", "The Airi CLI returned an unexpected sign-in response.")
+            uri = validate_verification_url(uri)
+            raw_exp = data.get("expires_in")
+            expires_in = int(raw_exp) if isinstance(raw_exp, (int, float)) and 30 <= raw_exp <= 3600 else 600
+            self._pending = {"uri": uri, "code": code[:64], "expires_at": time.monotonic() + expires_in}
+            return self._pending_out(self._pending)
+
+    def poll_login(self, timeout_s: float = 8.0) -> dict:
+        """One short wait for approval. The browser calls this repeatedly."""
+        p = self._pending_view()
+        if p is None:
+            present, authed = self.probe(force=True)
+            if not present:
+                raise VicUnavailable("The Airi CLI is not available on this server.")
+            if authed:
+                return {"state": "connected", "session_expires": self.session_expires}
+            return {"state": "expired", "message": "The sign-in code expired. Try again for a new code."}
+        with self._poll_lock:
+            try:
+                out = self._run(["auth", "poll", "-o", "json"], timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                return self._pending_out(p)
+        data = _json(out.stdout)
+        text = out.text.lower()
+        if isinstance(data, dict) and data.get("authenticated") is True:
+            with self._login_lock:
+                self._pending = None
+            return self._connected()
+        if "authorization_pending" in text or "slow_down" in text:
+            return self._pending_out(p)
+        with self._login_lock:
+            self._pending = None
+        if "denied" in text:
+            return {"state": "denied", "message": "The sign-in was denied in Airi. Try again."}
+        if "expired" in text:
+            return {"state": "expired", "message": "The sign-in code expired. Try again for a new code."}
+        return {"state": "failed", "message": "Airi sign-in did not complete. Try again."}
+
+    def logout(self) -> dict:
+        with self._login_lock:
+            self._pending = None
+            out = self._run(["auth", "logout", "-o", "json"], timeout=20)
+            self.probe(force=True)
+            if out.returncode != 0 and self._probe_val[1]:
+                raise VicError("AIRI_LOGOUT_FAILED", "The Airi CLI could not remove the session.")
+            return {"state": "disconnected"}
+
     # -- readiness ----------------------------------------------------------
     def probe(self, *, force: bool = False) -> tuple[bool, bool]:
         """(cli_present, authenticated) from ``auth whoami``. Cached briefly."""
@@ -285,10 +409,14 @@ class AiriVicAdapter:
             data = _json(out.stdout)
             if isinstance(data, dict) and "authenticated" in data:
                 val = (True, data.get("authenticated") is True)
+                exp = data.get("session_expires")
+                self.session_expires = _safe(exp, 40) if val[1] and isinstance(exp, str) and exp else None
             else:
                 val = (False, False)
         except (VicUnavailable, subprocess.TimeoutExpired):
             val = (False, False)
+        if not val[1]:
+            self.session_expires = None
         self._probe_val, self._probe_at = val, now
         self.cli_available = val[0]
         return val
@@ -459,4 +587,5 @@ def vic_status(settings: Settings, adapter: VicAdapter) -> dict:
         "cli_available": present,
         "authenticated": authed,
         "two_phase": adapter.two_phase,
+        "session_expires": getattr(adapter, "session_expires", None) if authed else None,
     }
