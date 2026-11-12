@@ -11,7 +11,7 @@ const CREW = [
   { icon: FileText, name: "Intake Agent", kind: "LLM", job: "Reads payroll sheets and emails into pay lines. Powered by Claude.", partner: "Claude" },
   { icon: Calculator, name: "Pricing Agent", kind: "Code", job: "Salaries plus payout fees per currency, before any FX. No rate, no answer." },
   { icon: Scale, name: "Balance & Policy", kind: "Code", job: "Reads only this employer's wallet. Covers payroll, run fee and reserve — or holds." },
-  { icon: Fingerprint, name: "Approval Gate", kind: "Human", job: "Pauses for your decision on the exact amounts, Visa TAP-signed.", partner: "Visa TAP" },
+  { icon: Fingerprint, name: "Approval Gate", kind: "Human", job: "Pauses for your decision on the exact amounts, cryptographically signed.", partner: "Approval signing" },
   { icon: ShieldAlert, name: "Escalation", kind: "Human", job: "A short payroll is held and explained. Never covered from another silo." },
   { icon: Coins, name: "FX & Payout", kind: "Tools", job: "Converts and pays on the employer's behalf with idempotent request ids.", partner: "Airwallex" },
   { icon: Scale, name: "Fee & Reconcile", kind: "Code", job: "Charges the run fee only if payroll ran, then proves ledger = wallet." },

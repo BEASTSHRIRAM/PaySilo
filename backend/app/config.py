@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -80,7 +81,11 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 60 * 12
     cookie_secure: bool = False
     cors_origins: list[str] = ["http://localhost:3000"]
+    public_app_url: str | None = None  # base URL printed in proof-PDF verify links/QR (default: first CORS origin)
     seed_demo: bool = True
+    # 1099-NEC watch: US-person contractors whose calendar-year-to-date payments reach this many USD.
+    # USD 2,000 applies to payments made after 2025-12-31 (vendor sources) - confirm with your tax advisor.
+    tax_1099_threshold_usd: Decimal = Decimal("2000")
 
     # Visa TAP signing key. TAP_PRIVATE_KEY accepts PEM text or base64
     # (base64-encoded PEM, or a base64 raw 32-byte Ed25519 seed). When set,
@@ -97,23 +102,35 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
-    # Visa VIC via Airi CLI (Silo Benefits). Until VIC_CREDENTIAL is set,
-    # benefits run in honest SIMULATED mode with the test card. When a
-    # credential IS set, the Airi CLI must also be available — the live
+    # Visa VIC via the real Airi CLI (Silo Benefits). VIC_MODE=simulated (the
+    # default) keeps benefits in honest SIMULATED mode with the published test
+    # card. VIC_MODE=live uses `airi-cli` (npm i -g @airwallex/airi-cli@beta,
+    # then `airi-cli auth login`); if the CLI is missing or signed out the live
     # adapter fails closed and never falls back to simulation.
-    vic_credential: str | None = None
-    airi_cli_path: str | None = None
+    # AIRI_CLI_COMMAND is shell-split, e.g. "wsl -d Ubuntu-24.04 -- airi-cli".
+    vic_mode: str = "simulated"
+    airi_cli_command: str = "airi-cli"
+    vic_merchant_country: str = "US"
     vic_test_card: bool = True
 
-    # Email (SMTP) — platform notifications via the outbox in
-    # app/services/email.py. Until SMTP_HOST and EMAIL_FROM are both set,
-    # email is NOT_CONFIGURED: messages are recorded in the outbox with
-    # that status and nothing is sent. Secrets come from env only.
-    smtp_host: str | None = None
-    smtp_port: int = 587
-    smtp_user: str | None = None
-    smtp_password: str | None = None
+    # Email via Brevo SMTP (stdlib smtplib, STARTTLS). Without BREVO_SMTP_USER + BREVO_SMTP_KEY the outbox
+    # only queues messages ("not configured"); nothing is sent. The key is a secret: never logged.
+    brevo_smtp_host: str = "smtp-relay.brevo.com"
+    brevo_smtp_port: int = 587
+    brevo_smtp_user: str | None = None
+    brevo_smtp_key: str | None = None
     email_from: str | None = None
+    email_from_name: str = "PaySilo"
+    # Public base URL of the web app, used for deep links in emails.
+    app_base_url: str = "http://localhost:3000"
+    # When funds arrive, prepare (never approve) a continuation run for held lines the wallet can now cover.
+    auto_continue_held: bool = True
+    # Background funding-reminder sweep (every 30 min). Tests turn it off.
+    funding_reminders: Literal["on", "off"] = "on"
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.brevo_smtp_user and self.brevo_smtp_key and self.email_from)
 
     @property
     def demo_mode(self) -> bool:

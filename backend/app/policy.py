@@ -75,7 +75,6 @@ class ContractorPayroll:
     amount: Decimal
     currency: str
     method: str = "SWIFT"
-    priority: int = 0  # PARTIAL walk order (lower first); 0 = unset -> line order
 
 
 @dataclass(frozen=True)
@@ -103,6 +102,9 @@ class PayrollAssessment:
     available_usd: Decimal
     shortfall_usd: Decimal  # vs required_usd + reserve floor
     can_run: bool
+    # True when the run fee was already collected on the original payroll (a
+    # continuation run): ``platform_fee_usd`` is then zero by design.
+    run_fee_waived: bool = False
 
 
 def _rate(usd_value: dict[str, Decimal], currency: str, where: str) -> Decimal:
@@ -119,8 +121,13 @@ def assess_payroll(
     usd_value: dict[str, Decimal],
     employer_balance: dict[str, Decimal],
     policy: PayrollPolicy = PAYROLL_POLICY,
+    waive_run_fee: bool = False,
 ) -> PayrollAssessment:
     """Price payroll fees-first and decide affordability from ONE wallet.
+
+    ``waive_run_fee`` is for a continuation run whose payroll already paid the
+    run fee: the fee is neither priced nor required again (the reserve floor
+    and payout fees still are).
 
     Only ``employer_balance`` — that employer's own wallet — is consulted.
     There is deliberately no parameter for "platform total": the aggregated
@@ -167,7 +174,7 @@ def assess_payroll(
         available += amount * _rate(usd_value, currency, "in the employer wallet")
     available_usd = round_money(available)
 
-    platform_fee = round_money(policy.platform_fee_per_run_usd) if requirements else ZERO
+    platform_fee = round_money(policy.platform_fee_per_run_usd) if requirements and not waive_run_fee else ZERO
     required_usd = round_money(payroll_usd + platform_fee)
     needed_usd = round_money(required_usd + policy.reserve_floor_usd) if requirements else ZERO
     shortfall_usd = round_money(max(Decimal("0"), needed_usd - available_usd))
@@ -184,6 +191,7 @@ def assess_payroll(
         available_usd=available_usd,
         shortfall_usd=shortfall_usd,
         can_run=bool(requirements) and shortfall_usd == 0,
+        run_fee_waived=bool(waive_run_fee),
     )
 
 
@@ -208,6 +216,7 @@ def plan_partial_payout(
     usd_value: dict[str, Decimal],
     employer_balance: dict[str, Decimal],
     policy: PayrollPolicy = PAYROLL_POLICY,
+    waive_run_fee: bool = False,
 ) -> PartialPayoutPlan | None:
     """Kit 6 shortfall rule: pay what the employer's own balance supports.
 
@@ -217,7 +226,7 @@ def plan_partial_payout(
     batch is affordable (nothing to split) or when not even the smallest
     line fits (hold everything). Only ``employer_balance`` is consulted.
     """
-    full = assess_payroll(contractors, usd_value, employer_balance, policy)
+    full = assess_payroll(contractors, usd_value, employer_balance, policy, waive_run_fee=waive_run_fee)
     if full.can_run or not contractors:
         return None
     cost: dict[int, Decimal] = {}
@@ -226,7 +235,8 @@ def plan_partial_payout(
         line_total = to_decimal(c.amount) + policy.payout_fee(ccy, c.method)
         cost[i] = line_total * _rate(usd_value, ccy, "for payroll")
     order = sorted(range(len(contractors)), key=lambda i: (cost[i], i))
-    budget = full.available_usd - policy.platform_fee_per_run_usd - policy.reserve_floor_usd
+    run_fee = ZERO if waive_run_fee else policy.platform_fee_per_run_usd
+    budget = full.available_usd - run_fee - policy.reserve_floor_usd
     chosen: list[int] = []
     spent = Decimal("0")
     for i in order:
@@ -238,102 +248,11 @@ def plan_partial_payout(
     # verify with the real assessment and drop the largest line until it fits.
     while chosen:
         paid = sorted(chosen)
-        assessment = assess_payroll([contractors[i] for i in paid], usd_value, employer_balance, policy)
+        assessment = assess_payroll([contractors[i] for i in paid], usd_value, employer_balance, policy,
+                                    waive_run_fee=waive_run_fee)
         if assessment.can_run:
             held = tuple(i for i in range(len(contractors)) if i not in paid)
             return PartialPayoutPlan(paid=tuple(paid), held=held, assessment=assessment, full=full)
-        chosen.pop()
-    return None
-
-
-def line_cost_usd(line: ContractorPayroll, usd_value: dict[str, Decimal],
-                  policy: PayrollPolicy = PAYROLL_POLICY) -> Decimal:
-    """One line's full cost in USD: net amount + its own payout fee, converted."""
-    ccy = line.currency.upper()
-    total = to_decimal(line.amount) + policy.payout_fee(ccy, line.method)
-    return round_money(total * _rate(usd_value, ccy, "for payroll"))
-
-
-def walk_priority(costs_usd: list[Decimal], spendable_usd: Decimal,
-                  fee_once_usd: Decimal) -> tuple[list[int], Decimal]:
-    """Greedy skip-and-continue walk over ``costs_usd`` IN THE GIVEN ORDER.
-
-    A line is payable when the remaining spendable balance covers its cost;
-    an unaffordable line is skipped and the walk CONTINUES (a smaller later
-    line may still fit). ``fee_once_usd`` (the platform run fee) is deducted
-    from spendable at the moment the FIRST line is taken — so the first line
-    must cover its own cost plus that fee. Returns (taken indices in walk
-    order, spendable remaining after costs + the once-only fee).
-    """
-    remaining = to_decimal(spendable_usd)
-    taken: list[int] = []
-    for i, cost in enumerate(costs_usd):
-        cost = to_decimal(cost)
-        fee = to_decimal(fee_once_usd) if not taken else Decimal("0")
-        if cost + fee <= remaining:
-            taken.append(i)
-            remaining -= cost + fee
-    return taken, round_money(remaining)
-
-
-@dataclass(frozen=True)
-class PriorityPayoutPlan:
-    """The PARTIAL settlement split: which lines settle now, which are held.
-
-    ``paid`` / ``held`` are indices into the contractor list given to
-    :func:`plan_priority_payout`, in priority walk order for ``paid``.
-    ``assessment`` prices only the paid lines (fee-first, run fee + reserve);
-    ``full`` prices the whole batch. ``residual_shortfall_usd`` is pinned as
-    ``max(0, held lines' (net + own payout fee) in USD − spendable left after
-    the paid settlement)`` where spendable-after = available − paid required
-    (incl. the one run fee) − reserve floor.
-    """
-
-    paid: tuple[int, ...]
-    held: tuple[int, ...]
-    assessment: PayrollAssessment
-    full: PayrollAssessment
-    residual_shortfall_usd: Decimal
-
-
-def plan_priority_payout(
-    contractors: list[ContractorPayroll],
-    usd_value: dict[str, Decimal],
-    employer_balance: dict[str, Decimal],
-    policy: PayrollPolicy = PAYROLL_POLICY,
-) -> PriorityPayoutPlan | None:
-    """PARTIAL settlement walk, in contractor-priority order.
-
-    Lines are visited by (priority, original position) — priority 0 (unset)
-    sorts by position among its peers. The spendable balance is the
-    employer's OWN wallet minus the reserve floor. Returns ``None`` when the
-    whole batch is affordable (nothing to split) or when no line is payable
-    (the run is HELD whole, and no platform fee is charged).
-    """
-    full = assess_payroll(contractors, usd_value, employer_balance, policy)
-    if full.can_run or not contractors:
-        return None
-    order = sorted(range(len(contractors)), key=lambda i: (contractors[i].priority, i))
-    costs = [line_cost_usd(contractors[i], usd_value, policy) for i in order]
-    spendable = round_money(full.available_usd - policy.reserve_floor_usd)
-    taken_positions, _remaining = walk_priority(costs, spendable, policy.platform_fee_per_run_usd)
-    chosen = [order[p] for p in taken_positions]
-    # Per-currency rounding can differ by a cent from the USD walk: verify
-    # with the real assessment and drop the LAST taken line until it fits.
-    while chosen:
-        paid_sorted = sorted(chosen)
-        assessment = assess_payroll([contractors[i] for i in paid_sorted],
-                                    usd_value, employer_balance, policy)
-        if assessment.can_run:
-            held_idx = tuple(i for i in range(len(contractors)) if i not in paid_sorted)
-            held_cost = round_money(sum(
-                (line_cost_usd(contractors[i], usd_value, policy) for i in held_idx), Decimal("0")))
-            spendable_after = round_money(
-                full.available_usd - assessment.required_usd - policy.reserve_floor_usd)
-            residual = round_money(max(Decimal("0"), held_cost - spendable_after))
-            return PriorityPayoutPlan(paid=tuple(paid_sorted), held=held_idx,
-                                      assessment=assessment, full=full,
-                                      residual_shortfall_usd=residual)
         chosen.pop()
     return None
 

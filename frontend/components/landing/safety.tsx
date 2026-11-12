@@ -6,7 +6,7 @@ const FEATURES = [
   { icon: Layers3, title: "Isolation in three layers", body: "API identity (x-on-behalf-of), tenant-scoped queries, and a ledger that rejects any transaction spanning two employers." },
   { icon: Repeat2, title: "Retries never pay twice", body: "Every money move has a deterministic request_id made by code — never by the model. Airwallex dedupes, we record." },
   { icon: Scale, title: "Fees first, reserve kept", body: "Payout fees, the run fee and a USD 1,000 reserve floor are priced before a cent moves. Unknown fee? Refused." },
-  { icon: Fingerprint, title: "Visa TAP-signed approvals", body: "Ed25519 signatures over the exact run, amounts and pay lines. Tampered, replayed or unsigned? No money moves." },
+  { icon: Fingerprint, title: "Cryptographically signed approvals", body: "Ed25519 signatures over the exact run, amounts and pay lines. Tampered, replayed or unsigned? No money moves." },
   { icon: Receipt, title: "Receipts on Metal", body: "Each settled run's reconciliation receipt is hashed and anchored. Only hashes on-chain — never financial data." },
   { icon: Lock, title: "Supabase-ready, RLS on", body: "Postgres triggers guard the ledger; Row Level Security locks the public API out of every table." },
 ];

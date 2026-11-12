@@ -30,14 +30,18 @@ class PayLineDict(TypedDict, total=False):
     routing_code: str
     country_code: str
     contractor_id: str
-    priority: int  # PARTIAL settlement walk order (lower first)
+    # risk-gate facts (strings so they checkpoint cleanly) and the reason a line was held
+    bank_status: str  # the contractor's bank_verification_status
+    bank_changed_at: str  # ISO timestamp of the last bank-detail change
+    bank_second_verified: str  # "yes" when a second person verified the change after a callback
+    prev_paid: str  # the contractor's last paid amount in this currency (Decimal text)
+    hold_reason: str  # BANK_UNVERIFIED | RECENT_BANK_CHANGE_LARGE_PAYMENT
 
 
 class PayrollRunState(TypedDict, total=False):
     run_id: str
     employer_key: str
     employer_name: str
-    settlement_mode: str  # ALL_OR_NOTHING | PARTIAL | LEGACY_PARTIAL (unspecified caller)
     contact_name: str
     account_id: Optional[str]
     funding_usd: str
@@ -60,4 +64,7 @@ class PayrollRunState(TypedDict, total=False):
     metal_receipt: Optional[dict]
     explanation: Optional[str]
     error: Optional[str]
+    continuation: bool  # True for a "pay held lines" run that continues a parent run
+    parent_run_id: Optional[str]
+    run_fee_waived: bool  # the parent chain already collected the run fee: never priced or charged again
     balances: dict  # currency -> Decimal text, employer's own wallet at last check

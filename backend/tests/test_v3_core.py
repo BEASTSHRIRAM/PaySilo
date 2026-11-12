@@ -109,10 +109,7 @@ def test_partial_payout_through_api_persists_paid_and_held_lines(demo_client):
     run = demo_client.post("/runs", json={"employer_id": emp["id"], "lines": lines}).json()
     assert run["status"] == "RESERVED"
     done = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
-    # Acme is a PARTIAL-mode employer since Sriram's 2026-11-12 rule: the
-    # runtime status for a settled split is PARTIALLY_SETTLED (the graph's
-    # legacy mode still closes PARTIALLY_PAID). Same split as before.
-    assert done["status"] == "PARTIALLY_SETTLED"
+    assert done["status"] == "PARTIALLY_PAID"
     assert sorted(p["status"] for p in done["pay_lines"]) == ["HELD", "PAID"]
     assert Decimal(done["shortfall_usd"]) > 0
 
@@ -380,8 +377,7 @@ def test_delta_studios_pays_the_smaller_line_and_holds_the_other(demo_client):
     assert "Pieter Jansen is held" in run["explanation"] and "cannot run" not in run["explanation"]
 
     done = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
-    # Delta is PARTIAL-mode: settled split closes PARTIALLY_SETTLED (Sriram 2026-11-12).
-    assert done["status"] == "PARTIALLY_SETTLED", done
+    assert done["status"] == "PARTIALLY_PAID", done
     by_name = {p["beneficiary_name"]: p["status"] for p in done["pay_lines"]}
     assert by_name == {"Noor van Dijk": "PAID", "Pieter Jansen": "HELD"}
     assert done["fee_charged_usd"] == "149.00"

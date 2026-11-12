@@ -4,11 +4,11 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import {
-  Anchor, Building2, Check, ExternalLink, Landmark, Loader2, Printer,
+  Anchor, Building2, Check, Download, ExternalLink, Landmark, Loader2, Printer,
   ReceiptText, ShieldAlert, ShieldCheck,
 } from "lucide-react";
 
-import { apiV3, ApiError, type ReceiptData } from "@/lib/api";
+import { apiV3, ApiError, proofDownloads, type ReceiptData } from "@/lib/api";
 import { cn, formatMoney } from "@/lib/utils";
 
 function isSimulatorMode(mode: string): boolean {
@@ -162,8 +162,8 @@ function ReceiptView() {
                 )}
                 <span>
                   {data.verification.tap_verified
-                    ? "Approved and signed by the employer — TAP signature verified."
-                    : "This payment's approval does not carry a verified TAP signature."}
+                    ? "Approved and signed by the employer — approval signature verified."
+                    : "This payment's approval does not carry a verified approval signature."}
                 </span>
               </li>
               <li className="flex items-start gap-2.5">
@@ -193,12 +193,20 @@ function ReceiptView() {
 
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-bold text-ink-700/60">Keep this page as your proof of payment.</p>
-            <button
-              type="button" onClick={() => window.print()}
-              className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border-2 border-ink-700/25 px-4 text-xs font-extrabold uppercase tracking-wide text-ink-800 hover:bg-ink-700/5"
-            >
-              <Printer className="size-4" /> Print
-            </button>
+            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+              <a
+                href={proofDownloads.receipt(id, token)} download
+                className="inline-flex h-10 items-center gap-2 rounded-xl bg-coral-500 px-4 text-xs font-extrabold uppercase tracking-wide text-sand-50 shadow-duo-sm [--duo-edge:theme(colors.coral.700)] active:translate-y-[3px] active:shadow-none"
+              >
+                <Download className="size-4" /> Download PDF
+              </a>
+              <button
+                type="button" onClick={() => window.print()}
+                className="inline-flex h-10 items-center gap-2 rounded-xl border-2 border-ink-700/25 px-4 text-xs font-extrabold uppercase tracking-wide text-ink-800 hover:bg-ink-700/5"
+              >
+                <Printer className="size-4" /> Print
+              </button>
+            </div>
           </div>
         </div>
       </article>

@@ -119,7 +119,7 @@ export default function RunPage() {
 
             {run.approvals.length > 0 && (
               <section>
-                <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Approvals and Visa TAP</h2>
+                <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Approvals and signatures</h2>
                 <TimelineReveal className="grid gap-3">
                   {run.approvals.map((ap, i) => (
                     <li key={i}>
@@ -130,9 +130,9 @@ export default function RunPage() {
                           </p>
                           <Badge tone={ap.verified ? "success" : "warning"}>
                             {ap.verified ? (
-                              <><ShieldCheck className="size-3.5" /> TAP verified</>
+                              <><ShieldCheck className="size-3.5" /> Signature verified</>
                             ) : (
-                              <><ShieldAlert className="size-3.5" /> TAP not verified</>
+                              <><ShieldAlert className="size-3.5" /> Signature not verified</>
                             )}
                           </Badge>
                         </div>
@@ -146,8 +146,8 @@ export default function RunPage() {
                             <dd className="font-semibold text-sand-200">{new Date(ap.created_at).toLocaleString()}</dd>
                           </div>
                           <div>
-                            <dt className="font-bold text-sage-500">Signed by (TAP key)</dt>
-                            <dd className="break-all font-semibold text-sand-200">{ap.tap_key_id ?? "Unsigned — no TAP key recorded"}</dd>
+                            <dt className="font-bold text-sage-500">Signed by (signing key)</dt>
+                            <dd className="break-all font-semibold text-sand-200">{ap.tap_key_id ?? "Unsigned — no signing key recorded"}</dd>
                           </div>
                           <div>
                             <dt className="font-bold text-sage-500">Signature</dt>

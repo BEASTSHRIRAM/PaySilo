@@ -49,6 +49,7 @@ class AirwallexSimulator:
         }
         self._idempotency: dict[str, dict] = {}
         self._quotes: dict[str, dict] = {}
+        self._global_accounts: dict[str, dict] = {}
         self._beneficiaries: dict[str, dict] = {}
         self._transfers: dict[str, dict] = {}
         self._seq = itertools.count(1)
@@ -101,10 +102,42 @@ class AirwallexSimulator:
         self._account(account_id)
 
         def _create() -> dict:
-            return {"id": f"ga_{next(self._seq):04d}_{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex[:8]}",
-                    "account_id": account_id, "currency": currency, "status": "ACTIVE"}
+            ga = {"id": f"ga_{next(self._seq):04d}_{uuid.uuid5(uuid.NAMESPACE_URL, request_id).hex[:8]}",
+                  "account_id": account_id, "currency": currency, "status": "ACTIVE",
+                  "nick_name": nick_name, "country_code": country_code}
+            self._global_accounts[ga["id"]] = dict(ga)
+            return ga
 
         return self._once(request_id, _create)
+
+    def get_global_account(self, *, account_id: str, global_account_id: str) -> dict:
+        """Plausible fake receiving-account details (same shape as the live API; not real bank data)."""
+        self._account(account_id)
+        # After a restart the simulator forgets its global accounts (the id lives in the DB): synthesize one.
+        ga = self._global_accounts.get(global_account_id) or {
+            "id": global_account_id, "account_id": account_id, "currency": "USD",
+            "country_code": "US", "nick_name": ""}
+        if ga["account_id"] != account_id:
+            raise SimulatorError(f"Unknown global account {global_account_id} for {account_id}.")
+        digits = uuid.uuid5(uuid.NAMESPACE_URL, global_account_id).int
+        number = f"{digits % 10**10:010d}"
+        return {
+            "id": ga["id"], "status": "ACTIVE", "country_code": ga["country_code"],
+            "account_name": f"{self._accounts[account_id]['name']} (PaySilo sandbox)"[:80],
+            "account_number": number, "account_type": "Checking", "swift_code": "SIMUUS33",
+            "nick_name": ga["nick_name"],
+            "institution": {"name": "Sandbox Federal Bank (simulated)", "address": "1 Demo Way",
+                            "city": "New York, NY", "zip_code": "10001"},
+            "required_features": [{"currency": ga["currency"], "transfer_method": "LOCAL"}],
+            "supported_features": [
+                {"currency": ga["currency"], "transfer_method": "LOCAL", "type": "DEPOSIT",
+                 "local_clearing_system": "ACH", "routing_codes": [{"type": "ach", "value": "026073150"}]},
+                {"currency": ga["currency"], "transfer_method": "LOCAL", "type": "DEPOSIT",
+                 "local_clearing_system": "FEDWIRE", "routing_codes": [{"type": "fedwire", "value": "026073008"}]},
+                {"currency": ga["currency"], "transfer_method": "SWIFT", "type": "DEPOSIT",
+                 "routing_codes": [{"type": "swift", "value": "SIMUUS33"}]},
+            ],
+        }
 
     def get_connected_account(self, *, account_id: str) -> dict:
         acct = self._account(account_id)
@@ -208,6 +241,27 @@ class AirwallexSimulator:
             return bene
 
         return self._once(request_id, _create)
+
+    def validate_beneficiary(self, *, on_behalf_of: str, name: str = "", currency: str = "EUR",
+                             country_code: str = "DE", method: str = "SWIFT", iban: str = "",
+                             swift_code: str = "", account_number: str = "", routing_code: str = "",
+                             **_: str) -> dict:
+        """Validate-only: valid unless the IBAN / account / routing number is obviously malformed."""
+        errors: list[str] = []
+        if iban and not (15 <= len(iban) <= 34 and iban[:2].isalpha() and iban[2:4].isdigit()
+                         and iban.isalnum()):
+            errors.append("beneficiary.bank_details.iban")
+        if account_number and not (4 <= len(account_number) <= 34 and account_number.isalnum()):
+            errors.append("beneficiary.bank_details.account_number")
+        if routing_code and not routing_code.replace("-", "").isalnum():
+            errors.append("beneficiary.bank_details.account_routing_value1")
+        if currency == "USD" and routing_code and not (routing_code.isdigit() and len(routing_code) == 9):
+            errors.append("beneficiary.bank_details.account_routing_value1")
+        if swift_code and not (len(swift_code) in (8, 11) and swift_code.isalnum()):
+            errors.append("beneficiary.bank_details.swift_code")
+        if not (iban or account_number):
+            errors.append("beneficiary.bank_details.account_number")
+        return {"valid": not errors, "errors": sorted(set(errors))}
 
     def create_transfer(self, *, request_id: str, on_behalf_of: str, beneficiary_id: str,
                         amount: object, currency: str = "EUR", method: str = "SWIFT") -> dict:

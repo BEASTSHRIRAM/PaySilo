@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -142,7 +142,6 @@ class EmployerIn(BaseModel):
     contact_name: str | None = Field(default=None, max_length=120)
     contact_email: EmailStr | None = None
     funding_currency: str = Field(default="USD", min_length=3, max_length=3)
-    settlement_mode: Literal["ALL_OR_NOTHING", "PARTIAL"] = "ALL_OR_NOTHING"
 
     @field_validator("country", "funding_currency")
     @classmethod
@@ -168,7 +167,6 @@ class ContractorIn(BaseModel):
     account_number: str | None = Field(default=None, min_length=4, max_length=34)
     routing_code: str | None = Field(default=None, max_length=20)
     default_amount: str | None = None
-    priority: int = Field(default=0, ge=0, le=100000)
 
     @field_validator("country", "currency")
     @classmethod
@@ -206,8 +204,18 @@ class ContractorOut(BaseModel):
     account_last4: str | None = None
     swift_code: str | None
     default_amount: str | None
-    priority: int = 0
     is_active: bool
+    # contractor trust (status/dates only - never tax ids, never full bank values)
+    tax_status: str = "UNKNOWN"
+    tax_form_type: str = "NONE"
+    tax_form_status: str = "MISSING"  # MISSING|RECEIVED|EXPIRED (EXPIRED computed on read)
+    tax_form_received_at: date | None = None
+    tax_form_expires_at: date | None = None
+    bank_verification_status: str = "VERIFIED"
+    bank_details_changed_at: datetime | None = None
+    bank_change_requested_by_id: uuid.UUID | None = None
+    bank_verified_at: datetime | None = None
+    onboarded_at: datetime | None = None
 
 
 class EmployerOut(BaseModel):
@@ -218,7 +226,6 @@ class EmployerOut(BaseModel):
     contact_name: str | None
     contact_email: str | None
     funding_currency: str
-    settlement_mode: str = "ALL_OR_NOTHING"
     status: str
     airwallex_account_id: str | None
     balances: dict[str, str]
@@ -277,12 +284,9 @@ class PayLineOut(BaseModel):
     method: str
     payout_fee: str | None
     status: str
-    # PARTIAL settlement view of ``status``: PAID | HELD | PENDING, plus the
-    # two-phase history (1 = original execution, 2 = approved residual plan).
-    settlement_state: str = "PENDING"
-    settled_phase: int | None = None
-    settled_at: datetime | None = None
     airwallex_transfer_id: str | None
+    hold_reason: str | None = None  # risk gate code (BANK_UNVERIFIED, RECENT_BANK_CHANGE_LARGE_PAYMENT)
+    hold_message: str | None = None  # plain-language explanation of hold_reason
 
 
 class EventOut(BaseModel):
@@ -358,15 +362,11 @@ class RunOut(BaseModel):
     employer_name: str
     status: str
     source: str
+    parent_run_id: uuid.UUID | None = None
     period_label: str | None
     payroll_currency: str | None
     required_usd: str | None
     shortfall_usd: str | None
-    # PARTIAL runs: employer's settlement mode + what the HELD lines still
-    # need beyond the spendable balance left after settlement.
-    settlement_mode: str | None = None
-    residual_shortfall: str | None = None
-    residual_plan: dict | None = None
     fee_charged_usd: str
     explanation: str | None
     error: str | None
@@ -382,6 +382,10 @@ class RunDetailOut(RunOut):
     events: list[EventOut]
     approvals: list[ApprovalOut]
     receipt: ReceiptOut | None
+    continuation_run_id: uuid.UUID | None = None  # newest "pay held lines" run that continues this one
+    held_line_count: int = 0
+    can_pay_held: bool = False  # held lines can be paid right now (role-independent)
+    run_fee_collected: bool = False  # the run fee was collected on this run or a parent up the chain
 
 
 class OverviewOut(BaseModel):
@@ -401,6 +405,8 @@ class VicStatusOut(BaseModel):
     test_card: bool
     tx_limit_usd: str | None
     cli_available: bool
+    authenticated: bool = True
+    two_phase: bool = False
 
 
 class BenefitBudgetOut(BaseModel):
@@ -481,6 +487,13 @@ class BenefitPurchaseOut(BaseModel):
     currency: str
     journal_txn_id: int | None
     created_at: datetime
+    provider_mandate_id: str | None = None
+    approval_url: str | None = None
+    mandate_status: str | None = None
+
+
+class BenefitCompleteIn(BaseModel):
+    purchase_confirmed: bool = False
 
 
 class BenefitRequestOut(BaseModel):
@@ -507,120 +520,3 @@ class BenefitRequestOut(BaseModel):
 class BenefitDecisionIn(BaseModel):
     decision: Literal["approve", "deny"]
     reason: str | None = Field(default=None, max_length=2000)
-
-
-# ---------------------------------------------------------------- workflows
-class WorkflowIn(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    enabled: bool = True
-    graph: dict
-
-    @field_validator("name", "description")
-    @classmethod
-    def _strip_wf(cls, v: str | None) -> str | None:
-        v = v.strip() if isinstance(v, str) else v
-        return v or None
-
-
-class WorkflowUpdateIn(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=2000)
-    enabled: bool | None = None
-    graph: dict | None = None
-
-
-class WorkflowOut(BaseModel):
-    id: uuid.UUID
-    organization_id: uuid.UUID
-    name: str
-    description: str | None
-    enabled: bool
-    trigger_type: str
-    graph: dict | None
-    created_by_id: uuid.UUID | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class WorkflowRunStepOut(BaseModel):
-    id: uuid.UUID
-    run_id: uuid.UUID
-    node_id: str
-    node_type: str
-    status: str
-    detail: str
-    # Parsed JSON object (the ORM stores JSON, the API returns the object,
-    # never a raw string). condition.field_check outputs always carry
-    # {branch: "true"|"false", field, operator, value, actual, result}.
-    output: dict | None
-    created_at: datetime
-    started_at: datetime
-    finished_at: datetime | None
-
-
-class WorkflowRunOut(BaseModel):
-    id: uuid.UUID
-    workflow_id: uuid.UUID
-    organization_id: uuid.UUID
-    trigger_event: str
-    entity_kind: str
-    entity_id: str
-    entity_label: str | None = None
-    dedupe_key: str
-    status: str
-    context: dict | None
-    error_detail: str | None
-    started_at: datetime
-    finished_at: datetime | None
-    created_at: datetime
-    steps: list[WorkflowRunStepOut] = []
-
-
-class WorkflowTaskOut(BaseModel):
-    id: uuid.UUID
-    organization_id: uuid.UUID
-    kind: str
-    title: str
-    detail: str
-    employer_id: uuid.UUID | None
-    entity_kind: str | None
-    entity_id: str | None
-    status: str
-    created_by_run_id: uuid.UUID | None
-    created_at: datetime
-
-
-class WorkflowApprovalOut(BaseModel):
-    id: uuid.UUID
-    organization_id: uuid.UUID
-    workflow_run_id: uuid.UUID | None
-    entity_kind: str
-    entity_id: str
-    status: str
-    decided_by_id: uuid.UUID | None
-    decided_at: datetime | None
-    created_at: datetime
-
-
-class WorkflowBriefLineOut(BaseModel):
-    contractor_name: str
-    amount: str
-    currency: str
-
-
-class WorkflowBriefEntryOut(BaseModel):
-    workflow_run_id: str
-    workflow_name: str | None
-    run_id: str
-    run_status: str
-    employer_id: str
-    employer_name: str | None
-    settlement_mode: str | None = None
-    pay_date: str | None = None
-    total_required: str | None
-    balance: str | None
-    shortfall: str | None
-    currency: str | None
-    will_pay: list[WorkflowBriefLineOut] = []
-    will_hold: list[WorkflowBriefLineOut] = []

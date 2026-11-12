@@ -5,9 +5,8 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  BookOpen, CalendarDays, FileUp, Gift, Landmark, LayoutDashboard,
-  LogOut, Mail, PackageCheck, Plane, Play, Scale, ShieldCheck, Sunrise, TriangleAlert,
-  Workflow, X, Users,
+  BookOpen, CalendarDays, ClipboardCheck, FileUp, Gift, Landmark, LayoutDashboard,
+  LogOut, Mail, Play, Scale, ShieldCheck, TriangleAlert, X, Users,
 } from "lucide-react";
 
 import { api, type Session } from "@/lib/api";
@@ -35,13 +34,10 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
     label: "Money movement",
     links: [
       { href: "/dashboard/funding", label: "Funding", icon: Landmark },
+      { href: "/dashboard/notifications", label: "Notifications", icon: Mail },
       { href: "/dashboard/exceptions", label: "Exceptions", icon: TriangleAlert },
       { href: "/dashboard/reconciliation", label: "Reconciliation", icon: Scale },
       { href: "/dashboard/benefits", label: "Benefits", icon: Gift },
-      { href: "/dashboard/onboarding", label: "Onboarding", icon: PackageCheck },
-      { href: "/dashboard/travel", label: "Travel", icon: Plane },
-      { href: "/dashboard/workflows", label: "Workflows", icon: Workflow },
-      { href: "/dashboard/workflows/brief", label: "Morning Brief", icon: Sunrise },
     ],
   },
   {
@@ -49,7 +45,7 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
     links: [
       { href: "/dashboard/journals", label: "Journals", icon: BookOpen },
       { href: "/dashboard/evidence", label: "Evidence", icon: ShieldCheck },
-      { href: "/dashboard/emails", label: "Emails", icon: Mail },
+      { href: "/dashboard/compliance", label: "Compliance", icon: ClipboardCheck },
     ],
   },
   { label: "Organization", links: [{ href: "/dashboard/team", label: "Team", icon: Users }] },
@@ -57,8 +53,6 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
 
 export function isActive(pathname: string, href: string): boolean {
   if (href === "/dashboard") return pathname === "/dashboard";
-  // Morning Brief is its own nav entry nested under the Workflows route.
-  if (href === "/dashboard/workflows" && pathname.startsWith("/dashboard/workflows/brief")) return false;
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 

@@ -192,7 +192,7 @@ export default function EvidencePage() {
               </Card>
 
               <section>
-                <SectionTitle>Approvals and TAP</SectionTitle>
+                <SectionTitle>Approvals and signatures</SectionTitle>
                 {bundle.approvals.length === 0 && !tapRec ? (
                   <Card className="p-5"><p className="font-semibold text-sage-400">No approvals are recorded in this bundle.</p></Card>
                 ) : (
@@ -207,7 +207,7 @@ export default function EvidencePage() {
                               <span className="font-semibold text-sage-300">chose</span> {asStr(a.decision) ?? "a decision"}
                             </p>
                             <Badge tone={verified ? "success" : "warning"}>
-                              {verified ? <><ShieldCheck className="size-3.5" /> TAP verified</> : <><ShieldAlert className="size-3.5" /> TAP not verified</>}
+                              {verified ? <><ShieldCheck className="size-3.5" /> Signature verified</> : <><ShieldAlert className="size-3.5" /> Signature not verified</>}
                             </Badge>
                           </div>
                           <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
@@ -216,8 +216,8 @@ export default function EvidencePage() {
                               <dd className="font-semibold text-sand-200">{asStr(a.kind) ?? "—"}</dd>
                             </div>
                             <div>
-                              <dt className="font-bold text-sage-500">Signed by (TAP key)</dt>
-                              <dd className="break-all font-semibold text-sand-200">{asStr(a.tap_key_id) ?? "Unsigned — no TAP key recorded"}</dd>
+                              <dt className="font-bold text-sage-500">Signed by (signing key)</dt>
+                              <dd className="break-all font-semibold text-sand-200">{asStr(a.tap_key_id) ?? "Unsigned — no signing key recorded"}</dd>
                             </div>
                           </dl>
                         </Card>
@@ -225,10 +225,10 @@ export default function EvidencePage() {
                     })}
                     {tapRec && (
                       <Card className="p-5">
-                        <h3 className="mb-3 font-display text-lg font-semibold text-sand-100">TAP verification record</h3>
+                        <h3 className="mb-3 font-display text-lg font-semibold text-sand-100">Signature verification record</h3>
                         <RecordGrid record={tapRec} emptyText="No TAP record fields were reported." />
                         {pickBool(tapRec, ["verified", "tap_verified"]) === false && (
-                          <p className="mt-3 text-sm font-bold text-coral-300">The TAP record in this bundle reports itself as not verified.</p>
+                          <p className="mt-3 text-sm font-bold text-coral-300">The signature record in this bundle reports itself as not verified.</p>
                         )}
                       </Card>
                     )}

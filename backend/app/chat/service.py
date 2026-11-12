@@ -67,17 +67,12 @@ SYSTEM_PROMPT = (
     "and you must never ask for or invent another organization's data. Amounts and statuses must "
     "come from tool results, never from memory. You cannot approve a payroll run or move money: "
     "approvals are TAP-signed human decisions on the run itself. If a run is waiting, use "
-    "request_approval to surface it. For Silo Benefits, read_benefits is read-only and "
+    "request_approval to surface it. When a payroll ended partially paid or held, pay_held_lines starts a "
+    "continuation run for only the held contractors (like start_payroll_run it pauses for a human "
+    "TAP-signed approval; anyone already paid is never paid again). For Silo Benefits, read_benefits is read-only and "
     "propose_benefit_purchase only creates a REQUESTED benefit request for a human approver "
     "in the Benefits screen: you cannot approve or purchase benefits, and must never imply "
-    "that you did. The same law covers the other VIC spend categories: read_onboarding is "
-    "read-only and propose_onboarding_kit only creates a DRAFT onboarding kit for a human "
-    "approver in the Onboarding screen, with purchases per item after approval; read_travel "
-    "is read-only and propose_trip only creates a REQUESTED trip for a human approver in "
-    "the Travel screen. You cannot approve or purchase onboarding kits, and cannot approve, "
-    "book or purchase trips, and must never imply that you did. Silo can read workflow run "
-    "status; workflows (automations) are managed in the Workflows screen, not in chat. "
-    "Keep answers concise and in plain English."
+    "that you did. Keep answers concise and in plain English."
 )
 
 
@@ -104,17 +99,12 @@ _AMOUNT_RE = re.compile(r"(?:USD\s*)?\$?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)", re.
 
 _HELP_INTRO = (
     "I am Silo, your payroll assistant. I can list employers and balances, explain any run "
-    "(including exactly why a payroll is held), show a run's timeline, start a run — which "
+    "(including exactly why a payroll is held), show a run's timeline, start a run or pay a run's held lines — which "
     "always pauses for a TAP-signed human approval — and, in demo mode, fund an employer's "
     "own wallet. I can also read Silo Benefits budgets and recent benefit requests, and "
     "propose a benefit purchase — which only creates a request that a human must approve "
-    "in the Benefits screen. I can likewise read onboarding budgets and kits and propose "
-    "an onboarding kit — a DRAFT a human must approve in the Onboarding screen, with "
-    "purchases per item after approval — and read travel budgets and trips and propose a "
-    "trip — a REQUESTED trip a human must approve in the Travel screen. I can also read "
-    "workflow run status; workflows are managed in the Workflows screen, not in chat. "
-    "I cannot approve a run, approve or buy a benefit, approve or buy an onboarding kit, "
-    "approve or book a trip, or move money between employers. "
+    "in the Benefits screen. I cannot approve a run, approve or buy a benefit, or move "
+    "money between employers. "
 )
 
 
@@ -291,8 +281,6 @@ _BENEFIT_AMOUNT_STRIP_RE = re.compile(
     re.IGNORECASE)
 _BENEFIT_WORKER_COLON_RE = re.compile(
     r"\bfor\s+([A-Z][\wÀ-ÿ'’\-]+(?:\s+[A-Z][\wÀ-ÿ'’\-]+){0,3})\s*(?=[:,])")
-_WORKER_FOR_AT_RE = re.compile(
-    r"\bfor\s+([A-Z][\wÀ-ÿ'’\-]+(?:\s+[A-Z][\wÀ-ÿ'’\-]+){0,3})\s+(?=at\b)")
 
 
 def _contractor_ref_in(ctx: chat_tools.ChatContext,
@@ -328,9 +316,6 @@ def _benefit_request_args(ctx: chat_tools.ChatContext, message: str,
     if contractor_name is None:
         m = _BENEFIT_WORKER_COLON_RE.search(message)
         contractor_name = m.group(1).strip() if m else None
-    if contractor_name is None:
-        m = _WORKER_FOR_AT_RE.search(message)
-        contractor_name = m.group(1).strip() if m else None
     employer = employer_ref or matched_employer
 
     amount_match = _AMOUNT_RE.search(message)
@@ -363,78 +348,6 @@ def _benefit_request_args(ctx: chat_tools.ChatContext, message: str,
             "item": item, "amount": amount, "currency": currency}
 
 
-def _kit_args(ctx: chat_tools.ChatContext, message: str,
-              employer_ref: str | None) -> dict:
-    """Extract an onboarding-kit proposal, mirroring ``_benefit_request_args``.
-
-    Names are matched against org data; a semicolon-separated item spec in
-    the message is passed through verbatim for the tool to parse, and with
-    no spec the tool uses the standard kit. Nothing is invented.
-    """
-    matched_employer, contractor_name = _contractor_ref_in(ctx, message)
-    if contractor_name is None:
-        m = _BENEFIT_WORKER_COLON_RE.search(message)
-        contractor_name = m.group(1).strip() if m else None
-    if contractor_name is None:
-        m = _WORKER_FOR_AT_RE.search(message)
-        contractor_name = m.group(1).strip() if m else None
-    employer = employer_ref or matched_employer
-    items = None
-    if ";" in message and "$" in message:
-        cleaned = message
-        for name in (contractor_name, employer):
-            if name:
-                cleaned = re.sub(re.escape(name), "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(
-            r"\b(please|propose|create|make|an?|onboarding|kit|for)\b", "",
-            cleaned, flags=re.IGNORECASE)
-        cleaned = " ".join(cleaned.split()).strip(" ,")
-        if ";" in cleaned and "$" in cleaned:
-            items = cleaned
-    return {"employer": employer, "contractor": contractor_name, "items": items}
-
-
-def _amount_near(message: str, keywords: tuple[str, ...]) -> str | None:
-    """A $ amount written next to one of ``keywords`` ("$450 flight", "hotel: $180")."""
-    alt = "|".join(keywords)
-    m = re.search(rf"(?:{alt})[^$0-9]{{0,20}}\$?\s*([0-9][0-9,]*(?:\.[0-9]{{1,2}})?)",
-                  message, re.IGNORECASE)
-    if m:
-        return m.group(1).replace(",", "")
-    m = re.search(rf"\$\s*([0-9][0-9,]*(?:\.[0-9]{{1,2}})?)[^$0-9]{{0,20}}(?:{alt})",
-                  message, re.IGNORECASE)
-    return m.group(1).replace(",", "") if m else None
-
-
-def _trip_args(ctx: chat_tools.ChatContext, message: str,
-               employer_ref: str | None) -> dict:
-    """Extract a trip proposal: destination and per-category $ amounts."""
-    matched_employer, contractor_name = _contractor_ref_in(ctx, message)
-    if contractor_name is None:
-        m = _BENEFIT_WORKER_COLON_RE.search(message)
-        contractor_name = m.group(1).strip() if m else None
-    if contractor_name is None:
-        m = _WORKER_FOR_AT_RE.search(message)
-        contractor_name = m.group(1).strip() if m else None
-    employer = employer_ref or matched_employer
-    destination = None
-    dest_match = re.search(r"trip to ([A-Za-z ]+)", message, re.IGNORECASE) or \
-        re.search(r"\bto\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)", message)
-    if dest_match:
-        destination = dest_match.group(1).strip(" .!?")
-        for cut in ("for", "with", "on"):
-            parts = re.split(rf"\s+{cut}\s+", destination, flags=re.IGNORECASE)
-            if len(parts) > 1:
-                destination = parts[0].strip(" .!?")
-                break
-        if contractor_name and destination.casefold() == contractor_name.casefold():
-            destination = None
-    return {"employer": employer, "contractor": contractor_name, "destination": destination,
-            "transport": _amount_near(message, ("flight", "transport")),
-            "lodging": _amount_near(message, ("hotel", "lodging")),
-            "per_diem": _amount_near(message, ("per-diem", "per diem", "per_diem"))}
-
-
 def fallback_plan(ctx: chat_tools.ChatContext, message: str,
                   context: dict) -> tuple[list[tuple[str, dict]], str, str | None]:
     """Plan one user message deterministically.
@@ -449,6 +362,9 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
     employer_ref = _employer_ref_in(ctx, message) or context.get("employer_name")
     run_ref = context.get("run_id")
 
+    if re.search(r"\bpay\b", text) and re.search(r"\bheld\b", text) and "why" not in text:
+        return ([("pay_held_lines", {"employer": employer_ref, "run_id": run_ref})],
+                "Matched the pay-held-lines intent (a continuation run that pauses for human approval)", None)
     if "benefit" in text:
         _emp_match, worker_match = _contractor_ref_in(ctx, message)
         is_proposal = (
@@ -461,36 +377,6 @@ def fallback_plan(ctx: chat_tools.ChatContext, message: str,
                     "a human approver decides in the Benefits screen; chat cannot approve or buy)", None)
         return ([("read_benefits", {"employer": employer_ref})],
                 "Matched the Silo Benefits read intent (budgets, payroll lock and recent requests)", None)
-    # VIC spend categories. Placed after benefits (benefit intents keep
-    # their precedence) and before payroll routing; none of the keywords
-    # below appear in payroll intents, so run routing is unaffected.
-    if "pending" in text and "onboarding" in text:
-        return ([("read_onboarding", {"employer": employer_ref})],
-                "Matched the onboarding pending intent (draft kits awaiting approval and "
-                "approved kits with unpurchased items)", None)
-    if "pending" in text and ("trip" in text or "travel" in text):
-        return ([("read_travel", {"employer": employer_ref})],
-                "Matched the travel pending intent (trips awaiting approval and blocked "
-                "components)", None)
-    if "onboarding kit" in text or "kit for" in text:
-        return ([("propose_onboarding_kit", _kit_args(ctx, message, employer_ref))],
-                "Matched the propose-an-onboarding-kit intent (creates a DRAFT kit, source "
-                "CHAT, only — a human approver decides in the Onboarding screen; chat cannot "
-                "approve or buy)", None)
-    if "onboarding" in text:
-        return ([("read_onboarding", {"employer": employer_ref})],
-                "Matched the onboarding read intent (budgets, kits and pending state)", None)
-    if "trip" in text and any(w in text for w in ("propose", "plan", "book", "create")):
-        return ([("propose_trip", _trip_args(ctx, message, employer_ref))],
-                "Matched the propose-a-trip intent (creates a REQUESTED trip only — a human "
-                "approver decides in the Travel screen; chat cannot approve, book or buy)", None)
-    if "travel" in text or "trip" in text:
-        return ([("read_travel", {"employer": employer_ref})],
-                "Matched the travel read intent (budgets, category caps, trips and blocked components)", None)
-    if "workflow" in text or "automation" in text:
-        return ([("read_workflow_runs", {"employer": employer_ref})],
-                "Matched the workflow-runs read intent (workflows are managed in the "
-                "Workflows screen; chat only reads run status)", None)
     if any(w in text for w in ("timeline", "what happened", "history of", "events")):
         return ([("get_run_timeline", {"run_id": run_ref, "employer": employer_ref})],
                 "Matched the run-timeline intent", None)

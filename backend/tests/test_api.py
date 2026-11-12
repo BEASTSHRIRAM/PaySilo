@@ -207,7 +207,7 @@ def test_balances_and_history_survive_a_restart(tmp_path):
     with TestClient(create_app(settings, Database.from_url(url))) as c:  # "restart": seed must not re-run
         c.post("/auth/login", json=login)
         assert _employers(c)["Acme Manufacturing GmbH"]["balances"] == {"USD": "13343.24"}
-        assert len(_employers(c)) == 5  # + Dunmore Textiles (partial-pay seed, Sriram 2026-11-12)
+        assert len(_employers(c)) == 4
         assert c.get(f"/runs/{run['id']}").json()["status"] == "SETTLED"
         stale = c.get(f"/runs/{paused['id']}").json()
         assert stale["resumable"] is False
@@ -234,3 +234,29 @@ def test_airwallex_refusal_on_employer_creation_is_a_clear_502_and_saves_nothing
     assert r.status_code == 502
     assert "cannot onboard business accounts" in r.json()["detail"]
     assert "Echo Ltd" not in [e["name"] for e in demo_client.get("/employers").json()]
+
+
+def test_failed_run_can_be_retried_and_pays_each_contractor_once(demo_client, monkeypatch):
+    sim = demo_client.app.state.runtime.recorder.inner
+    real = sim.transition_transfer
+    calls = {"n": 0}
+
+    def flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:  # the second payout's transition fails once
+            raise RuntimeError("simulated transient Airwallex failure")
+        return real(**kwargs)
+
+    monkeypatch.setattr(sim, "transition_transfer", flaky)
+    acme = demo_client.get(f"/employers/{_employers(demo_client)['Acme Manufacturing GmbH']['id']}").json()
+    run = demo_client.post("/runs", json={"employer_id": acme["id"],
+                                          "lines": [{"contractor_id": c["id"]} for c in acme["contractors"]]}).json()
+    failed = demo_client.post(f"/runs/{run['id']}/decision", json={"decision": "approve"}).json()
+    assert failed["status"] == "FAILED"
+    transfers_before = len(sim._transfers)
+
+    done = demo_client.post(f"/runs/{run['id']}/retry").json()
+    assert done["status"] == "SETTLED", done.get("error")
+    assert [p["status"] for p in done["pay_lines"]] == ["PAID", "PAID"]
+    assert len(sim._transfers) == transfers_before  # retried transition, no new transfer
+    assert demo_client.post(f"/runs/{run['id']}/retry").status_code == 409  # settled runs can't be retried

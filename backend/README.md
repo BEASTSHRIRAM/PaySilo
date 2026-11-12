@@ -22,7 +22,7 @@ app/
   agents/              LangGraph graph: intake -> price -> assess -> approval/escalate -> execute -> fee -> reconcile -> attest
   airwallex/           REST client, simulator (same interface), call recorder, live FX rate provider
   docs/                airwallex-fee-path.md — why the run fee uses /charges/create
-  partners/            Visa TAP signing, Metal attestation, AgentCore entrypoint
+  partners/            TAP-style approval signing, VIC benefits, Metal attestation, AgentCore entrypoint
   db/                  SQLAlchemy models, engine (Supabase/Postgres or SQLite), Postgres guards, schema export
   services/runtime.py  runs the graph and persists every step
   services/seed.py     demo organization
