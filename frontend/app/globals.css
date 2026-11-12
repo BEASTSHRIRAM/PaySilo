@@ -39,6 +39,30 @@
     @apply bg-background text-foreground font-sans antialiased;
   }
 
+  /* Themed thin scrollbars on every dark surface: coral thumb on a transparent track
+     (tailwind.config.ts: coral-500 #E64833, hover coral-400 #EC6A52). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(230, 72, 51, 0.6) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(230, 72, 51, 0.6);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #ec6a52;
+  }
+
   ::selection {
     background: rgba(230, 72, 51, 0.35);
   }
