@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
-import { PageNotice, SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
+import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -187,7 +187,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
     setBusy(kind);
     try {
       const n = await apiFunding.sendReminder(plan.employer_id, kind);
-      notify(`${kind === "statement" ? "Funding statement" : "Funding reminder"} to ${n.recipient} ${n.status === "SENT" ? "sent" : "queued"}${n.simulated ? " (simulated delivery)" : ""}. See Notifications.`);
+      notify(`${kind === "statement" ? "Funding statement" : "Funding reminder"} to ${n.recipient} ${n.status === "SENT" ? "sent" : "queued"}. Open Notifications to see its delivery status.`);
     } catch (err) {
       notify(errMsg(err), true);
     } finally {
@@ -461,6 +461,7 @@ export default function FundingPage() {
                   <span className="font-bold text-sand-100">{r.employer_name}</span>
                   <span className={cn("font-semibold", r.action === "queued" ? "text-mint-400" : "text-sage-400")}>
                     {r.action === "queued" ? "Queued" : "Skipped"}: {r.reason}
+                    {r.auto_continuation && <span className="block text-mint-400">Held payments prepared for approval: {r.auto_continuation.reason}</span>}
                   </span>
                 </li>
               ))}
@@ -499,7 +500,16 @@ export default function FundingPage() {
                 ))}
               </div>
             )}
-            <PageNotice message="Delivery is simulated unless an email provider is configured. Reminders only ask the employer to send money: PaySilo never moves funds without an approved run." />
+            <div className="grid gap-2 rounded-3xl border-2 border-ink-700 bg-ink-850/60 p-4 text-sm font-semibold leading-relaxed text-sage-300">
+              <p className="font-extrabold text-sand-100">How automatic continuation works</p>
+              <p>
+                When money arrives for an employer and its wallet can now cover payments that were held back, PaySilo
+                prepares a continuation run for exactly those payments and emails the approvers a link to review it.
+                It never approves or pays anything by itself: the run waits until a person signs it. It prepares at most one
+                continuation per held run, and skips it if a later payroll already paid those contractors.
+              </p>
+              <p>If held payments sit untouched for more than a day, approvers get a reminder. Funding reminders only ask the employer to send money.</p>
+            </div>
           </>
         )}
       </main>

@@ -657,15 +657,18 @@ export interface FundingStatement {
 export interface SweepResult {
   employer_id: string; employer_name: string; action: "queued" | "skipped"; reason: string;
   notification_id: string | null; status: string | null;
+  auto_continuation?: { action: string; reason: string; run_id: string | null };
 }
 export interface SweepResponse { queued: number; skipped: number; results: SweepResult[] }
-export type NotificationKind = "FUNDING_REMINDER" | "FUNDING_STATEMENT" | "FUNDING_OVERDUE" | "PAYMENT_NOTICE" | "GENERIC";
+export type NotificationKind = "FUNDING_REMINDER" | "FUNDING_STATEMENT" | "FUNDING_OVERDUE" | "FUNDS_RECEIVED" | "APPROVAL_REQUESTED"
+  | "HELD_LINES_REMINDER" | "RUN_SETTLED" | "PAYMENT_FAILED" | "INVITE" | "PAYMENT_NOTICE" | "GENERIC";
 export interface AppNotification {
   id: string; kind: NotificationKind; channel: string; recipient: string; subject: string; body: string;
-  status: "QUEUED" | "SENT" | "FAILED"; provider: string | null; simulated: boolean; error: string | null;
+  status: "QUEUED" | "SENT" | "FAILED"; provider: string | null; attempts: number; last_attempt_at: string | null; error: string | null;
   employer_id: string | null; employer_name: string | null; created_at: string; sent_at: string | null;
 }
-export interface NotificationList { total: number; limit: number; offset: number; items: AppNotification[] }
+export interface EmailStatus { configured: boolean; provider: string | null; message: string | null }
+export interface NotificationList { email: EmailStatus; total: number; limit: number; offset: number; items: AppNotification[] }
 
 export const apiFunding = {
   plan: () => request<OrgFundingPlan>("/funding/plan"),

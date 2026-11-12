@@ -48,6 +48,7 @@ export default function StatementPage() {
 
   return (
     <div className="min-h-dvh pb-16 print:min-h-0 print:bg-white print:pb-0">
+      <style>{`@media print { aside, nav, [class*="fixed"] { display: none !important; } body { background: #fff !important; } div[class*="lg:pl-"] { padding: 0 !important; } }`}</style>
       <div className="print:hidden">{session ? <AppBar session={session} /> : <div className="h-[76px]" />}</div>
       <main className="mx-auto mt-8 grid max-w-3xl gap-4 px-4 sm:px-6 print:mt-0 print:max-w-none print:px-0">
         <div className="flex flex-wrap items-center justify-between gap-2 print:hidden">
@@ -60,7 +61,7 @@ export default function StatementPage() {
         {!st && !error && <SectionLoading label="Preparing statement…" />}
         {error && <SectionError message={error} />}
         {st && (
-          <article className="rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-6 text-sand-100 sm:p-8 print:rounded-none print:border-0 print:bg-white print:p-0 print:text-black">
+          <article className="min-w-0 rounded-3xl border-2 border-ink-700 bg-ink-850/80 p-6 text-sand-100 sm:p-8 print:rounded-none print:border-0 print:bg-white print:p-0 print:text-black">
             <header className="flex flex-wrap items-start justify-between gap-3 border-b-2 border-ink-700 pb-4 print:border-black">
               <div>
                 <p className="text-xs font-extrabold uppercase tracking-widest text-sage-500 print:text-black">Funding statement</p>
@@ -74,7 +75,8 @@ export default function StatementPage() {
               </div>
             </header>
 
-            <table className="mt-5 w-full border-collapse text-left text-sm">
+            <div className="mt-5 overflow-x-auto print:overflow-visible">
+            <table className="w-full min-w-[460px] border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b-2 border-ink-700 text-xs font-extrabold uppercase tracking-wide text-sage-500 print:border-black print:text-black">
                   <th className="py-2 pr-2">Contractor</th><th className="py-2 pr-2 text-right">Amount</th>
@@ -99,6 +101,7 @@ export default function StatementPage() {
                 ))}
               </tbody>
             </table>
+            </div>
 
             <dl className="mt-5 ml-auto max-w-sm text-sm font-semibold">
               {sum("Contractor pay and payout fees", st.payroll_usd)}

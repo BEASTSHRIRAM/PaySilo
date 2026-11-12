@@ -69,7 +69,9 @@ APPROVAL_KINDS = ("approval", "escalation")
 DECISIONS = ("approve", "hold")
 INVITATION_STATUSES = ("PENDING", "ACCEPTED", "REVOKED")
 PAY_FREQUENCIES = ("WEEKLY", "BIWEEKLY", "MONTHLY")
-NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE", "PAYMENT_NOTICE", "GENERIC")
+NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE", "FUNDS_RECEIVED",
+                      "APPROVAL_REQUESTED", "HELD_LINES_REMINDER", "RUN_SETTLED", "PAYMENT_FAILED", "INVITE",
+                      "PAYMENT_NOTICE", "GENERIC")
 NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED")
 
 
@@ -176,9 +178,12 @@ class Notification(TimestampMixin, Base):
     recipient: Mapped[str] = mapped_column(String(254), nullable=False)
     subject: Mapped[str] = mapped_column(String(300), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    body_html: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(8), nullable=False, default="QUEUED")
     provider: Mapped[str | None] = mapped_column(String(24))
-    error: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)  # the last delivery error (never contains credentials)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dedupe_key: Mapped[str | None] = mapped_column(String(120))
     meta: Mapped[dict | None] = mapped_column(JsonType)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -101,16 +101,24 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
-    # Email outbox: "console" marks messages SENT without sending anything (simulated delivery);
-    # "smtp" really sends through the SMTP_* settings.
-    email_provider: Literal["console", "smtp"] = "console"
-    smtp_host: str | None = None
-    smtp_port: int = 587
-    smtp_user: str | None = None
-    smtp_password: str | None = None
-    smtp_from: str | None = None
+    # Email via Brevo SMTP (stdlib smtplib, STARTTLS). Without BREVO_SMTP_USER + BREVO_SMTP_KEY the outbox
+    # only queues messages ("not configured"); nothing is sent. The key is a secret: never logged.
+    brevo_smtp_host: str = "smtp-relay.brevo.com"
+    brevo_smtp_port: int = 587
+    brevo_smtp_user: str | None = None
+    brevo_smtp_key: str | None = None
+    email_from: str | None = None
+    email_from_name: str = "PaySilo"
+    # Public base URL of the web app, used for deep links in emails.
+    app_base_url: str = "http://localhost:3000"
+    # When funds arrive, prepare (never approve) a continuation run for held lines the wallet can now cover.
+    auto_continue_held: bool = True
     # Background funding-reminder sweep (every 30 min). Tests turn it off.
     funding_reminders: Literal["on", "off"] = "on"
+
+    @property
+    def email_configured(self) -> bool:
+        return bool(self.brevo_smtp_user and self.brevo_smtp_key and self.email_from)
 
     @property
     def demo_mode(self) -> bool:

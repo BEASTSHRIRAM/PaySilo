@@ -11,16 +11,16 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
-import { api, apiFunding, ApiError, type AppNotification, type Session } from "@/lib/api";
+import { api, apiFunding, ApiError, type AppNotification, type EmailStatus, type Session } from "@/lib/api";
 import { fmtDateTime, KIND_LABEL } from "@/lib/funding-ui";
 import { cn } from "@/lib/utils";
 
 const PAGE = 25;
 
-function StatusBadge({ n }: { n: AppNotification }) {
-  if (n.status === "FAILED") return <Badge tone="danger">Failed</Badge>;
-  if (n.status === "QUEUED") return <Badge tone="warning">Queued</Badge>;
-  return <Badge tone="success">{n.simulated ? "Sent (simulated)" : "Sent"}</Badge>;
+function StatusBadge({ n, configured }: { n: AppNotification; configured: boolean }) {
+  if (n.status === "FAILED") return <Badge tone="danger">{n.attempts >= 5 ? "Failed, gave up" : "Failed, will retry"}</Badge>;
+  if (n.status === "QUEUED") return <Badge tone="warning">{configured ? "Queued" : "Queued, not sent"}</Badge>;
+  return <Badge tone="success">Sent</Badge>;
 }
 
 export default function NotificationsPage() {
@@ -28,6 +28,7 @@ export default function NotificationsPage() {
   const [session, setSession] = useState<Session | null>(null);
   const [items, setItems] = useState<AppNotification[]>([]);
   const [total, setTotal] = useState(0);
+  const [email, setEmail] = useState<EmailStatus | null>(null);
   const [kind, setKind] = useState("");
   const [status, setStatus] = useState("");
   const [offset, setOffset] = useState(0);
@@ -42,6 +43,7 @@ export default function NotificationsPage() {
       setSession(me);
       setItems(list.items);
       setTotal(list.total);
+      setEmail(list.email);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         router.replace("/login?next=/dashboard/notifications");
@@ -61,10 +63,17 @@ export default function NotificationsPage() {
         <section className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">Notifications</h1>
-            <p className="mt-1 max-w-2xl text-sage-300">Every email PaySilo has prepared for your employers. Without a mail provider, delivery is simulated and nothing leaves this machine.</p>
+            <p className="mt-1 max-w-2xl text-sage-300">Every email PaySilo has prepared, with its delivery status. Delivery happens in the background, so new messages can show as queued for a moment.</p>
           </div>
           <Button variant="outline" onClick={() => { setLoading(true); void load(); }}><RefreshCw /> Refresh</Button>
         </section>
+
+        {email && (
+          <p role="status" className={cn("rounded-2xl border-2 px-4 py-3 text-sm font-bold",
+            email.configured ? "border-sage-600/60 bg-sage-500/10 text-sage-300" : "border-sand-400/50 bg-sand-200/10 text-sand-300")}>
+            {email.configured ? "Email delivery: on. Queued messages are sent in the background and failures are retried." : "Email delivery: not configured. Messages are queued here and not sent."}
+          </p>
+        )}
 
         <div className="flex flex-wrap gap-3">
           <div className="grid gap-1.5">
@@ -104,7 +113,7 @@ export default function NotificationsPage() {
                     >
                       <span className="flex flex-wrap items-center gap-2">
                         <Badge tone={n.kind === "FUNDING_OVERDUE" ? "danger" : "sage"}>{KIND_LABEL[n.kind] ?? n.kind}</Badge>
-                        <StatusBadge n={n} />
+                        <StatusBadge n={n} configured={!!email?.configured} />
                         <span className="ml-auto text-xs font-semibold text-sage-500">{fmtDateTime(n.sent_at ?? n.created_at)}</span>
                       </span>
                       <span className="break-words font-bold text-sand-100">{n.subject}</span>
@@ -133,15 +142,21 @@ export default function NotificationsPage() {
                   </div>
                   <dl className="grid gap-0.5 text-sm font-semibold text-sage-300">
                     <div className="break-all"><dt className="inline text-sage-500">To: </dt><dd className="inline">{selected.recipient}</dd></div>
-                    <div><dt className="inline text-sage-500">Sent: </dt><dd className="inline">{fmtDateTime(selected.sent_at ?? selected.created_at)}</dd></div>
+                    <div><dt className="inline text-sage-500">{selected.sent_at ? "Sent: " : "Created: "}</dt><dd className="inline">{fmtDateTime(selected.sent_at ?? selected.created_at)}</dd></div>
                   </dl>
-                  <div className="flex flex-wrap gap-2"><StatusBadge n={selected} /></div>
-                  {selected.simulated && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge n={selected} configured={!!email?.configured} />
+                    <span className="text-xs font-semibold text-sage-500">
+                      {selected.attempts} delivery attempt{selected.attempts === 1 ? "" : "s"}
+                      {selected.last_attempt_at ? `, last ${fmtDateTime(selected.last_attempt_at)}` : ""}
+                    </span>
+                  </div>
+                  {selected.status === "QUEUED" && !email?.configured && (
                     <p className="rounded-2xl bg-sand-200/10 px-3 py-2 text-xs font-bold text-sand-300">
-                      Simulated delivery: this message was recorded here but not sent to anyone.
+                      Email delivery is not configured, so this message is queued and was not sent to anyone.
                     </p>
                   )}
-                  {selected.error && <p role="alert" className="text-sm font-bold text-coral-300">{selected.error}</p>}
+                  {selected.error && selected.status !== "SENT" && <p role="alert" className="text-sm font-bold text-coral-300">Last error: {selected.error}</p>}
                   <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-2xl bg-ink-950/50 p-4 font-sans text-sm leading-relaxed text-sand-100">{selected.body}</pre>
                 </div>
               )}

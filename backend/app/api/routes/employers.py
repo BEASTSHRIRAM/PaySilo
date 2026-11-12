@@ -5,13 +5,14 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from ...airwallex.client import AirwallexError
 from ...db.models import Contractor, Employer
+from ...services import autopilot, notify
 from ...services.runtime import PlatformRuntime, RuntimeConflict
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
 from ..schemas import ContractorIn, ContractorOut, EmployerDetailOut, EmployerIn, EmployerOut, FundIn
@@ -65,7 +66,7 @@ def get_employer(employer_id: uuid.UUID, tenant: Tenant = Depends(current_tenant
 
 
 @router.post("/{employer_id}/fund", response_model=EmployerOut)
-def fund_employer(employer_id: uuid.UUID, body: FundIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+def fund_employer(request: Request, employer_id: uuid.UUID, body: FundIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
                   db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> EmployerOut:
     """Simulated deposit into this employer's OWN wallet (sandbox simulation API)."""
     emp = load_employer(db, tenant, employer_id)
@@ -75,6 +76,9 @@ def fund_employer(employer_id: uuid.UUID, body: FundIn, tenant: Tenant = Depends
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.commit()
+    # Money arrived: prepare (never approve) a continuation for held lines and queue the approval emails.
+    autopilot.on_funds_arrived(db, runtime, request.app.state.settings, tenant.organization, emp, str(body.amount))
+    notify.dispatch_async(request.app.state.db.sessionmaker, request.app.state.settings)
     return employer_out(db, runtime, emp)
 
 

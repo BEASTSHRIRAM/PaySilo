@@ -21,28 +21,30 @@ from sqlalchemy.orm import Session, selectinload
 from ..config import Settings
 from ..crew import draft, funding
 from ..db.models import Employer, Notification, Organization
-from . import notify
+from . import autopilot, notify
+from . import email_templates as tpl
 
 logger = logging.getLogger(__name__)
 
 REMINDER_OFFSETS = (3, 2, 1, 0)
 SWEEP_INTERVAL_SECONDS = 30 * 60
 FIRST_SWEEP_DELAY_SECONDS = 60
+DELIVERY_INTERVAL_SECONDS = 60
 
 
 def send_funding_email(db: Session, org: Organization, employer: Employer, plan: dict, kind: str,
-                       settings: Settings, *, dedupe_key: str | None = None, meta: dict | None = None,
-                       provider=None) -> Notification:
-    """Draft (template + optional guarded polish), queue and deliver one email to the employer's contact."""
+                       settings: Settings, *, dedupe_key: str | None = None, meta: dict | None = None) -> Notification:
+    """Draft (template + optional guarded polish) and QUEUE one email to the employer's contact.
+
+    Delivery is asynchronous (:func:`notify.deliver_pending`); this never blocks on a mail server.
+    """
     subject, body = draft.draft_funding_email(kind, plan, org.name)
     body, polished = draft.polish_body(body, plan, settings=settings)
-    row = notify.queue_email(
-        db, org, kind, employer.contact_email or "", subject, body, employer_id=employer.id, dedupe_key=dedupe_key,
+    return notify.queue_email(
+        db, org, kind, employer.contact_email or "", subject, body, body_html=tpl.render_html(body),
+        employer_id=employer.id, dedupe_key=dedupe_key,
         meta={**(meta or {}), "pay_date": plan["pay_date"], "fund_by": plan["fund_by"], "gap_usd": plan["gap_usd"],
               "recommended_transfer_usd": plan["recommended_transfer_usd"], "polished": polished})
-    if row.status == "QUEUED":
-        notify.deliver(db, row, settings, provider)
-    return row
 
 
 def reminder_offset(plan: dict, today: date) -> int | None:
@@ -51,8 +53,8 @@ def reminder_offset(plan: dict, today: date) -> int | None:
     return funding.business_days_between(today, date.fromisoformat(plan["fund_by"]))
 
 
-def sweep_organization(db: Session, runtime, settings: Settings, org: Organization, today: date | None = None,
-                       *, provider=None) -> list[dict]:
+def sweep_organization(db: Session, runtime, settings: Settings, org: Organization, today: date | None = None
+                       ) -> list[dict]:
     """Send due reminders for one organization. Returns one result row per employer (what and why)."""
     today = today or date.today()
     results: list[dict] = []
@@ -64,6 +66,11 @@ def sweep_organization(db: Session, runtime, settings: Settings, org: Organizati
                   "notification_id": None, "status": None}
         results.append(result)
         try:
+            auto = autopilot.auto_continue(db, runtime, settings, org, emp)
+            if auto["action"] == "created":
+                result["auto_continuation"] = auto
+            autopilot.remind_held_lines(db, runtime, settings, org, emp)
+            db.commit()
             plan = funding.plan_employer(db, runtime, emp, today, with_wire=True).as_dict()
             if plan["status"] in ("RATE_UNAVAILABLE",):
                 result["reason"] = "Amounts could not be priced right now."
@@ -96,7 +103,7 @@ def sweep_organization(db: Session, runtime, settings: Settings, org: Organizati
                               status=existing.status)
                 continue
             row = send_funding_email(db, org, emp, plan, kind, settings, dedupe_key=key,
-                                     meta={"offset": label, "source": "sweep"}, provider=provider)
+                                     meta={"offset": label, "source": "sweep"})
             result.update(action="queued", reason=("Overdue: daily reminder." if overdue else
                                                    f"{offset} business day(s) before fund-by."),
                           notification_id=str(row.id), status=row.status)
@@ -104,6 +111,11 @@ def sweep_organization(db: Session, runtime, settings: Settings, org: Organizati
             logger.exception("Funding sweep failed for employer %s", emp.id)
             db.rollback()
             result["reason"] = f"Could not check this employer ({type(exc).__name__})."
+    try:
+        autopilot.report_outcomes(db, settings, org)
+    except Exception:  # noqa: BLE001
+        logger.exception("Reporting run outcomes failed for organization %s", org.id)
+        db.rollback()
     db.commit()
     return results
 
@@ -137,3 +149,17 @@ async def funding_reminder_loop(db_factory, runtime, settings: Settings) -> None
         except Exception:  # noqa: BLE001
             logger.exception("Funding reminder sweep crashed; will retry next interval.")
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
+
+async def email_delivery_loop(db_factory, settings: Settings) -> None:
+    """Every minute: send queued emails and retry failed ones (with backoff). Idle when email is not configured."""
+    mailer = notify.mailer_for(settings)
+    while True:
+        try:
+            if mailer.configured:
+                await asyncio.to_thread(notify.deliver_pending, db_factory, mailer)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Email delivery loop error; continuing.")
+        await asyncio.sleep(DELIVERY_INTERVAL_SECONDS)

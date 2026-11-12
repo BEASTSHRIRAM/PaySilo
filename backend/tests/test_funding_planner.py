@@ -295,7 +295,7 @@ def test_manual_reminder_and_outbox(env):
     r = c.post(f"/employers/{bor}/funding-reminder")
     assert r.status_code == 201, r.text
     n = r.json()
-    assert n["status"] == "SENT" and n["provider"] == "console" and n["simulated"] is True
+    assert n["status"] == "QUEUED" and n["attempts"] == 0 and n["provider"] is None  # no mail keys: queued only
     assert n["recipient"] == "bo@borealis.example" and "USD" in n["body"] and "Send funds to" in n["body"]
     assert n["kind"] in ("FUNDING_REMINDER", "FUNDING_OVERDUE")
     # funded employer: no reminder, statement still fine
@@ -303,6 +303,7 @@ def test_manual_reminder_and_outbox(env):
     assert c.post(f"/employers/{acme}/funding-reminder").status_code == 409
     assert c.post(f"/employers/{acme}/funding-reminder", json={"kind": "statement"}).json()["kind"] == "FUNDING_STATEMENT"
     lst = c.get("/notifications").json()
+    assert lst["email"]["configured"] is False and "not configured" in lst["email"]["message"]
     assert lst["total"] == 2 and lst["items"][0]["employer_name"] in ("Acme Manufacturing GmbH",)
     assert c.get(f"/notifications?kind=FUNDING_STATEMENT").json()["total"] == 1
     assert c.get(f"/notifications?employer_id={bor}").json()["total"] == 1
@@ -334,7 +335,7 @@ def test_sweep_is_idempotent_and_explains(env):
         first = reminders.sweep_organization(s, runtime, settings, org, MON)
         second = reminders.sweep_organization(s, runtime, settings, org, MON)
         by = {r["employer_name"].split()[0]: r for r in first}
-        assert by["Borealis"]["action"] == "queued" and by["Borealis"]["status"] == "SENT"
+        assert by["Borealis"]["action"] == "queued" and by["Borealis"]["status"] == "QUEUED"
         assert by["Acme"]["action"] == "skipped" and "funded" in by["Acme"]["reason"]
         assert by["Cobalt"]["reason"].startswith("No contact email")
         assert by["Delta"]["action"] == "skipped"
@@ -376,11 +377,13 @@ def test_sweep_all_is_error_safe(env):
 
 # --------------------------------------------------------------------------- notify providers
 class FakeSmtp:
+    """Stands in for smtplib.SMTP: records everything, never touches the network."""
     sent: list = []
+    log: list = []
     fail: Exception | None = None
 
     def __init__(self, host, port, timeout=0):
-        pass
+        FakeSmtp.log.append(("connect", host, port))
 
     def __enter__(self):
         return self
@@ -389,23 +392,27 @@ class FakeSmtp:
         return False
 
     def starttls(self, context=None):
-        pass
+        FakeSmtp.log.append(("starttls",))
 
     def login(self, user, password):
-        self.creds = (user, password)
-
-    def send_message(self, msg):
+        FakeSmtp.log.append(("login", user))
         if FakeSmtp.fail:
             raise FakeSmtp.fail
+        self.password = password
+
+    def send_message(self, msg):
         FakeSmtp.sent.append(msg)
 
 
-def _row(db, org_id):
-    with db.sessionmaker() as s:
-        org = s.get(Organization, org_id)
-        n = notify.queue_email(s, org, "GENERIC", "a@b.test", "Hi", "Body", dedupe_key="k1")
-        s.commit()
-        return n.id
+def _smtp(key="s3cret-key"):
+    return notify.SmtpMailer("smtp-relay.brevo.com", 587, "user@brevo", key, "pay@silo.example", "PaySilo",
+                             smtp_factory=FakeSmtp)
+
+
+@pytest.fixture
+def fake_smtp():
+    FakeSmtp.sent, FakeSmtp.log, FakeSmtp.fail = [], [], None
+    return FakeSmtp
 
 
 def test_queue_email_is_idempotent_and_validates(env):
@@ -421,33 +428,95 @@ def test_queue_email_is_idempotent_and_validates(env):
             notify.queue_email(s, org, "BOGUS", "a@b.test", "x", "y")
 
 
-def test_console_and_smtp_providers(env):
+def test_unconfigured_mailer_only_queues(env):
     _, _, db, settings = env
+    assert settings.email_configured is False and notify.email_status(settings)["configured"] is False
+    mailer = notify.mailer_for(settings)
+    assert mailer.configured is False
     with db.sessionmaker() as s:
-        org = s.scalar(select(Organization))
-        n = notify.queue_email(s, org, "GENERIC", "a@b.test", "Hi", "Body")
-        notify.deliver(s, n, settings)
-        assert (n.status, n.provider, n.sent_at is not None) == ("SENT", "console", True)
-        smtp = notify.SmtpProvider("mail.test", 587, "user", "s3cret", "from@x.test", smtp_factory=FakeSmtp)
-        n2 = notify.queue_email(s, org, "GENERIC", "a@b.test", "Hi2", "Body2")
-        notify.deliver(s, n2, settings, smtp)
-        assert n2.status == "SENT" and n2.provider == "smtp" and FakeSmtp.sent[-1]["To"] == "a@b.test"
-        FakeSmtp.fail = __import__("smtplib").SMTPAuthenticationError(535, b"bad creds s3cret")
-        n3 = notify.queue_email(s, org, "GENERIC", "a@b.test", "Hi3", "Body3")
-        notify.deliver(s, n3, settings, smtp)
-        assert n3.status == "FAILED" and "s3cret" not in (n3.error or "") and n3.sent_at is None
-        FakeSmtp.fail = OSError("connection refused")
-        n4 = notify.queue_email(s, org, "GENERIC", "a@b.test", "Hi4", "Body4")
-        notify.deliver(s, n4, settings, smtp)
-        assert n4.status == "FAILED" and n4.error
-        FakeSmtp.fail = None
-    unconfigured = Settings(database_url="sqlite://", jwt_secret="x" * 40, email_provider="smtp")
-    with pytest.raises(notify.ProviderError):
-        notify.provider_for(unconfigured)
+        n = notify.queue_email(s, s.scalar(select(Organization)), "GENERIC", "a@b.test", "Hi", "Body")
+        notify.deliver(s, n, mailer)
+        assert (n.status, n.attempts, n.sent_at) == ("QUEUED", 0, None)
+        s.commit()
+    assert notify.deliver_pending(db.sessionmaker, mailer) == 0
+    notify.dispatch_async(db.sessionmaker, settings)  # no thread, no error
+
+
+def test_smtp_mailer_speaks_starttls_login_and_multipart(env, fake_smtp):
+    _, _, db, _ = env
     with db.sessionmaker() as s:
-        n5 = notify.queue_email(s, s.scalar(select(Organization)), "GENERIC", "a@b.test", "s", "b")
-        notify.deliver(s, n5, unconfigured)  # misconfiguration -> FAILED, not an exception
-        assert n5.status == "FAILED" and "SMTP_HOST" in n5.error
+        n = notify.queue_email(s, s.scalar(select(Organization)), "GENERIC", "to@x.example", "Subject", "Plain body",
+                               body_html="<p>Html body</p>")
+        notify.deliver(s, n, _smtp())
+        assert (n.status, n.provider, n.attempts, n.error) == ("SENT", "smtp", 1, None) and n.sent_at
+    assert [e[0] for e in fake_smtp.log] == ["connect", "starttls", "login"]
+    assert fake_smtp.log[0][1:] == ("smtp-relay.brevo.com", 587)
+    msg = fake_smtp.sent[0]
+    assert msg["To"] == "to@x.example" and "pay@silo.example" in msg["From"]
+    assert msg.get_body(("plain",)).get_content().strip() == "Plain body"
+    assert "Html body" in msg.get_body(("html",)).get_content()
+
+
+def test_failed_send_records_safe_error_and_retries_with_backoff(env, fake_smtp, caplog):
+    import smtplib
+    from datetime import UTC, datetime, timedelta
+    _, _, db, _ = env
+    mailer = _smtp("s3cret-key")
+    FakeSmtp.fail = smtplib.SMTPAuthenticationError(535, b"bad creds s3cret-key")
+    with db.sessionmaker() as s:
+        n = notify.queue_email(s, s.scalar(select(Organization)), "GENERIC", "to@x.example", "S", "B")
+        notify.deliver(s, n, mailer)
+        s.commit()
+        nid = n.id
+        assert n.status == "FAILED" and n.attempts == 1 and "s3cret-key" not in n.error and "login" in n.error
+    t0 = datetime.now(UTC)
+    assert notify.deliver_pending(db.sessionmaker, mailer, now=t0) == 0  # too soon: backoff
+    FakeSmtp.fail = None
+    assert notify.deliver_pending(db.sessionmaker, mailer, now=t0 + timedelta(minutes=2)) == 1
+    with db.sessionmaker() as s:
+        row = s.get(Notification, nid)
+        assert (row.status, row.attempts, row.error) == ("SENT", 2, None)
+    assert "s3cret-key" not in caplog.text
+    # attempts are capped
+    FakeSmtp.fail = OSError("connection refused s3cret-key")
+    with db.sessionmaker() as s:
+        n = notify.queue_email(s, s.scalar(select(Organization)), "GENERIC", "to@x.example", "S2", "B2")
+        s.commit()
+        nid = n.id
+    for i in range(10):
+        notify.deliver_pending(db.sessionmaker, mailer, now=t0 + timedelta(hours=3 * (i + 1)))
+    with db.sessionmaker() as s:
+        row = s.get(Notification, nid)
+        assert row.status == "FAILED" and row.attempts == notify.MAX_ATTEMPTS and "s3cret-key" not in row.error
+
+
+def test_configured_settings_use_smtp_and_requests_do_not_block(env, monkeypatch):
+    c, _, db, settings = env
+    monkeypatch.setattr(settings, "brevo_smtp_user", "u")
+    monkeypatch.setattr(settings, "brevo_smtp_key", "k")
+    monkeypatch.setattr(settings, "email_from", "pay@silo.example")
+    assert isinstance(notify.mailer_for(settings), notify.SmtpMailer)
+    started = []
+    monkeypatch.setattr("app.services.notify.threading.Thread",
+                        lambda **kw: type("T", (), {"start": lambda self: started.append(kw["name"])})())
+    bor = next(p["employer_id"] for p in c.get("/funding/plan").json()["plans"] if p["employer_name"].startswith("Borealis"))
+    r = c.post(f"/employers/{bor}/funding-reminder")
+    assert r.status_code == 201 and r.json()["status"] == "QUEUED"  # queued; delivery is a background thread
+    assert started == ["paysilo-mail"]
+
+
+def test_templates_cover_every_kind_and_escape_html():
+    from app.services import email_templates as t
+    for subject, text, html in (
+            t.funds_received("Acme", "USD 100.00", "Vertex", continuation_started=True),
+            t.approval_requested("Acme", "Nov", "USD 5.00", "http://x/dashboard/runs/1", "Vertex", continuation=True),
+            t.held_lines_reminder("Acme", "Nov", 2, "http://x/r", "Vertex", funded=True),
+            t.run_settled("Acme", "Nov", "USD 5.00", "http://x/r", "Vertex"),
+            t.payment_failed("Acme", "Nov", "<script>alert(1)</script>", "http://x/r", "Vertex"),
+            t.invite("Vertex", "Priya", "viewer", "http://x/invite/tok"),
+            t.funding_shortfall(PLAN, "Vertex"), t.funding_shortfall(PLAN, "Vertex", overdue=True)):
+        assert subject and text and html.startswith("<!doctype html>") and "<img" not in html
+    assert "<script>" not in t.payment_failed("A", "n", "<script>x</script>", "u", "o")[2]
 
 
 # --------------------------------------------------------------------------- draft guard

@@ -7,13 +7,13 @@ import uuid
 from datetime import date, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ...config import Settings
 from ...crew import funding
-from ...services import reminders
+from ...services import notify, reminders
 from ...services.runtime import PlatformRuntime
 from ..deps import EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, get_settings, require_roles
 from .employers import load_employer
@@ -89,7 +89,7 @@ def funding_statement(employer_id: uuid.UUID, format: Literal["json", "csv"] = "
 
 
 @router.post("/employers/{employer_id}/funding-reminder", status_code=status.HTTP_201_CREATED)
-def send_reminder(employer_id: uuid.UUID, body: ReminderIn | None = None,
+def send_reminder(request: Request, employer_id: uuid.UUID, body: ReminderIn | None = None,
                   tenant: Tenant = Depends(require_roles(EDITOR_ROLES)), db: Session = Depends(get_db),
                   runtime: PlatformRuntime = Depends(get_runtime), settings: Settings = Depends(get_settings)) -> dict:
     body = body or ReminderIn()
@@ -111,12 +111,14 @@ def send_reminder(employer_id: uuid.UUID, body: ReminderIn | None = None,
     row = reminders.send_funding_email(db, tenant.organization, emp, plan, kind, settings,
                                        meta={"source": "manual", "requested_by": str(tenant.user.id)})
     db.commit()
+    notify.dispatch_async(request.app.state.db.sessionmaker, settings)  # delivery never blocks this request
     return notification_out(row, emp.name)
 
 
 @router.post("/funding/reminders/run")
-def run_sweep(tenant: Tenant = Depends(require_roles(EDITOR_ROLES)), db: Session = Depends(get_db),
+def run_sweep(request: Request, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)), db: Session = Depends(get_db),
               runtime: PlatformRuntime = Depends(get_runtime), settings: Settings = Depends(get_settings)) -> dict:
     results = reminders.sweep_organization(db, runtime, settings, tenant.organization)
+    notify.dispatch_async(request.app.state.db.sessionmaker, settings)
     return {"queued": sum(1 for r in results if r["action"] == "queued"),
             "skipped": sum(1 for r in results if r["action"] == "skipped"), "results": results}

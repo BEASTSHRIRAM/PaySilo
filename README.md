@@ -311,6 +311,8 @@ All keys go in `backend/.env` (gitignored — never commit it, never paste keys 
 | `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | Visa TAP signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
 | `ANTHROPIC_API_KEY` | Claude intake + Silo chat | console.anthropic.com. Without it a deterministic fallback answers. |
 | `METAL_RPC_URL`, `METAL_PRIVATE_KEY`, `METAL_REGISTRY_ADDRESS`, `METAL_EXPLORER_URL` | optional: real Metal L2 anchoring | funded testnet wallet + `backend/scripts/deploy_settlement_registry.py` |
+| `BREVO_SMTP_USER`, `BREVO_SMTP_KEY`, `EMAIL_FROM`, `EMAIL_FROM_NAME`, `BREVO_SMTP_HOST`, `BREVO_SMTP_PORT`, `APP_BASE_URL` | optional: real email for funding reminders and approval requests | Brevo → SMTP & API → SMTP (host `smtp-relay.brevo.com`, port 587, STARTTLS); `EMAIL_FROM` must be a verified sender. Without them the notifications outbox only queues messages. `APP_BASE_URL` builds the links in emails. |
+| `FUNDING_REMINDERS` | background funding sweep + email delivery | `on` (default) or `off` |
 | `APP_ENV` | | `demo` (simulator + demo org) or `live` (real sandbox) |
 
 Steps:
