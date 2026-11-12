@@ -458,3 +458,38 @@ def test_fallback_router_sends_creation_requests_to_draft_workflow(ctx_factory):
     assert steps[0][0] == "draft_workflow" and "DISABLED" in detail
     steps, _, _ = chat_service.fallback_plan(ctx, "show workflow runs", {})
     assert steps[0][0] == "read_workflow_runs"
+
+
+# ---------------------------------------------------------------------------
+# End to end: the wizard's workflow prepares the run on its day, asks approvers, then only waits
+# ---------------------------------------------------------------------------
+
+def test_payroll_schedule_prepares_the_run_emails_approvers_and_parks_at_the_gate(demo_client):
+    from app.db.models import Notification, PayrollRun, WorkflowApproval
+
+    emp = _first_employer(demo_client)
+    wf = demo_client.post("/workflows/employer-schedules", json={
+        "employer_id": emp["id"], "day": 3, "time": "09:00", "timezone": "Asia/Kolkata", "enabled": True}).json()
+    db, runtime = demo_client.app.state.db, demo_client.app.state.runtime
+    with db.sessionmaker() as s:
+        row = s.get(Workflow, uuid.UUID(wf["id"]))
+        row.updated_at = datetime(2026, 1, 1)
+        s.commit()
+        runs = run_due_schedules(s, now=utc(2026, 12, 3, 4, 0), runtime=runtime, organization_id=row.organization_id)
+        s.commit()
+        assert len(runs) == 1
+        run = s.get(WorkflowRun, runs[0].id)
+        steps = {st.node_id: st for st in run.steps}
+        assert run.status == "WAITING", (run.status, run.error_detail)
+        assert steps["prepare"].status == "OK", (run.error_detail, steps["prepare"].detail)
+        payroll = s.scalar(select(PayrollRun).where(PayrollRun.organization_id == row.organization_id,
+                                                    PayrollRun.employer_id == uuid.UUID(emp["id"])))
+        assert payroll is not None and payroll.status in ("RESERVED", "HELD_SHORTFALL", "PRICED")
+        # the workflow never approves or pays: nothing is APPROVED and no approval was decided by it
+        assert not s.scalars(select(WorkflowApproval).where(WorkflowApproval.status == "APPROVED")).all()
+        if run.status == "WAITING":
+            assert "email-approvers" in steps and steps["gate"].status == "WAITING"
+            mails = s.scalars(select(Notification).where(Notification.organization_id == row.organization_id)).all()
+            assert any("approv" in (m.subject or "").lower() for m in mails)
+        # the same occurrence never fires twice
+        assert run_due_schedules(s, now=utc(2026, 12, 3, 5, 0), runtime=runtime, organization_id=row.organization_id) == []
