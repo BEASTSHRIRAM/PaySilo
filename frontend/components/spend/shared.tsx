@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ApiError, type SpendPurchase, type SpendSource, type VicStatus } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
+import { AiriConnectControls } from "./airi-connect";
 
 /**
  * Shared building blocks for the VIC spend categories (Onboarding,
@@ -78,7 +79,9 @@ export function SourceBadge({ source }: { source: SpendSource }) {
  * never falls back to silent simulation. `subject` names the purchases
  * this page makes (e.g. "Onboarding purchases").
  */
-export function VicStatusBanner({ status, subject }: { status: VicStatus; subject: string }) {
+export function VicStatusBanner({ status, subject, canEdit = false, onChanged = () => {} }: {
+  status: VicStatus; subject: string; canEdit?: boolean; onChanged?: () => void;
+}) {
   if (status.mode === "SIMULATED") {
     return (
       <div className="flex gap-3 rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 px-5 py-4" role="status">
@@ -109,6 +112,7 @@ export function VicStatusBanner({ status, subject }: { status: VicStatus; subjec
             {status.tx_limit_usd ? <> · per-transaction limit {formatMoney(status.tx_limit_usd, "USD")}</> : null}.
             Real funds move when a purchase is confirmed.
           </p>
+          <AiriConnectControls status={status} canEdit={canEdit} onChanged={onChanged} />
         </div>
         <Badge tone="sage" className="ml-auto h-fit shrink-0 border-sage-500 bg-sage-500 text-ink-900">Live</Badge>
       </div>
@@ -118,12 +122,16 @@ export function VicStatusBanner({ status, subject }: { status: VicStatus; subjec
     <div className="flex gap-3 rounded-3xl border-2 border-coral-600/60 bg-coral-500/10 px-5 py-4" role="alert">
       <TriangleAlert className="mt-0.5 size-6 shrink-0 text-coral-300" />
       <div className="grid gap-1">
-        <p className="font-extrabold text-coral-300">VIC credential configured, but the Airi CLI is unavailable</p>
-        <p className="text-sm text-coral-300/90">
-          A credential is set (<span className="break-all font-mono font-bold">{status.credential_ref}</span>) but the
-          Airi CLI cannot be reached, so purchases are refused. They are never simulated silently while a live
-          credential is configured.
+        <p className="font-extrabold text-coral-300">
+          {status.cli_available ? "Live mode is on, but Airi is not connected" : "VIC credential configured, but the Airi CLI is unavailable"}
         </p>
+        <p className="text-sm text-coral-300/90">
+          {status.cli_available
+            ? "Connect the server's Airi account to enable purchases."
+            : <>A credential is set (<span className="break-all font-mono font-bold">{status.credential_ref}</span>) but the Airi CLI cannot be reached.</>}{" "}
+          Purchases are refused until then. They are never simulated silently while a live credential is configured.
+        </p>
+        <AiriConnectControls status={status} canEdit={canEdit} onChanged={onChanged} />
       </div>
       <Badge tone="danger" className="ml-auto h-fit shrink-0">Unavailable</Badge>
     </div>

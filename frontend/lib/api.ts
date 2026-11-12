@@ -591,6 +591,19 @@ export interface VicStatus {
   authenticated: boolean;
   /** Live purchases are two-phase: mandate, human authorizes in Airi, then Complete. */
   two_phase: boolean;
+  /** RFC3339 expiry of the server's Airi session (live + signed in only). */
+  session_expires?: string | null;
+}
+
+/** POST /benefits/airi/{connect,poll,disconnect} — server-side Airi sign-in. */
+export interface AiriLogin {
+  state: "connected" | "pending" | "expired" | "denied" | "failed" | "disconnected";
+  verification_uri?: string | null;
+  user_code?: string | null;
+  /** Seconds until the code expires (pending only). */
+  expires_in?: number | null;
+  session_expires?: string | null;
+  message?: string | null;
 }
 
 /** One employer's benefits budget: GET /benefits/budgets[]. */
@@ -694,6 +707,9 @@ function benefitsQuery(params?: BenefitListParams): string {
 // ------------------------------------------------------------------ VIC calls
 export const apiBenefits = {
   vicStatus: () => request<VicStatus>("/benefits/status"),
+  airiConnect: () => post<AiriLogin>("/benefits/airi/connect"),
+  airiPoll: () => post<AiriLogin>("/benefits/airi/poll"),
+  airiDisconnect: () => post<AiriLogin>("/benefits/airi/disconnect"),
   budgets: () => request<BenefitBudget[]>("/benefits/budgets"),
   updateBudget: (employerId: string, body: BenefitBudgetIn) =>
     request<BenefitBudget>(`/benefits/budgets/${encodeURIComponent(employerId)}`, {

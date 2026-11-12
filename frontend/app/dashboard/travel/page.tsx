@@ -661,7 +661,7 @@ export default function TravelPage() {
         </p>
       )}
 
-      {status && <VicStatusBanner status={status} subject="Trip purchases" />}
+      {status && <VicStatusBanner status={status} subject="Trip purchases" canEdit={canEdit} onChanged={() => void loadCore()} />}
 
       {/* ------------------------------------------------ budgets */}
       <section className="grid gap-4">

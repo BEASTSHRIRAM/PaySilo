@@ -572,7 +572,7 @@ export default function OnboardingPage() {
         </p>
       )}
 
-      {status && <VicStatusBanner status={status} subject="Onboarding purchases" />}
+      {status && <VicStatusBanner status={status} subject="Onboarding purchases" canEdit={canEdit} onChanged={() => void loadCore()} />}
 
       {/* ------------------------------------------------ budgets */}
       <section className="grid gap-4">

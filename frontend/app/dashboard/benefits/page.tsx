@@ -20,6 +20,7 @@ import {
   type BenefitBudget, type BenefitPurchase, type BenefitRequest, type BenefitRequestStatus,
   type Contractor, type Employer, type VicStatus,
 } from "@/lib/api";
+import { AiriConnectControls } from "@/components/spend/airi-connect";
 import { Stagger } from "@/lib/gsap-anim";
 import { cn, formatMoney } from "@/lib/utils";
 
@@ -85,7 +86,7 @@ function shortHash(hash: string | null): string | null {
 
 // ------------------------------------------------------------------ VIC status banner
 
-function VicStatusBanner({ status }: { status: VicStatus }) {
+function VicStatusBanner({ status, canEdit, onChanged }: { status: VicStatus; canEdit: boolean; onChanged: () => void }) {
   if (status.mode === "SIMULATED") {
     return (
       <div className="flex gap-3 rounded-3xl border-2 border-sand-400/50 bg-sand-300/10 px-5 py-4" role="status">
@@ -117,6 +118,7 @@ function VicStatusBanner({ status }: { status: VicStatus }) {
             Each purchase creates an Airi mandate that you authorize in Airi, then you complete it here. PaySilo
             never sees or stores card numbers.
           </p>
+          <AiriConnectControls status={status} canEdit={canEdit} onChanged={onChanged} />
         </div>
         <Badge tone="sage" className="ml-auto h-fit shrink-0 border-sage-500 bg-sage-500 text-ink-900">Live</Badge>
       </div>
@@ -131,10 +133,11 @@ function VicStatusBanner({ status }: { status: VicStatus }) {
         </p>
         <p className="text-sm text-coral-300/90">
           {status.cli_available
-            ? "Run airi-cli auth login on the server, then reload."
+            ? "Connect the server's Airi account to enable purchases."
             : "Install it with npm i -g @airwallex/airi-cli@beta (and check AIRI_CLI_COMMAND)."}{" "}
           Purchases are refused until then. They are never simulated silently while live mode is on.
         </p>
+        <AiriConnectControls status={status} canEdit={canEdit} onChanged={onChanged} />
       </div>
       <Badge tone="danger" className="ml-auto h-fit shrink-0">Unavailable</Badge>
     </div>
@@ -529,7 +532,7 @@ export default function BenefitsPage() {
         </p>
       )}
 
-      {status && <VicStatusBanner status={status} />}
+      {status && <VicStatusBanner status={status} canEdit={canEdit} onChanged={() => void loadCore()} />}
 
       {/* ------------------------------------------------ budgets */}
       <section className="grid gap-4">
