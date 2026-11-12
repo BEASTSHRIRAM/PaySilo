@@ -195,7 +195,7 @@ def _build(story: list, title: str) -> bytes:
 
 LIMITS = ("This document records what Airwallex reported to PaySilo and what PaySilo stored. It does not prove that the "
           "contractor's bank credited the account, and it is not a bank statement. It is accurate only as long as the "
-          "integrity check below validates.")
+          "integrity check validates.")
 
 
 def render_line_pdf(facts: dict, *, sig: str, url: str) -> bytes:
@@ -216,13 +216,13 @@ def render_line_pdf(facts: dict, *, sig: str, url: str) -> bytes:
                                           ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 6),
                                           ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))]
         story += [Spacer(1, 4), _p(_t(facts["notice"]["why"])), Spacer(1, 2),
-                  _p("<b>Next step:</b> " + _t(facts["notice"]["next"]))]
+                  _p("<b>Next step for the agency:</b> " + _t(facts["notice"]["next"]))]
 
     story += [_p("Payment", "h"), _kv([
         ("Contractor", c["contractor"]), ("Payout amount", amount),
         ("Payout method", c["method"] + (" (international wire)" if c["method"] == "SWIFT" else " (local rail)")),
         ("Payout fee", f"{c['currency']} {c['payout_fee']}" if c["payout_fee"] is not None else "Not recorded"),
-        ("Status at issue", f"{c['status']} ({tr['state']})"),
+        ("Status at issue", c["status"] if c["status"] == tr["state"] else f"{c['status']} ({tr['state']})"),
         ("Employer", facts["employer"]), ("Agency", facts["agency"]),
         ("Payroll run", f"{facts['run_id']}" + (f" - {facts['period']}" if facts["period"] else "")),
         ("Pay date / created", f"{facts['pay_date'] or '-'} / {facts['created_at']}"),
@@ -242,16 +242,20 @@ def render_line_pdf(facts: dict, *, sig: str, url: str) -> bytes:
     story += [_p("Approval and ledger", "h"), _kv(_approval_rows(facts) + _receipt_rows(facts))]
 
     if proof:
-        story += [_p("What to tell the contractor", "h"), _p(
-            f"1. Your payment of <b>{_t(amount)}</b> was sent by Airwallex on behalf of {_t(facts['employer'])}. "
-            f"2. Ask your bank to look for an incoming {'international (SWIFT) transfer' if c['method'] == 'SWIFT' else 'local transfer'} "
-            f"and give them the Airwallex transfer id <b>{_t(aw['transfer_id'])}</b> as the reference. "
-            "3. Check the account ending " + _t(c["bank"]["masked"]) + " and the sender name: it may show as Airwallex or the agency, not the employer. "
-            f"4. {_t(tr['expected_window'])} 5. Status PAID means Airwallex completed its side. If your bank still cannot find it, "
-            f"send this PDF to {_t(facts['agency'])} so they can ask Airwallex to trace it.")]
+        method_txt = "international (SWIFT) transfer" if c["method"] == "SWIFT" else "local transfer"
+        story += [_p("What to tell the contractor", "h")] + [_p(x) for x in (
+            f"1. Your payment of <b>{_t(amount)}</b> was sent by Airwallex on behalf of {_t(facts['employer'])}.",
+            f"2. Ask your bank to look for an incoming {method_txt} and give them the Airwallex transfer id "
+            f"<b>{_t(aw['transfer_id'])}</b> as the reference.",
+            f"3. Check the account ending {_t(c['bank']['masked'])}. The sender may show as Airwallex or the agency, not the employer.",
+            f"4. {_t(tr['expected_window'])}",
+            "5. Status PAID means Airwallex completed its side. If your bank still cannot find the payment, send this PDF to "
+            f"{_t(facts['agency'])} so they can ask Airwallex to trace it.")]
     else:
         story += [_p("What to tell the contractor", "h"), _p(
-            f"No money has been sent to you for this line. {_t(tr['diagnosis'])} {_t(tr['next_step'])}")]
+            f"No money has been sent to you for this line. {_t(tr['diagnosis'])} {_t(facts['agency'])} is responsible for "
+            "fixing this, so contact them for timing. Never send bank details by email unless you have confirmed the "
+            "request through a number or channel you already trust.")]
 
     story += [Spacer(1, 6), _integrity(facts, sig, url,
                                        "Re-computed from PaySilo's records when you open the link or scan the code. VALID means this "
