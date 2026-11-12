@@ -12,6 +12,7 @@ export interface StatusInfo {
 
 interface RunLike {
   status: string;
+  residual_shortfall?: string | null;
   pay_lines?: { status: string }[];
 }
 
@@ -38,6 +39,17 @@ export function paidCounts(run: RunLike): { paid: number; total: number } | null
 /** Display mapping for run statuses, including the newer partial / post-payout states. */
 export function runStatusInfo(run: RunLike): StatusInfo {
   const s = run.status;
+  if (s === "PARTIALLY_SETTLED") {
+    const c = paidCounts(run);
+    const residual = run.residual_shortfall ? ` Residual shortfall USD ${run.residual_shortfall}.` : "";
+    return {
+      label: "Partially settled",
+      tone: "warning",
+      detail: c
+        ? `${c.paid} of ${c.total} lines settled in priority order. The rest are held until the employer's wallet can cover them.${residual}`
+        : `Some lines settled in priority order; the rest are held until the employer's wallet can cover them.${residual}`,
+    };
+  }
   if (s === "PARTIALLY_PAID") {
     const c = paidCounts(run);
     return {
@@ -56,7 +68,7 @@ export function runStatusInfo(run: RunLike): StatusInfo {
 /** Compact label for tables: "Partially paid" gets its count when lines are known. */
 export function runStatusLabel(run: RunLike): string {
   const info = runStatusInfo(run);
-  if (run.status === "PARTIALLY_PAID") {
+  if (run.status === "PARTIALLY_PAID" || run.status === "PARTIALLY_SETTLED") {
     const c = paidCounts(run);
     if (c) return `${info.label} · ${c.paid} of ${c.total}`;
   }
@@ -65,7 +77,7 @@ export function runStatusLabel(run: RunLike): string {
 
 /** Run statuses where contractor money has moved (mirrors the backend MONEY_MOVED set). */
 export const MONEY_MOVED_STATUSES = new Set([
-  "SETTLED", "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING",
+  "SETTLED", "PARTIALLY_PAID", "PARTIALLY_SETTLED", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING",
 ]);
 export const isMoneyMoved = (status: string | null | undefined): boolean => MONEY_MOVED_STATUSES.has(status ?? "");
 
@@ -76,5 +88,3 @@ export const TERMINAL_RUN_STATUSES = new Set([
 
 export const DECIDER_ROLES = ["owner", "admin", "approver"];
 export const EDITOR_ROLES = ["owner", "admin", "editor"];
-/** Who may start a run (and so "Pay held lines"): mirrors the backend's owner/admin editor roles. */
-export const RUN_STARTER_ROLES = ["owner", "admin"];

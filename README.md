@@ -33,10 +33,6 @@ reserve. Delta Studios BV (USD 5,000) owes Noor van Dijk EUR 2,200 and
 Pieter Jansen EUR 3,600: Noor is paid, Pieter is held and escalated, and the
 run ends **PARTIALLY_PAID** with USD 2,461.12 left in Delta's own wallet.
 
-Once Delta tops up its own wallet, **Pay held lines** pays Pieter in a linked
-continuation run: Noor is never paid twice and the USD 149 run fee is not
-charged a second time (see "Held lines and continuation runs").
-
 > **The model reads, the code decides, the API moves the money.**
 > The only LLM use in PaySilo is intake (reading messy payroll sheets) and
 > plain-language explanation. Pricing, fees, affordability, tenant
@@ -98,10 +94,10 @@ flowchart TD
         INTAKE["intake — Intake Agent (LLM)<br/>email/sheet → structured pay lines"]
         PRICE["price — Pricing Agent (code)<br/>fees BEFORE FX, per currency/method"]
         ASSESS["assess — Balance & Policy Agent (code)<br/>own wallet vs payroll + $149 fee + $1,000 reserve"]
-        APPR{{"approval — INTERRUPT<br/>Visa TAP-signed human approve / hold"}}
+        APPR{{"approval — INTERRUPT<br/>signed human approve / hold"}}
         ESC{{"escalate — INTERRUPT<br/>shortfall held for a human"}}
         REF["refused — policy refusal<br/>(unknown payee, missing bank details, no fee schedule)"]
-        EXEC["execute — FX & Payout Agent (tools)<br/>x-on-behalf-of, TAP-signed payouts, idempotent request_ids"]
+        EXEC["execute — FX & Payout Agent (tools)<br/>x-on-behalf-of, signature-verified payouts, idempotent request_ids"]
         FEE["fee — Fee Agent (tools)<br/>USD 149, only if the payroll ran"]
         REC["reconcile — Reconciliation Agent (code)<br/>ledger must match wallet and balance"]
         ATT["attest — Attestation Agent (tools)<br/>Metal: receipt hash anchored"]
@@ -128,9 +124,9 @@ flowchart TD
 | `intake` | **LLM** | Reads payroll sheets and emails into structured pay lines (Claude). Names are then matched against *this employer's own* contractor directory — a name that is not in the directory gets no bank details and cannot be paid. |
 | `price` | code | Prices salaries plus payout fees per currency and method (SWIFT EUR 12.85 per payout) *before* any FX conversion. Unknown currency rate or fee schedule is a refusal, never a guess. |
 | `assess` | code | Checks only this employer's wallet against payroll + the USD 149 run fee + the USD 1,000 reserve floor. If the full batch doesn't fit, pays the smallest lines it can (Kit 6 partial payout) and escalates the rest; routes to approval, escalation, or refusal. |
-| `approval` | human interrupt | Pauses the run. It resumes only with a Visa TAP signature over the exact run, employer, amounts, the lines to pay and (for a partial payout) the held lines; a missing, tampered or replayed signature rejects the approval and moves no money. |
+| `approval` | human interrupt | Pauses the run. It resumes only with a TAP-style signature (our internal approval-integrity mechanism) over the exact run, employer, amounts, the lines to pay and (for a partial payout) the held lines; a missing, tampered or replayed signature rejects the approval and moves no money. |
 | `escalate` | human interrupt | Holds a short payroll and surfaces the exact shortfall and the employer's options. A short payroll can only be held — there is no "approve anyway" path. |
-| `execute` | tools | Re-checks affordability against fresh balances, then converts and pays on the employer's behalf only (`x-on-behalf-of`), each payout TAP-signed and verified immediately before the transfer, every call carrying a deterministic idempotent `request_id`. |
+| `execute` | tools | Re-checks affordability against fresh balances, then converts and pays on the employer's behalf only (`x-on-behalf-of`), each payout signed and verified against the signed approval immediately before the transfer, every call carrying a deterministic idempotent `request_id`. |
 | `fee` | tools | Collects the USD 149 platform run fee — only from payrolls that actually ran. Held or refused runs are charged nothing. |
 | `reconcile` | code | Proves the double-entry ledger matches the wallet in every currency and the books balance; a mismatch refuses to close the run. |
 | `attest` | tools | Anchors a hash of the reconciliation receipt on the settlement chain (Metal). Hashes only — no raw financial data on chain. |
@@ -179,43 +175,12 @@ Failed runs resume from their checkpoint too: progress markers
 a retry skips work that already completed and can never pay a
 contractor twice.
 
-### Held lines and continuation runs
-
-A run that ends `PARTIALLY_PAID` (or `HELD_SHORTFALL`) keeps its unpaid lines as
-`HELD` pay lines. After the employer tops up **its own** wallet, **Pay held
-lines** (`POST /runs/{run_id}/pay-held`, owner/admin) starts a **new run** linked
-to the original (`payroll_runs.parent_run_id`, `source = "continuation"`):
-
-- It contains only the parent's `HELD` lines, with the held amounts but the
-  contractors' *current* bank details. It goes through the normal pricing,
-  Visa TAP-signed approval and payout path, with request ids derived from the
-  new run id, so contractors already paid are never paid again.
-- The USD 149 run fee is per payroll, not per click: if it was already collected
-  on the parent or any run up the chain, the continuation neither prices nor
-  charges it again. If nothing was collected yet (parent `HELD_SHORTFALL`), it is
-  charged normally. The approval card states which applies.
-- Allowed only for a `PARTIALLY_PAID` / `HELD_SHORTFALL` parent with held lines,
-  an active employer, no open or money-moved continuation of that parent (a
-  refused, held, rejected or shortfall continuation can be tried again; a
-  `FAILED` one is retried with `/retry`), and no later payroll that already paid
-  the held contractor. The one-open-run-per-employer rule still applies. A held
-  contractor who was deactivated or deleted returns 422 naming them.
-- A continuation that is itself `PARTIALLY_PAID` can be continued again.
-- Silo chat has a matching `pay_held_lines` tool ("pay the held lines for Delta
-  Studios"); like `start_payroll_run` it only starts the run, which then waits for
-  a human approval.
-
-Demo: after Delta's partial run (wallet USD 2,461.12), add USD 4,000, press
-**Pay held lines** and approve: Pieter's EUR 3,600 (USD 3,901.88 with the EUR
-12.85 fee) is paid, no second run fee, wallet USD 2,559.24, run `SETTLED`; the
-original run stays `PARTIALLY_PAID` and links to the continuation.
-
 ### Safety rules (enforced in code, tested in the suite)
 
 - **Tenant isolation is absolute.** Organisation and employer context
   come from the authenticated session, never from model input; every
   query and every money call is scoped to one employer's silo.
-- **Money moves only on a TAP-signed human approval.** The agent
+- **Money moves only on a cryptographically signed human approval.** The agent
   proposes, deterministic code decides, the API moves money. No tool —
   chat, intake, or otherwise — approves or transfers.
 - **Allow-listed beneficiaries only.** A pay line must resolve to a
@@ -245,7 +210,8 @@ approvals) — see `backend/tests/` and the intake eval in
 |---|---|---|
 | **Airwallex** | The money itself: connected accounts (create → update with EIN → submit → ACTIVE), wallets, FX, beneficiaries, SWIFT/LOCAL transfers, platform fee via `charges/create` — every employer-scoped call with `x-on-behalf-of` | `backend/app/airwallex/` |
 | **Claude (Anthropic)** | Reads payroll sheets/emails into pay lines (Intake Agent) and powers the Silo chat (tools + context). Never touches arithmetic or money decisions. Chat can also run on OpenAI / Groq / Meta via `LLM_PROVIDER` | `backend/app/agents/intake.py`, `backend/app/chat/` |
-| **Visa TAP** | Signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
+| **Visa VIC (via Airi)** | The Visa commerce integration: employer-funded benefits (courses, equipment) purchased by the agent with a VIC-tokenized credential obtained through Airi (Kit 9), inside a separate benefits budget that can never touch wage funds. Runs SIMULATED against the published Airwallex test card (US$200 per transaction) until `VIC_CREDENTIAL` is set | `backend/app/partners/vic.py`, Benefits screen |
+| **TAP-style request signing** | PaySilo's *internal* approval-integrity mechanism (not a Visa product integration) — signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
 | **Metal** | Reconciliation receipt anchoring on Metal L2 testnet (`SettlementRegistry.sol`): hashes only, waits for the transaction receipt before claiming "anchored", hash chain continues across restarts. Offline mock chain until configured — always labelled `mock` | `backend/app/partners/metal.py`, `contracts/` |
 | **AWS Bedrock AgentCore** | Deployment runtime: the same graph wrapped as an AgentCore entrypoint | `backend/app/partners/agentcore.py`, `deploy/agentcore/` |
 | **LangGraph** | Agent orchestration: per-employer subgraphs, human-in-the-loop interrupts, durable checkpoints (SQLite / Postgres) | `backend/app/agents/` |
@@ -278,7 +244,7 @@ Expected demo outcome (demo FX 1 EUR = 1.08 USD; SWIFT fee EUR 12.85 per payout;
 | **Delta Studios BV** | USD 5,000 | Noor EUR 2,200 + Pieter EUR 3,600 | Kit 6 partial payout: Noor paid, Pieter held → **PARTIALLY_PAID**, fee USD 149, wallet USD 2,461.12 |
 | **Cobalt Retail LLC** | USD 0 → +10,000 deposit | — | its deposit never unblocks Borealis; the cross-tenant refusal is in the audit log |
 
-API: `POST /runs` (stops at the approval/escalation interrupt), `POST /runs/{run_id}/pay-held` (continuation run for held lines), `POST /runs/{run_id}/decision` with `{"decision": "approve" | "hold"}`, `GET /runs/{run_id}`, `POST /chat` (SSE).
+API: `POST /runs` (stops at the approval/escalation interrupt), `POST /runs/{run_id}/decision` with `{"decision": "approve" | "hold"}`, `GET /runs/{run_id}`, `POST /chat` (SSE).
 
 ### Frontend
 
@@ -308,7 +274,7 @@ All keys go in `backend/.env` (gitignored — never commit it, never paste keys 
 | `JWT_SECRET` | sessions (required in live) | `python -c "import secrets;print(secrets.token_urlsafe(48))"` |
 | `AIRWALLEX_CLIENT_ID`, `AIRWALLEX_API_KEY` | real sandbox money movement | Airwallex sandbox web app → Developer → API keys. IP whitelist is optional (leave it empty for a dynamic IP or teammates on other networks). |
 | `AIRWALLEX_BASE_URL` | | `https://api.sandbox.airwallex.com/api/v1` (exactly one `=` after the key name) |
-| `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | Visa TAP signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
+| `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | TAP-style signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
 | `ANTHROPIC_API_KEY` | Claude intake + Silo chat | console.anthropic.com. Without it a deterministic fallback answers. |
 | `METAL_RPC_URL`, `METAL_PRIVATE_KEY`, `METAL_REGISTRY_ADDRESS`, `METAL_EXPLORER_URL` | optional: real Metal L2 anchoring | funded testnet wallet + `backend/scripts/deploy_settlement_registry.py` |
 | `APP_ENV` | | `demo` (simulator + demo org) or `live` (real sandbox) |
@@ -321,6 +287,20 @@ Steps:
 4. Add contractors (IBAN + SWIFT for SWIFT payouts), **Add funds** (sandbox simulated deposit into that employer's wallet), wait about 3 minutes after activation (new accounts briefly reject FX with `unconfigured_client_fee`; the client retries), then **Run payroll → Approve & sign**.
 
 Airwallex MCP servers are optional dev aids: the **docs** MCP needs no login; the **developer** MCP needs a sandbox login and is not available in some regions (e.g. India). Neither is used at runtime — the developer MCP can't send `x-on-behalf-of`, so all employer money movement goes through the REST client.
+
+## Email (SMTP)
+
+PaySilo's spend modules (Benefits, onboarding kits, travel) and payroll runs notify people through one platform email capability: templates in `backend/app/services/email.py`, recorded in the `email_outbox` table and exposed at `GET /emails/status`, `GET /emails/outbox` and `POST /emails/outbox/drain` (drain is owner/admin only).
+
+| Key | Needed for | Notes |
+|---|---|---|
+| `SMTP_HOST` | sending email | Hostname of your SMTP server. Without it (or without `EMAIL_FROM`) email is not configured. |
+| `SMTP_PORT` | sending email | Default `587` (STARTTLS). Port `465` uses implicit TLS (`SMTP_SSL`). |
+| `SMTP_USER` | SMTP login | Optional; login is attempted only when this is set. |
+| `SMTP_PASSWORD` | SMTP login | Secret — set it in `.env` only, never in code, issues or chat. |
+| `EMAIL_FROM` | sending email | The From address recipients see, e.g. `PaySilo <no-reply@example.com>`. This is the only email setting the status endpoint exposes. |
+
+The outbox law: every message is rendered from its context snapshot and **recorded first** — until SMTP is set, rows are recorded as `NOT_CONFIGURED` and nothing is sent; once configured, rows are `QUEUED` and only an explicit drain sends them (success → `SENT`, failure → `FAILED`, terminal for that row). Nothing is ever fake-sent, and a future API-based email provider can replace the SMTP transport without changing templates, the outbox or the routes.
 
 ## Troubleshooting
 

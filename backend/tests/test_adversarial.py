@@ -33,7 +33,9 @@ SIGNUP = {
 }
 
 START_BALANCES = {ACME: {"USD": "20000.00"}, BOREALIS: {"USD": "5000.00"}, COBALT: {},
-                 "Delta Studios BV": {"USD": "5000.00"}}
+                 "Delta Studios BV": {"USD": "5000.00"},
+                 # Dunmore Textiles: the seeded PARTIAL-mode employer (Sriram 2026-11-12).
+                 "Dunmore Textiles": {"USD": "5000.00"}}
 
 
 def _employers(c: TestClient) -> dict[str, dict]:

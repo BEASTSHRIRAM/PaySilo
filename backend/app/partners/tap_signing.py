@@ -223,6 +223,12 @@ def compare_signed_body_to_run(signed_body: str, *, run_id: str, assessment: dic
                 or (signed.get("method") or "SWIFT") != (actual.get("method") or "SWIFT")
                 or not _same(signed.get("amount"), actual["amount"])):
             return f"signed held line {i + 1} differs from the run"
+    # PARTIAL runs bind the settlement split itself: mode + residual shortfall.
+    if body.get("settlement_mode") is not None:
+        if assessment is None or body.get("settlement_mode") != assessment.get("settlement_mode"):
+            return "signed settlement_mode differs from the run's assessment"
+        if not _same(body.get("residual_shortfall_usd"), assessment.get("residual_shortfall_usd")):
+            return "signed residual_shortfall_usd differs from the run's assessment"
     return None
 
 
@@ -257,6 +263,11 @@ def approval_body(*, run_id: str, employer_key: str, decision: str, assessment: 
     }
     if held_lines:
         body["held_lines"] = _line_fields(held_lines)
+    if assessment.get("settlement_mode"):
+        # PARTIAL split binding: the PAID/HELD marks are the pay_lines /
+        # held_lines lists above; the mode + residual pin the split's totals.
+        body["settlement_mode"] = assessment["settlement_mode"]
+        body["residual_shortfall_usd"] = assessment.get("residual_shortfall_usd")
     return body
 
 

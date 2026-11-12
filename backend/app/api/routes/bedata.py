@@ -50,8 +50,8 @@ from .runs import load_run
 
 router = APIRouter(tags=["bedata"])
 
-# Money moved and nothing is owed: a shortfall alert is only stale for these (PARTIALLY_PAID still owes held lines).
-_CLOSED_FULLY_PAID = MONEY_MOVED - {"PARTIALLY_PAID"}
+# Money moved and nothing is owed: a shortfall alert is only stale for these (PARTIALLY_PAID / PARTIALLY_SETTLED still owe held lines).
+_CLOSED_FULLY_PAID = MONEY_MOVED - {"PARTIALLY_PAID", "PARTIALLY_SETTLED"}
 
 SUPPORTED_CURRENCIES = {"USD", "EUR", "GBP"}
 MAX_IMPORT_ROWS = 5_000
@@ -874,7 +874,7 @@ def list_exceptions(limit: int = Query(100, ge=1, le=500), offset: int = Query(0
                                                                   if run.shortfall_usd else ""),
                 "detail": run.explanation or run.error or f"Run status is {run.status}.",
                 "owner": owner,
-                "next_action": ("Fund the employer's own wallet, then pay the held lines."
+                "next_action": ("Fund the employer's own wallet, then start a new run."
                                 if is_short else "Review the held run and decide."),
                 "evidence_label": f"Run {run.id} assessment", "created_at": created,
             })

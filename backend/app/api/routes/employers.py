@@ -19,6 +19,25 @@ from ..serializers import contractor_out, employer_detail_out, employer_out
 
 router = APIRouter(prefix="/employers", tags=["employers"])
 
+# --- spend-workflows dispatch wiring (WF lane) ---------------------------
+import logging as _logging
+
+_wf_logger = _logging.getLogger(__name__)
+
+
+def _dispatch_workflow(db: Session, tenant: Tenant, event: str, kind: str, entity_id, facts: dict) -> None:
+    """Best-effort workflow dispatch: a workflow failure never breaks creation."""
+    try:
+        from ...services.workflows import dispatch_event
+
+        dispatch_event(db, organization_id=tenant.organization.id, event_type=event,
+                       entity_kind=kind, entity_id=str(entity_id), facts=facts)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        _wf_logger.exception("workflow dispatch %s for %s %s failed (ignored)", event, kind, entity_id)
+        db.rollback()
+# --- end spend-workflows dispatch wiring ---------------------------------
+
 
 def load_employer(db: Session, tenant: Tenant, employer_id: uuid.UUID) -> Employer:
     """The only way routes fetch an employer: by id AND organization. 404 otherwise."""
@@ -55,6 +74,9 @@ def create_employer(body: EmployerIn, tenant: Tenant = Depends(require_roles(EDI
         db.rollback()
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Airwallex could not create this employer's account: {exc}") from None
     db.commit()
+    _dispatch_workflow(db, tenant, "employer.created", "employer", emp.id, {
+        "employer_id": str(emp.id), "employer_name": emp.name, "contact_email": emp.contact_email,
+        "contact_name": emp.contact_name, "currency": emp.funding_currency, "status": emp.status})
     return employer_detail_out(db, runtime, load_employer(db, tenant, emp.id))
 
 
@@ -87,6 +109,12 @@ def add_contractor(employer_id: uuid.UUID, body: ContractorIn, tenant: Tenant = 
     contractor = Contractor(organization_id=tenant.organization.id, employer_id=emp.id, **data)
     db.add(contractor)
     db.commit()
+    _dispatch_workflow(db, tenant, "contractor.created", "contractor", contractor.id, {
+        "contractor_id": str(contractor.id), "contractor_name": contractor.full_name,
+        "contractor_email": contractor.email, "employer_id": str(emp.id), "employer_name": emp.name,
+        "currency": contractor.currency,
+        "amount": str(contractor.default_amount) if contractor.default_amount is not None else None,
+        "status": "ACTIVE" if contractor.is_active else "INACTIVE"})
     return contractor_out(contractor)
 
 

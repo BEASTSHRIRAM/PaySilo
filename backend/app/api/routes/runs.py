@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ...db.models import PayrollRun
-from ...services.runtime import HeldLineUnavailable, PlatformRuntime, RuntimeConflict
+from ...services.runtime import PlatformRuntime, RuntimeConflict
 from ..deps import APPROVER_ROLES, EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, require_roles
 from ..schemas import DecisionIn, RunDetailOut, RunIn, RunOut
 from ..serializers import run_detail_out, run_out
@@ -75,27 +75,6 @@ def start_run(body: RunIn, tenant: Tenant = Depends(require_roles(EDITOR_ROLES))
     return run_detail_out(db, runtime, load_run(db, tenant, run.id))
 
 
-@router.post("/{run_id}/pay-held", response_model=RunDetailOut, status_code=status.HTTP_201_CREATED)
-def pay_held(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
-             db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
-    """Start a NEW run that pays only this run's HELD lines from the employer's own wallet.
-
-    The new run is linked to this one (``parent_run_id``), priced and approved like any run (it waits
-    for a TAP-signed human decision), and never touches the contractors this run already paid.
-    """
-    parent = load_run(db, tenant, run_id)  # org-scoped: another organization's run is a 404
-    try:
-        run = runtime.start_continuation(db, org=tenant.organization, user=tenant.user, run=parent)
-    except RuntimeConflict as exc:
-        db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
-    except HeldLineUnavailable as exc:
-        db.rollback()
-        raise HTTPException(422, str(exc)) from None
-    db.expire_all()
-    return run_detail_out(db, runtime, load_run(db, tenant, run.id))
-
-
 @router.get("/{run_id}", response_model=RunDetailOut)
 def get_run(run_id: uuid.UUID, tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db),
             runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
@@ -110,21 +89,57 @@ def decide(run_id: uuid.UUID, body: DecisionIn, tenant: Tenant = Depends(require
         runtime.decide(db, run=run, employer=run.employer, user=tenant.user, decision=body.decision)
     except RuntimeConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    # Spend-workflows gate wiring (WF lane): a payroll decision also
+    # resolves any workflow gate parked on this run (approve -> APPROVED;
+    # hold -> REJECTED, i.e. the human did not approve the gated plan).
+    # Lazy + guarded: a workflow failure never breaks the payroll decision.
+    try:
+        from ...services.workflows import resolve_approval_for_entity
+
+        resolve_approval_for_entity(
+            db, organization_id=tenant.organization.id, entity_kind="run", entity_id=str(run.id),
+            decision="APPROVED" if body.decision == "approve" else "REJECTED",
+            decided_by=tenant.user)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "workflow gate resolution for run %s failed (ignored)", run.id)
+        db.rollback()
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run_id))
 
 
-@router.post("/{run_id}/retry", response_model=RunDetailOut)
-def retry(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
-          db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
-    """Resume a FAILED run from its checkpoint. Completed payouts are skipped and every
-    money call reuses its request_id, so nobody is paid twice."""
+@router.post("/{run_id}/prepare-residual", response_model=RunDetailOut)
+def prepare_residual(run_id: uuid.UUID, tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
+                     db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """Phase 2 for a PARTIALLY_SETTLED run: recompute the walk over the HELD
+    lines only and store it as a fresh snapshot. Moves no money; the plan
+    still needs its own approval (``approve-residual``)."""
     run = load_run(db, tenant, run_id)
-    if run.status != "FAILED":
-        raise HTTPException(status.HTTP_409_CONFLICT, "Only a failed run can be retried.")
     try:
-        runtime.resume_failed(db, run=run, employer=run.employer)
-    except (RuntimeConflict, ValueError) as exc:
+        runtime.prepare_residual_plan(db, run=run, employer=run.employer)
+    except RuntimeConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    db.expire_all()
+    return run_detail_out(db, runtime, load_run(db, tenant, run_id))
+
+
+@router.post("/{run_id}/approve-residual", response_model=RunDetailOut)
+def approve_residual(run_id: uuid.UUID, body: DecisionIn,
+                     tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+                     db: Session = Depends(get_db), runtime: PlatformRuntime = Depends(get_runtime)) -> RunDetailOut:
+    """The FRESH phase-2 decision, mirroring ``/decision`` (approver roles,
+    TAP-signed). On approve it settles the residual plan's lines and the run
+    reaches SETTLED when no held lines remain. The phase-1 approval never
+    covers this remainder."""
+    run = load_run(db, tenant, run_id)
+    try:
+        runtime.decide_residual(db, run=run, employer=run.employer, user=tenant.user, decision=body.decision)
+    except RuntimeConflict as exc:
+        db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
     db.expire_all()
     return run_detail_out(db, runtime, load_run(db, tenant, run_id))

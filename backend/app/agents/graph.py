@@ -52,6 +52,7 @@ from ..policy import (
     RefusalError,
     assess_payroll,
     plan_partial_payout,
+    plan_priority_payout,
 )
 from .intake import explain_assessment, parse_intake
 from .state import PayrollRunState
@@ -79,14 +80,6 @@ AGENTS: dict[str, dict[str, str]] = {
                "job": "Anchors a hash of the reconciliation receipt on the settlement chain (Metal)."},
 }
 
-# Airwallex rejects tiny FX quotes (amount_below_limit), so top-ups are at least this.
-MIN_FX_TOP_UP = Decimal("10.00")
-
-def _is_insufficient_balance(exc: BaseException) -> bool:
-    """Airwallex: HTTP 400 code=balance_insufficient; simulator: 'Insufficient funds'."""
-    return getattr(exc, "code", None) == "balance_insufficient" or "insufficient" in str(exc).lower()
-
-
 PAYOUT_ERRORS: tuple[type[BaseException], ...] = (Exception,)
 
 
@@ -113,6 +106,8 @@ def _normalise_line(line: dict) -> dict:
         "currency": str(line["currency"]).upper(),
         "method": str(line.get("method") or "SWIFT").upper(),
     }
+    if line.get("priority") is not None:
+        out["priority"] = int(line["priority"])
     for key in ("iban", "swift_code", "account_number", "routing_code", "country_code", "contractor_id"):
         if line.get(key):
             out[key] = str(line[key])
@@ -123,6 +118,8 @@ def _directory_entry(contractor: dict) -> dict:
     keep = ("name", "currency", "method", "iban", "swift_code", "account_number", "routing_code",
             "country_code", "contractor_id")
     out = {k: str(contractor[k]) for k in keep if contractor.get(k)}
+    if contractor.get("priority") is not None:
+        out["priority"] = int(contractor["priority"])
     out["name"] = out["name"].strip()
     return out
 
@@ -133,12 +130,15 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
                   raw_input: str | None = None,
                   account_id: str | None = None,
                   directory: list[dict] | None = None,
-                  parent_run_id: str | None = None,
-                  waive_run_fee: bool = False) -> PayrollRunState:
+                  settlement_mode: str | None = None) -> PayrollRunState:
     return PayrollRunState(
         run_id=run_id,
         employer_key=employer_key,
         employer_name=employer_name,
+        # None = caller did not specify (demo / supervisor / direct graph use):
+        # the legacy Kit 6 smallest-first partial behaviour is preserved.
+        # The runtime always passes the employer's real mode explicitly.
+        settlement_mode=settlement_mode or "LEGACY_PARTIAL",
         contact_name=contact_name,
         account_id=account_id,
         funding_usd=money_str(to_decimal(str(funding_usd))),
@@ -160,9 +160,6 @@ def initial_state(*, run_id: str, employer_key: str, employer_name: str,
         error=None,
         balances={},
         signatures=[],
-        continuation=parent_run_id is not None,
-        parent_run_id=parent_run_id,
-        run_fee_waived=bool(waive_run_fee),
     )
 
 
@@ -179,7 +176,8 @@ def _log(state: PayrollRunState, node: str, message: str, level: str = "info",
 def _pay_lines(state: PayrollRunState) -> list[ContractorPayroll]:
     return [
         ContractorPayroll(name=l["name"], amount=to_decimal(l["amount"]),
-                          currency=l["currency"], method=l.get("method", "SWIFT"))
+                          currency=l["currency"], method=l.get("method", "SWIFT"),
+                          priority=int(l.get("priority") or 0))
         for l in state["pay_lines"]
     ]
 
@@ -203,7 +201,6 @@ def assessment_dict(a: PayrollAssessment) -> dict:
         "available_usd": money_str(a.available_usd),
         "shortfall_usd": money_str(a.shortfall_usd),
         "can_run": a.can_run,
-        "run_fee_waived": a.run_fee_waived,
     }
 
 
@@ -218,10 +215,6 @@ def _decision_of(value: object) -> tuple[str, str, dict | None]:
         return (str(value.get("decision", "hold")), str(value.get("decided_by", "unknown")),
                 value.get("tap"))
     return str(value), "unknown", None
-
-
-def _waived(state: PayrollRunState) -> bool:
-    return bool(state.get("run_fee_waived"))
 
 
 def build_graph(services: Services, checkpointer=None):
@@ -298,8 +291,12 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "refused", "status": "REFUSED", "error": msg, "audit": audit, "events": events}
         balances = awx.get_balances(account_id=state["account_id"])
         try:
-            assessment = assess_payroll(_pay_lines(state), _rates_for(state, balances), balances,
-                                        waive_run_fee=_waived(state))
+            rates = services.usd_rates
+            if services.rate_provider is not None:
+                needed = {l["currency"] for l in state["pay_lines"]} | set(balances)
+                rates = services.rate_provider.rates_for(
+                    needed, account_id=state["account_id"], run_id=state["run_id"])
+            assessment = assess_payroll(_pay_lines(state), rates, balances)
         except RefusalError as exc:
             _log(state, "price", f"POLICY REFUSAL: {exc}", "error", audit, events)
             return {"route": "refused", "status": "REFUSED", "error": str(exc), "audit": audit, "events": events}
@@ -308,18 +305,11 @@ def build_graph(services: Services, checkpointer=None):
                  f"Priced {r.currency}: salaries {money_str(r.payroll)} + payout fees {money_str(r.fees)} "
                  f"= {r.currency} {money_str(r.required)} (~USD {money_str(r.required_usd)}).",
                  audit=audit, events=events)
-        if _waived(state):
-            _log(state, "price",
-                 f"Total leaving the wallet: USD {money_str(assessment.required_usd)}; no run fee on this "
-                 "continuation (already collected on the original payroll); reserve floor USD "
-                 f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
-                 audit=audit, events=events)
-        else:
-            _log(state, "price",
-                 f"Total leaving the wallet: USD {money_str(assessment.required_usd)} incl. USD "
-                 f"{money_str(assessment.platform_fee_usd)} run fee; reserve floor USD "
-                 f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
-                 audit=audit, events=events)
+        _log(state, "price",
+             f"Total leaving the wallet: USD {money_str(assessment.required_usd)} incl. USD "
+             f"{money_str(assessment.platform_fee_usd)} run fee; reserve floor USD "
+             f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
+             audit=audit, events=events)
         return {"assessment": assessment_dict(assessment), "status": "PRICED",
                 "explanation": explain_assessment(state["employer_name"], assessment),
                 "audit": audit, "events": events}
@@ -328,13 +318,70 @@ def build_graph(services: Services, checkpointer=None):
         rates = services.usd_rates
         if services.rate_provider is not None:
             lines = list(state["pay_lines"]) + list(state.get("held_lines") or [])
-            # Only currencies we pay in or actually hold: the live wallet lists every
-            # currency (mostly zero), and quoting those fails (e.g. ARS amount_below_limit).
-            held = {c for c, v in balances.items() if to_decimal(str(v)) != 0}
-            needed = {l["currency"] for l in lines} | held
+            needed = {l["currency"] for l in lines} | set(balances)
             rates = services.rate_provider.rates_for(
                 needed, account_id=state["account_id"], run_id=state["run_id"])
         return rates
+
+    def _assess_partial_priority(state: PayrollRunState, audit: list, events: list) -> dict:
+        """PARTIAL mode: priority-order walk, skip-and-continue (policy module).
+
+        The split (per-line PAID/HELD marks), the paid assessment and the
+        residual shortfall are stored on the assessment dict, which the TAP
+        approval body binds — any later change to a line or the split
+        invalidates the approval, same discipline as full runs.
+        """
+        plan = None
+        try:
+            balances = awx.get_balances(account_id=state["account_id"])
+            plan = plan_priority_payout(_pay_lines(state), _rates_for(state, balances), balances)
+        except RefusalError as exc:
+            _log(state, "assess", f"Partial settlement not possible: {exc}", "warning", audit, events)
+        if plan is None:
+            _log(state, "assess", "DO NOT RUN — no line fits in priority order (payout fee, run fee and "
+                 "reserve floor included); escalating to a human. No fee is charged.", "warning",
+                 audit, events)
+            return {"route": "escalate", "status": "HELD_SHORTFALL", "audit": audit, "events": events}
+        all_lines = state["pay_lines"]
+        paid = [all_lines[i] for i in plan.paid]
+        held = [all_lines[i] for i in plan.held]
+        partial = assessment_dict(plan.assessment)
+        full_shortfall = money_str(plan.full.shortfall_usd)
+        residual = money_str(plan.residual_shortfall_usd)
+        partial.update({
+            "partial": True,
+            "settlement_mode": "PARTIAL",
+            "full_required_usd": money_str(plan.full.required_usd),
+            "full_shortfall_usd": full_shortfall,
+            "residual_shortfall_usd": residual,
+            "held_lines": [_line_view(l) for l in held],
+            "held_count": len(held),
+            "split": ([{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+                        "mark": "PAID"} for l in paid]
+                      + [{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+                          "mark": "HELD"} for l in held]),
+        })
+        _log(state, "assess",
+             f"PARTIAL SETTLEMENT (priority order) — settling {len(paid)} line(s) its own USD "
+             f"{partial['available_usd']} supports (USD {partial['required_usd']} incl. the one run fee, "
+             f"reserve floor kept); holding {len(held)} line(s) "
+             f"({', '.join(l['name'] for l in held)}), residual shortfall USD {residual}. "
+             "Reserved pending a signed human approval.", "success", audit, events)
+        _log(state, "escalate",
+             f"{len(held)} line(s) held for a residual plan: {', '.join(l['name'] for l in held)}. "
+             f"Residual shortfall: USD {residual}.", "warning", audit, events)
+        explanation = (
+            f"{state['employer_name']} can pay {len(paid)} of {len(all_lines)} contractor(s) from its "
+            f"own wallet now ({', '.join(l['name'] for l in paid)}): settled in contractor-priority order, "
+            f"with the USD {partial['platform_fee_usd']} run fee covered once and the USD "
+            f"{partial['reserve_floor_usd']} reserve kept. {', '.join(l['name'] for l in held)} "
+            f"{'is' if len(held) == 1 else 'are'} held — residual shortfall USD {residual}. Held lines "
+            "need new funds in this employer's own wallet plus a fresh residual-plan approval; they are "
+            "never covered from another employer's funds."
+        )
+        return {"route": "approval", "status": "RESERVED", "assessment": partial,
+                "explanation": explanation, "pay_lines": paid, "held_lines": held,
+                "audit": audit, "events": events}
 
     def assess_node(state: PayrollRunState) -> dict:
         a = state["assessment"]
@@ -348,12 +395,21 @@ def build_graph(services: Services, checkpointer=None):
             state, "assess",
             f"SHORTFALL USD {a['shortfall_usd']} — the full payroll does not fit in this employer's own wallet. "
             "Only this employer's wallet was checked.", "warning")
+        mode = state.get("settlement_mode") or "LEGACY_PARTIAL"
+        if mode == "ALL_OR_NOTHING":
+            # Sriram's law for ALL_OR_NOTHING employers: no split is ever
+            # offered — the whole run is held, exactly as a single-line
+            # shortfall always has been.
+            _log(state, "assess", "DO NOT RUN — settlement mode is ALL_OR_NOTHING and the full payroll "
+                 "does not fit; escalating to a human.", "warning", audit, events)
+            return {"route": "escalate", "status": "HELD_SHORTFALL", "audit": audit, "events": events}
+        if mode == "PARTIAL":
+            return _assess_partial_priority(state, audit, events)
         # Kit 6: pay what its own balance supports (smallest lines first), escalate the rest.
         plan = None
         try:
             balances = awx.get_balances(account_id=state["account_id"])
-            plan = plan_partial_payout(_pay_lines(state), _rates_for(state, balances), balances,
-                                       waive_run_fee=_waived(state))
+            plan = plan_partial_payout(_pay_lines(state), _rates_for(state, balances), balances)
         except RefusalError as exc:
             _log(state, "assess", f"Partial payout not possible: {exc}", "warning", audit, events)
         if plan is None:
@@ -380,12 +436,10 @@ def build_graph(services: Services, checkpointer=None):
         _log(state, "escalate",
              f"{len(held)} line(s) escalated and held: {', '.join(l['name'] for l in held)}. "
              f"Exact shortfall for the full batch: USD {full_shortfall}.", "warning", audit, events)
-        run_fee_note = ("no run fee due (already collected)" if _waived(state)
-                        else f"the USD {partial['platform_fee_usd']} run fee covered")
         explanation = (
             f"{state['employer_name']} can pay {len(paid)} of {len(all_lines)} contractor(s) from its own wallet "
-            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with "
-            f"{run_fee_note} and the USD {partial['reserve_floor_usd']} reserve kept. "
+            f"now ({', '.join(l['name'] for l in paid)}): smallest lines first, with the USD "
+            f"{partial['platform_fee_usd']} run fee covered and the USD {partial['reserve_floor_usd']} reserve kept. "
             f"{', '.join(l['name'] for l in held)} {'is' if len(held) == 1 else 'are'} held — the full batch is "
             f"short USD {full_shortfall}. Held lines are escalated to a human and will not be covered from another "
             "employer's funds."
@@ -402,9 +456,6 @@ def build_graph(services: Services, checkpointer=None):
             "pay_lines": state["pay_lines"],
             "held_lines": [_line_view(l) for l in state.get("held_lines") or []],
             "partial": bool(state.get("held_lines")),
-            "continuation": bool(state.get("continuation")),
-            "parent_run_id": state.get("parent_run_id"),
-            "run_fee_waived": _waived(state),
             "message": "Approve this exact payroll? Amounts, currencies and beneficiaries are fixed "
                        "and your decision is Visa TAP-signed."
                        + (" Only the lines listed in pay_lines are paid; held_lines stay HELD."
@@ -473,8 +524,7 @@ def build_graph(services: Services, checkpointer=None):
             # into the reserve since this run was assessed).
             try:
                 fresh = awx.get_balances(account_id=acct)
-                recheck = assess_payroll(_pay_lines(state), _rates_for(state, fresh), fresh,
-                                         waive_run_fee=_waived(state))
+                recheck = assess_payroll(_pay_lines(state), _rates_for(state, fresh), fresh)
             except RefusalError as exc:
                 msg = f"Affordability re-check refused: {exc}"
                 _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
@@ -486,67 +536,24 @@ def build_graph(services: Services, checkpointer=None):
                 _log(state, "execute", f"{msg} No money moved; holding the payroll.", "error", audit, events)
                 return {"status": "HELD_SHORTFALL", "error": msg, "balances": balances_str(acct),
                         "audit": audit, "events": events}
-        # Payout fees actually charged so far in this run, per (currency, method). Real fees
-        # drift with the FX rate (live sandbox: EUR 13.38-13.39 per SWIFT payout vs the
-        # Kit 6 schedule's 12.85), so later payouts expect the fee Airwallex really charges.
-        observed_fees: dict[tuple[str, str], Decimal] = {}
-
-        def top_up_for(i: int, line: dict) -> None:
-            """After Airwallex refuses a payout for insufficient balance, top up the
-            payout currency from the employer's OWN USD (same silo) so it can be retried.
-            Real fees drift above the priced fee (live: ~EUR 13.38 vs 12.85 per SWIFT)."""
-            ccy, method = line["currency"], line.get("method", "SWIFT")
-            fee_est = max(PAYROLL_POLICY.payout_fee(ccy, method), observed_fees.get((ccy, method), Decimal("0")))
-            need = round_money(to_decimal(line["amount"]) + fee_est)
-            have = awx.balance_of(ccy, account_id=acct)
-            top_up = max(round_money(need - have), MIN_FX_TOP_UP)
-            quote = awx.create_fx_quote(
-                request_id=request_id_for(run_id, f"fx-topup-quote-{ccy}-{i}"), on_behalf_of=acct,
-                sell_currency="USD", buy_currency=ccy, buy_amount=top_up)
-            conversion = awx.create_fx_conversion(
-                request_id=request_id_for(run_id, f"fx-topup-{ccy}-{i}"), on_behalf_of=acct,
-                quote_id=quote["id"], buy_amount=top_up, sell_currency="USD", buy_currency=ccy)
-            sell = round_money(to_decimal(str(conversion["sell_amount"])))
-            ledger.post([(f"{key}:cash:USD", -sell), (f"{key}:fx_clearing:USD", sell),
-                         (f"{key}:fx_clearing:{ccy}", -top_up), (f"{key}:cash:{ccy}", top_up)],
-                        memo=f"{run_id} FX top-up USD->{ccy} before payout {i}")
-            _log(state, "execute",
-                 f"Airwallex's actual payout fees exceeded the priced fee, leaving {ccy} {money_str(have)} for "
-                 f"{line['name']}'s payout (needs ~{ccy} {money_str(need)}). Topped up {ccy} {money_str(top_up)} "
-                 f"from this employer's own USD {money_str(sell)} — no other employer's money involved.",
-                 "warning", audit, events)
-
         try:
             # 1. Convert exactly the priced amount per currency, on the employer's behalf.
             for req in a["by_currency"]:
                 ccy, required = req["currency"], to_decimal(req["required"])
                 if ccy == "USD" or ccy in fx_done:
                     continue
-                # Affordability counted what this employer already holds in ``ccy`` (e.g. left
-                # over from an earlier failed run), so spend that first and convert only the
-                # gap. Converting the full amount from USD ran out of USD mid-run (seen live).
-                held = round_money(awx.balance_of(ccy, account_id=acct))
-                to_buy = round_money(max(Decimal("0"), required - held))
-                if to_buy == 0:
-                    _log(state, "execute", f"Using {ccy} {money_str(required)} already held in its own wallet "
-                         f"({ccy} {money_str(held)} available); no conversion needed.", audit=audit, events=events)
-                    fx_done.append(ccy)
-                    continue
-                to_buy = max(to_buy, MIN_FX_TOP_UP)  # Airwallex rejects tiny quotes
                 quote = awx.create_fx_quote(
                     request_id=request_id_for(run_id, f"fx-quote-{ccy}"), on_behalf_of=acct,
-                    sell_currency="USD", buy_currency=ccy, buy_amount=to_buy)
+                    sell_currency="USD", buy_currency=ccy, buy_amount=required)
                 conversion = awx.create_fx_conversion(
                     request_id=request_id_for(run_id, f"fx-conversion-{ccy}"), on_behalf_of=acct,
-                    quote_id=quote["id"], buy_amount=to_buy, sell_currency="USD", buy_currency=ccy)
+                    quote_id=quote["id"], buy_amount=required, sell_currency="USD", buy_currency=ccy)
                 sell = round_money(to_decimal(str(conversion["sell_amount"])))
                 ledger.post([(f"{key}:cash:USD", -sell), (f"{key}:fx_clearing:USD", sell),
-                             (f"{key}:fx_clearing:{ccy}", -to_buy), (f"{key}:cash:{ccy}", to_buy)],
+                             (f"{key}:fx_clearing:{ccy}", -required), (f"{key}:cash:{ccy}", required)],
                             memo=f"{run_id} FX USD->{ccy}")
-                _log(state, "execute", f"Converted USD {money_str(sell)} -> {ccy} {money_str(to_buy)} "
-                     f"on its own behalf (x-on-behalf-of {acct})"
-                     + (f", on top of {ccy} {money_str(held)} already held." if held > 0 else "."),
-                     audit=audit, events=events)
+                _log(state, "execute", f"Converted USD {money_str(sell)} -> {ccy} {money_str(required)} "
+                     f"on its own behalf (x-on-behalf-of {acct}).", audit=audit, events=events)
                 fx_done.append(ccy)
 
             # 2. Pay each contractor with a TAP-signed, verified instruction.
@@ -569,28 +576,15 @@ def build_graph(services: Services, checkpointer=None):
                     country_code=line.get("country_code", "DE"), iban=line.get("iban", ""),
                     swift_code=line.get("swift_code", ""), account_number=line.get("account_number", ""),
                     routing_code=line.get("routing_code", ""))
-                def send_transfer() -> dict:
-                    return awx.create_transfer(
-                        request_id=request_id_for(run_id, f"pay-{i}"), on_behalf_of=acct,
-                        beneficiary_id=bene["id"], amount=to_decimal(line["amount"]),
-                        currency=line["currency"], method=line.get("method", "SWIFT"))
-                try:
-                    transfer = send_transfer()
-                except Exception as exc:
-                    # Payout-first: a replayed (already sent) payout never triggers a top-up.
-                    # Only a real "insufficient balance" refusal does, then the same request_id
-                    # is retried once (live-verified: Airwallex accepts the retry).
-                    if line["currency"] == "USD" or not _is_insufficient_balance(exc):
-                        raise
-                    top_up_for(i, line)
-                    transfer = send_transfer()
+                transfer = awx.create_transfer(
+                    request_id=request_id_for(run_id, f"pay-{i}"), on_behalf_of=acct,
+                    beneficiary_id=bene["id"], amount=to_decimal(line["amount"]),
+                    currency=line["currency"], method=line.get("method", "SWIFT"))
                 paid = awx.transition_transfer(
                     request_id=request_id_for(run_id, f"pay-{i}-transition"), on_behalf_of=acct,
                     transfer_id=transfer["id"], target_status="PAID")
                 fee = round_money(to_decimal(str(transfer.get("fee_amount", "0"))))
                 amount, ccy = to_decimal(line["amount"]), line["currency"]
-                method_key = (ccy, line.get("method", "SWIFT"))
-                observed_fees[method_key] = max(observed_fees.get(method_key, Decimal("0")), fee)
                 # Post per payout so a mid-batch failure leaves the ledger matching the wallet.
                 ledger.post([(f"{key}:cash:{ccy}", -(amount + fee)),
                              (f"external:payees:{ccy}", amount),
@@ -614,12 +608,6 @@ def build_graph(services: Services, checkpointer=None):
 
     def fee_node(state: PayrollRunState) -> dict:
         # Money already moved at this point: a failure here is recorded, never raised.
-        if _waived(state):
-            # Continuation of a payroll whose run fee was already collected: never charge it twice.
-            audit, events = _log(state, "fee", "Run fee was already collected on the original payroll; "
-                                 "not charged again on this continuation.", "info")
-            return {"fee_charged_usd": "0.00", "balances": balances_str(state["account_id"]),
-                    "audit": audit, "events": events}
         try:
             fee = to_decimal(state["assessment"]["platform_fee_usd"])
             awx.create_charge(request_id=request_id_for(state["run_id"], "platform-fee"),
@@ -659,11 +647,19 @@ def build_graph(services: Services, checkpointer=None):
                              "Reconciled: ledger matches the wallet in every currency; books balance.", "success")
         held = state.get("held_lines") or []
         if held:
-            full_shortfall = (state.get("assessment") or {}).get("full_shortfall_usd", "0.00")
+            assessment = state.get("assessment") or {}
+            if assessment.get("settlement_mode") == "PARTIAL" or state.get("settlement_mode") == "PARTIAL":
+                residual = assessment.get("residual_shortfall_usd", "0.00")
+                _log(state, "escalate",
+                     f"Partially settled: {len(held)} line(s) remain HELD "
+                     f"({', '.join(l['name'] for l in held)}). Residual shortfall USD {residual} — fund "
+                     "this employer's own wallet, then prepare a residual plan; it needs a FRESH "
+                     "approval before any held line can settle.", "warning", audit, events)
+                return {"status": "PARTIALLY_SETTLED", "audit": audit, "events": events}
+            full_shortfall = assessment.get("full_shortfall_usd", "0.00")
             _log(state, "escalate",
                  f"Partially paid: {len(held)} line(s) remain HELD ({', '.join(l['name'] for l in held)}). "
-                 f"Fund this employer's own wallet (short USD {full_shortfall}) and "
-                 + ("pay the held lines again." if state.get("continuation") else "pay the held lines."),
+                 f"Fund this employer's own wallet (short USD {full_shortfall}) and start a new run for them.",
                  "warning", audit, events)
             return {"status": "PARTIALLY_PAID", "audit": audit, "events": events}
         return {"status": "SETTLED", "audit": audit, "events": events}
@@ -723,7 +719,8 @@ def build_graph(services: Services, checkpointer=None):
     builder.add_conditional_edges("fee", lambda s: "reconcile" if s.get("status") == "SENT" else "close",
                                   {"reconcile": "reconcile", "close": "close"})
     builder.add_conditional_edges(
-        "reconcile", lambda s: "attest" if s.get("status") in ("SETTLED", "PARTIALLY_PAID") else "close",
+        "reconcile",
+        lambda s: "attest" if s.get("status") in ("SETTLED", "PARTIALLY_PAID", "PARTIALLY_SETTLED") else "close",
         {"attest": "attest", "close": "close"})
     builder.add_edge("attest", END)
     builder.add_edge("close", END)

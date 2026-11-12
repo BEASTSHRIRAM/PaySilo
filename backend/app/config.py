@@ -97,6 +97,24 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
+    # Visa VIC via Airi CLI (Silo Benefits). Until VIC_CREDENTIAL is set,
+    # benefits run in honest SIMULATED mode with the test card. When a
+    # credential IS set, the Airi CLI must also be available — the live
+    # adapter fails closed and never falls back to simulation.
+    vic_credential: str | None = None
+    airi_cli_path: str | None = None
+    vic_test_card: bool = True
+
+    # Email (SMTP) — platform notifications via the outbox in
+    # app/services/email.py. Until SMTP_HOST and EMAIL_FROM are both set,
+    # email is NOT_CONFIGURED: messages are recorded in the outbox with
+    # that status and nothing is sent. Secrets come from env only.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    email_from: str | None = None
+
     @property
     def demo_mode(self) -> bool:
         """Demo mode = explicitly requested, or no Airwallex keys present."""

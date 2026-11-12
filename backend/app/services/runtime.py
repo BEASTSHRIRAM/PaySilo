@@ -21,6 +21,7 @@ fallback it is marked not resumable and a new run must be started.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import re
 import threading
@@ -58,36 +59,30 @@ from ..db.models import (
 from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
 from ..partners.metal import MetalL2SettlementChain, MockSettlementChain
+from ..partners.vic import build_vic_adapter
 from ..partners.tap import load_public_key_pem, public_key_raw
 from ..partners.tap_signing import (
     TapSigner,
+    canonical_json,
     registry_from_tap_key_rows,
     register_active_key,
     signer_for_settings,
     verify_stored_approval,
 )
+from ..policy import PAYROLL_POLICY, ContractorPayroll, line_cost_usd, walk_priority
 
 logger = logging.getLogger(__name__)
 
 TERMINAL = {"SETTLED", "HELD_BY_HUMAN", "APPROVAL_REJECTED", "REFUSED", "FAILED", "PARTIALLY_PAID",
-            "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
+            "PARTIALLY_SETTLED", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
 # Money moved and the run is closed (possibly with a follow-up still owed).
-MONEY_MOVED = {"SETTLED", "PARTIALLY_PAID", "SENT_FEE_FAILED", "SENT_UNRECONCILED", "ATTEST_PENDING"}
+MONEY_MOVED = {"SETTLED", "PARTIALLY_PAID", "PARTIALLY_SETTLED", "SENT_FEE_FAILED", "SENT_UNRECONCILED",
+               "ATTEST_PENDING"}
 _UUID_IN_MEMO = re.compile(r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b")
 
 
 class RuntimeConflict(Exception):
     """A request that is valid in shape but not in the run's current state."""
-
-
-class HeldLineUnavailable(Exception):
-    """A held line cannot be paid as recorded (contractor deleted, deactivated or re-denominated)."""
-
-
-# A "pay held lines" continuation that ended in one of these moved no money and holds nothing,
-# so it does not block another attempt. (FAILED is retried via /retry; anything else is open or paid.)
-CONTINUATION_NON_BLOCKING = {"REFUSED", "HELD_SHORTFALL", "HELD_BY_HUMAN", "APPROVAL_REJECTED"}
-CONTINUABLE = {"PARTIALLY_PAID", "HELD_SHORTFALL"}
 
 
 def _namespace(account: str) -> str:
@@ -151,6 +146,18 @@ class PlatformRuntime:
                         settings.metal_registry_address)
         else:
             self.chain = MockSettlementChain()
+        self.vic = build_vic_adapter(settings)
+        if settings.vic_credential:
+            if self.vic.cli_available:
+                logger.info("Visa VIC: live Airi adapter configured (credential %s, test_card=%s).",
+                            self.vic.credential_ref, self.vic.test_card)
+            else:
+                logger.warning(
+                    "Visa VIC: VIC_CREDENTIAL is set but the Airi CLI is not available "
+                    "(set AIRI_CLI_PATH) — benefit purchases will fail closed, never simulate.")
+        else:
+            logger.info("Visa VIC: no VIC_CREDENTIAL set — benefits run in SIMULATED mode (%s).",
+                        self.vic.credential_ref)
         self.services = Services(airwallex=self.recorder, ledger=self.ledger, chain=self.chain,
                                  usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer)
         self.checkpointer = build_checkpointer(database_url=settings.database_url,
@@ -299,8 +306,6 @@ class PlatformRuntime:
     def ensure_account(self, s: Session, employer: Employer) -> Employer:
         """Create + activate the employer's own connected account (its silo)."""
         if employer.airwallex_account_id:
-            if not employer.airwallex_global_account_id:
-                self._ensure_global_account(s, employer)  # account predates global accounts
             return employer
         with self.lock:
             account = self.recorder.create_connected_account(
@@ -312,25 +317,7 @@ class PlatformRuntime:
                 self._onboard_live_account(employer, account.get("status"))
             employer.status = "ACTIVE"
             self._flush_calls(s, employer.organization_id, employer.id, None)
-        self._ensure_global_account(s, employer)
         return employer
-
-    def _ensure_global_account(self, s: Session, employer: Employer) -> str:
-        """Give the employer its own funding (global) account; deposits land here.
-
-        The request id is deterministic, so a retry returns the same account.
-        """
-        if employer.airwallex_global_account_id:
-            return employer.airwallex_global_account_id
-        with self.lock:
-            ga = self.recorder.create_global_account(
-                request_id=request_id_for(str(employer.id), f"global-account:{employer.funding_currency}"),
-                account_id=employer.airwallex_account_id, currency=employer.funding_currency,
-                country_code="US" if employer.funding_currency == "USD" else (employer.country or "US"),
-                nick_name=f"{employer.name} {employer.funding_currency}"[:60])
-            employer.airwallex_global_account_id = ga["id"]
-            self._flush_calls(s, employer.organization_id, employer.id, None)
-        return employer.airwallex_global_account_id
 
     def _onboard_live_account(self, employer: Employer, account_status: str | None = None) -> None:
         """Onboard a live connected account and force it to ACTIVE.
@@ -378,13 +365,30 @@ class PlatformRuntime:
         with self.lock:
             self.recorder.deposit(request_id=request_id,
                                   account_id=employer.airwallex_account_id, amount=amount,
-                                  currency=employer.funding_currency,
-                                  global_account_id=employer.airwallex_global_account_id or "")
+                                  currency=employer.funding_currency)
             self.ledger.post([(f"{employer.ledger_key}:cash:{employer.funding_currency}", amount),
                               (f"external:bank:{employer.funding_currency}", -amount)],
                              memo=f"deposit {reference}")
             self._flush_calls(s, employer.organization_id, employer.id, None)
             self._flush_ledger(s, {employer.ledger_key: (employer.organization_id, employer.id)})
+            # Spend-workflows dispatch (WF lane): trigger.funds_received.
+            # Guarded + savepoint-isolated: a workflow error must NEVER
+            # break a deposit (log only; the nested block rolls back alone).
+            try:
+                with s.begin_nested():
+                    from .workflows import dispatch_event
+
+                    balances_after = self.balances(s, employer)
+                    dispatch_event(
+                        s, organization_id=employer.organization_id,
+                        event_type="funds.received", entity_kind="employer", entity_id=str(employer.id),
+                        facts={"employer_id": str(employer.id), "employer_name": employer.name,
+                               "amount": str(amount), "currency": employer.funding_currency,
+                               "balance_after": balances_after.get(employer.funding_currency),
+                               "contact_email": employer.contact_email, "status": employer.status})
+            except Exception:  # noqa: BLE001
+                logger.exception("workflow funds.received dispatch failed for employer %s (ignored)",
+                                 employer.id)
 
     def balances(self, s: Session, employer: Employer) -> dict[str, str]:
         """Derived from persisted ledger entries — never from a stored balance."""
@@ -394,6 +398,27 @@ class PlatformRuntime:
             .group_by(LedgerEntry.currency)
         ).all()
         return {ccy: money_str(total) for ccy, total in rows if total and Decimal(total) != 0}
+
+    def post_employer_journal(self, s: Session, employer: Employer,
+                              entries: list[tuple[str, object]], memo: str) -> LedgerTransaction:
+        """Post one balanced journal for ONE employer and persist it directly.
+
+        Unlike :meth:`_flush_ledger` (which infers ``run_id`` from memo
+        UUIDs for graph-driven postings), this writes the DB row itself,
+        with ``run_id=None`` — for non-run postings such as benefit
+        purchases, whose accounts (``benefits_*``) never touch ``cash:``.
+        """
+        with self.lock:
+            txn = self.ledger.post(entries, memo=memo)
+            row = LedgerTransaction(
+                organization_id=employer.organization_id, employer_id=employer.id, run_id=None,
+                memo=memo[:200],
+                entries=[LedgerEntry(account=e.account, namespace=_namespace(e.account),
+                                     currency=_currency(e.account), amount=e.amount) for e in txn.entries])
+            s.add(row)
+            s.flush()
+            self._ledger_synced = len(self.ledger.transactions)
+            return row
 
     def platform_fees(self, s: Session, organization_id: uuid.UUID) -> dict[str, str]:
         rows = s.execute(
@@ -415,125 +440,24 @@ class PlatformRuntime:
             return self._start_run_locked(s, org=org, user=user, employer=employer, pay_lines=pay_lines,
                                           raw_input=raw_input, source=source, period_label=period_label)
 
-    # ------------------------------------------------------- held lines
-    @staticmethod
-    def held_pay_lines(run: PayrollRun) -> list[PayLine]:
-        return [pl for pl in sorted(run.pay_lines, key=lambda p: p.position) if pl.status == "HELD"]
-
-    def continuations_of(self, s: Session, run: PayrollRun) -> list[PayrollRun]:
-        """Runs that continue ``run`` (same organization), newest first."""
-        return list(s.scalars(select(PayrollRun)
-                              .where(PayrollRun.parent_run_id == run.id,
-                                     PayrollRun.organization_id == run.organization_id)
-                              .order_by(PayrollRun.created_at.desc())))
-
-    def run_fee_collected(self, s: Session, run: PayrollRun) -> bool:
-        """True when the run fee was already collected on ``run`` or any run up its parent chain."""
-        seen: set[uuid.UUID] = set()
-        current: PayrollRun | None = run
-        while current is not None and current.id not in seen:
-            if current.fee_charged_usd and current.fee_charged_usd > 0:
-                return True
-            seen.add(current.id)
-            current = (s.scalar(select(PayrollRun).where(PayrollRun.id == current.parent_run_id,
-                                                         PayrollRun.organization_id == run.organization_id))
-                       if current.parent_run_id else None)
-        return False
-
-    def pay_held_blocker(self, s: Session, run: PayrollRun) -> str | None:
-        """Why ``run``'s held lines cannot be paid right now (None when they can). Role-independent."""
-        held = self.held_pay_lines(run)
-        if run.status not in CONTINUABLE:
-            return (f"Only a partially paid or held-for-shortfall run has held lines to pay; this run is "
-                    f"{run.status}.")
-        if not held:
-            return "This run has no held lines to pay."
-        if run.employer.status != "ACTIVE":
-            return f"{run.employer.name} is not active."
-        for cont in self.continuations_of(s, run):
-            if cont.status in CONTINUATION_NON_BLOCKING:
-                continue
-            if cont.status == "RESERVED" and cont.pending_interrupt is not None and not self.is_resumable(cont):
-                continue  # paused before a restart and lost: holds nothing
-            if cont.status == "FAILED":
-                return (f"The continuation (run {str(cont.id)[:8]}) failed part-way; retry that run "
-                        "instead of starting another.")
-            return (f"Held lines of this run are already being paid or were paid by run "
-                    f"{str(cont.id)[:8]} ({cont.status}).")
-        ids = [pl.contractor_id for pl in held if pl.contractor_id]
-        if ids:
-            later = s.execute(
-                select(PayLine.beneficiary_name)
-                .join(PayrollRun, PayLine.run_id == PayrollRun.id)
-                .where(PayrollRun.employer_id == run.employer_id,
-                       PayrollRun.organization_id == run.organization_id,
-                       PayrollRun.created_at > run.created_at, PayrollRun.id != run.id,
-                       PayLine.status == "PAID", PayLine.contractor_id.in_(ids))).scalars().all()
-            if later:
-                names = ", ".join(sorted(set(later)))
-                return (f"A later payroll already paid {names}; paying the held line would pay them "
-                        "twice. Start a normal run instead.")
-        return None
-
-    def _continuation_lines(self, s: Session, run: PayrollRun) -> list[dict]:
-        """Rebuild the held lines from the CURRENT contractor records (corrected bank details count)."""
-        lines, problems = [], []
-        for pl in self.held_pay_lines(run):
-            c = (s.scalar(select(Contractor).where(Contractor.id == pl.contractor_id,
-                                                   Contractor.employer_id == run.employer_id))
-                 if pl.contractor_id else None)
-            if c is None:
-                problems.append(f"{pl.beneficiary_name} is no longer a contractor of {run.employer.name}")
-            elif not c.is_active:
-                problems.append(f"{c.full_name} is deactivated")
-            elif c.currency != pl.currency:
-                problems.append(f"{c.full_name} is now paid in {c.currency}, not {pl.currency}")
-            else:
-                lines.append(self.contractor_line(c, pl.amount))
-        if problems:
-            raise HeldLineUnavailable(
-                "Cannot pay the held lines: " + "; ".join(problems) + ". Fix the contractor or start a new run.")
-        return lines
-
-    def start_continuation(self, s: Session, *, org: Organization, user: User, run: PayrollRun) -> PayrollRun:
-        """Start a NEW run that pays only ``run``'s HELD lines (the original is never touched).
-
-        Goes through the same pricing -> TAP-approval -> payout path as any run. The run fee is waived
-        when it was already collected up the parent chain.
-        """
-        employer = run.employer
-        self.ensure_account(s, employer)
-        with self.lock:
-            reason = self.pay_held_blocker(s, run)
-            if reason:
-                raise RuntimeConflict(reason)
-            lines = self._continuation_lines(s, run)
-            self._reject_if_open_run(s, employer)
-            return self._start_run_locked(
-                s, org=org, user=user, employer=employer, pay_lines=lines, raw_input=None,
-                source="continuation", period_label=run.period_label, parent_run_id=run.id,
-                waive_run_fee=self.run_fee_collected(s, run))
-
     def _start_run_locked(self, s: Session, *, org: Organization, user: User, employer: Employer,
                           pay_lines: list[dict] | None, raw_input: str | None, source: str,
-                          period_label: str | None, parent_run_id: uuid.UUID | None = None,
-                          waive_run_fee: bool = False) -> PayrollRun:
+                          period_label: str | None) -> PayrollRun:
         run = PayrollRun(organization_id=org.id, employer_id=employer.id, created_by_id=user.id,
-                         source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED",
-                         parent_run_id=parent_run_id)
+                         source=source, raw_input=raw_input, period_label=period_label, status="RECEIVED")
         s.add(run)
         s.flush()
         directory = [
             {"name": c.full_name, "currency": c.currency, "method": c.payout_method, "iban": c.iban,
              "swift_code": c.swift_code, "account_number": c.account_number, "routing_code": c.routing_code,
-             "country_code": c.country, "contractor_id": str(c.id)}
+             "country_code": c.country, "contractor_id": str(c.id), "priority": c.priority}
             for c in employer.contractors if c.is_active
         ]
         state = initial_state(
             run_id=str(run.id), employer_key=employer.ledger_key, employer_name=employer.name,
             contact_name=employer.contact_name or "", funding_usd="0", pay_lines=pay_lines or [],
             raw_input=raw_input, account_id=employer.airwallex_account_id, directory=directory,
-            parent_run_id=str(parent_run_id) if parent_run_id else None, waive_run_fee=waive_run_fee)
+            settlement_mode=employer.settlement_mode)
         with self.lock:
             config = {"configurable": {"thread_id": str(run.id)}}
             self._live_threads.add(str(run.id))
@@ -550,6 +474,7 @@ class PlatformRuntime:
         """
         result: dict = {}
         failure: BaseException | None = None
+        _prev_status = run.status  # spend-workflows: detect HELD/SETTLED transitions
         try:
             result = call() or {}
         except Exception as exc:  # noqa: BLE001 - persisted, then re-raised below
@@ -564,6 +489,19 @@ class PlatformRuntime:
                 s.add(approval)
         finally:
             s.commit()
+        # Spend-workflows dispatch (WF lane): fire payroll_held /
+        # payroll_settled on a persisted status transition. Guarded inside
+        # dispatch_payroll_status (log, never raise) so a workflow error
+        # can NEVER break payroll.
+        if run.status != _prev_status and run.status in ("HELD_SHORTFALL", "HELD_BY_HUMAN", "SETTLED"):
+            try:
+                from .workflows import dispatch_payroll_status
+
+                dispatch_payroll_status(s, run)
+                s.commit()
+            except Exception:  # noqa: BLE001 - belt-and-braces; helper already guards
+                logger.exception("workflow payroll dispatch failed for run %s (ignored)", run.id)
+                s.rollback()
         if failure is not None:
             raise failure
 
@@ -649,6 +587,8 @@ class PlatformRuntime:
             run.payroll_currency = a.get("payroll_currency")
             run.required_usd = to_decimal(a["required_usd"])
             run.shortfall_usd = to_decimal(a.get("full_shortfall_usd") or a["shortfall_usd"])
+            if a.get("residual_shortfall_usd") is not None:
+                run.residual_shortfall_usd = to_decimal(a["residual_shortfall_usd"])
         run.pending_interrupt = result["__interrupt__"][0].value if "__interrupt__" in result else None
         if run.status in MONEY_MOVED and run.settled_at is None:
             run.settled_at = datetime.now(UTC)
@@ -698,6 +638,9 @@ class PlatformRuntime:
                 pl.airwallex_transfer_id = transfers[pl.request_id].get("id")
                 pl.payout_fee = to_decimal(str(transfers[pl.request_id].get("fee_amount", "0")))
                 pl.status = "PAID"
+                if pl.settled_phase is None:
+                    pl.settled_phase = 1  # settled by the original run execution
+                    pl.settled_at = datetime.now(UTC)
             elif run.status == "FAILED" and pl.status == "PENDING":
                 pl.status = "FAILED"
 
@@ -755,4 +698,248 @@ class PlatformRuntime:
         return {"name": c.full_name, "amount": money_str(amount), "currency": c.currency,
                 "method": c.payout_method, "iban": c.iban, "swift_code": c.swift_code,
                 "account_number": c.account_number, "routing_code": c.routing_code,
-                "country_code": c.country, "contractor_id": str(c.id)}
+                "country_code": c.country, "contractor_id": str(c.id), "priority": c.priority}
+
+    # ------------------------------------------------------- residual (phase 2)
+    def _held_lines_in_priority_order(self, s: Session, run: PayrollRun) -> list[PayLine]:
+        """The run's HELD lines, in contractor-priority order (position breaks ties)."""
+        held = [pl for pl in run.pay_lines if pl.status == "HELD"]
+        priorities: dict[uuid.UUID, int] = {}
+        if held:
+            ids = [pl.contractor_id for pl in held if pl.contractor_id]
+            if ids:
+                priorities = {c.id: c.priority for c in
+                              s.scalars(select(Contractor).where(Contractor.id.in_(ids)))}
+        return sorted(held, key=lambda pl: (priorities.get(pl.contractor_id, 0) if pl.contractor_id else 0,
+                                            pl.position))
+
+    def _available_usd(self, s: Session, employer: Employer) -> Decimal:
+        rates = self.services.usd_rates
+        total = Decimal("0")
+        for ccy, amount in self.balances(s, employer).items():
+            rate = rates.get(ccy)
+            if rate is None:
+                raise RuntimeConflict(f"No USD rate available for {ccy}; cannot price a residual plan.")
+            total += to_decimal(amount) * rate
+        return round_money(total)
+
+    def _compute_residual_plan(self, s: Session, run: PayrollRun, employer: Employer) -> dict:
+        """Recompute the phase-2 walk over the run's HELD lines ONLY.
+
+        No second platform fee: the run fee was charged once, in phase 1.
+        Spendable = the employer's OWN current balance (USD terms) minus the
+        reserve floor. Skip-and-continue in priority order, same as phase 1.
+        """
+        held = self._held_lines_in_priority_order(s, run)
+        if not held:
+            raise RuntimeConflict("This run has no held lines to rescue.")
+        rates = self.services.usd_rates
+        available = self._available_usd(s, employer)
+        spendable = round_money(available - PAYROLL_POLICY.reserve_floor_usd)
+        costs = [line_cost_usd(ContractorPayroll(name=pl.beneficiary_name, amount=pl.amount,
+                                                 currency=pl.currency, method=pl.method),
+                               rates, PAYROLL_POLICY) for pl in held]
+        taken, remaining = walk_priority(costs, spendable, Decimal("0"))
+        if not taken:
+            raise RuntimeConflict(
+                "No held line fits yet: fund this employer's own wallet first "
+                f"(residual shortfall USD {money_str(run.residual_shortfall_usd or 0)}).")
+        taken_ids = {held[i].id for i in taken}
+        lines = [{"pay_line_id": str(pl.id), "position": pl.position, "name": pl.beneficiary_name,
+                  "amount": money_str(pl.amount), "currency": pl.currency, "method": pl.method,
+                  "mark": "PAID" if pl.id in taken_ids else "HELD"} for pl in held]
+        total_paid = round_money(sum((costs[i] for i in taken), Decimal("0")))
+        still_held_cost = round_money(sum(
+            (cost for i, cost in enumerate(costs) if held[i].id not in taken_ids), Decimal("0")))
+        residual_after = round_money(max(Decimal("0"), still_held_cost - remaining))
+        return {"phase": 2, "lines": lines, "total_usd": money_str(total_paid),
+                "available_usd": money_str(available), "residual_after_usd": money_str(residual_after)}
+
+    @staticmethod
+    def _residual_snapshot(plan: dict) -> dict:
+        """The exact thing a phase-2 approval binds (lines + marks + totals)."""
+        return {"phase": plan["phase"], "lines": plan["lines"],
+                "total_usd": plan["total_usd"], "residual_after_usd": plan["residual_after_usd"]}
+
+    def prepare_residual_plan(self, s: Session, *, run: PayrollRun, employer: Employer) -> PayrollRun:
+        """Phase 2, step 1: compute and store a FRESH residual plan snapshot.
+
+        The original (phase-1) approval never covers the remainder: this
+        plan must be approved separately (see :meth:`decide_residual`)
+        before :meth:`execute_residual_plan` will move anything.
+        """
+        if run.status != "PARTIALLY_SETTLED":
+            raise RuntimeConflict("A residual plan can only be prepared for a PARTIALLY_SETTLED run.")
+        plan = self._compute_residual_plan(s, run, employer)
+        snapshot = self._residual_snapshot(plan)
+        plan["snapshot_hash"] = hashlib.sha256(canonical_json(snapshot).encode()).hexdigest()
+        plan["status"] = "AWAITING_APPROVAL"
+        plan["prepared_at"] = datetime.now(UTC).isoformat()
+        run.residual_plan = plan
+        self._append_event(s, run, "assess",
+                           f"Residual plan prepared: {sum(1 for l in plan['lines'] if l['mark'] == 'PAID')} "
+                           f"held line(s) now fit (USD {plan['total_usd']}); awaiting a fresh approval.")
+        s.commit()
+        return run
+
+    def _append_event(self, s: Session, run: PayrollRun, agent: str, message: str,
+                      level: str = "info") -> None:
+        seq = s.scalar(select(func.count()).select_from(AgentEvent).where(AgentEvent.run_id == run.id)) or 0
+        s.add(AgentEvent(run_id=run.id, organization_id=run.organization_id, seq=seq,
+                         agent=agent, level=level, message=message))
+
+    def decide_residual(self, s: Session, *, run: PayrollRun, employer: Employer, user: User,
+                        decision: str) -> PayrollRun:
+        """Phase 2, step 2: TAP-sign the residual snapshot and, on approve, execute it.
+
+        The snapshot is recomputed from CURRENT state and hash-compared with
+        the prepared plan: any change to a held line, a priority, or the
+        wallet since preparation invalidates the plan (SNAPSHOT_MISMATCH) —
+        the same discipline as a phase-1 approval.
+        """
+        plan = run.residual_plan
+        if run.status != "PARTIALLY_SETTLED" or not plan or plan.get("status") != "AWAITING_APPROVAL":
+            raise RuntimeConflict("This run has no residual plan waiting for a decision. "
+                                  "Prepare a residual plan first.")
+        fresh = self._compute_residual_plan(s, run, employer)
+        fresh_hash = hashlib.sha256(canonical_json(self._residual_snapshot(fresh)).encode()).hexdigest()
+        if fresh_hash != plan.get("snapshot_hash"):
+            raise RuntimeConflict(
+                "SNAPSHOT_MISMATCH: the held lines or the wallet changed since the residual plan was "
+                "prepared. Prepare a fresh residual plan and approve that instead.")
+        approval = Approval(run_id=run.id, kind="approval", decision=decision,
+                            decided_by_id=user.id, decided_by_email=user.email)
+        if decision == "approve":
+            body = {"type": "payroll.residual_approval", "run_id": str(run.id),
+                    "employer": employer.ledger_key, "decision": decision, "decided_by": user.email,
+                    "phase": 2, "snapshot_hash": fresh_hash,
+                    "required_usd": plan["total_usd"], "residual_after_usd": plan["residual_after_usd"],
+                    "pay_lines": [{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+                                   "method": l["method"]} for l in plan["lines"] if l["mark"] == "PAID"],
+                    "held_lines": [{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+                                    "method": l["method"]} for l in plan["lines"] if l["mark"] == "HELD"]}
+            envelope = self.signer.sign(f"/runs/{run.id}/approve-residual", body)
+            check = self.signer.verify(envelope, body)
+            if not check.valid:
+                raise RuntimeConflict(f"Residual approval failed TAP verification ({check.code}).")
+            sig_input = envelope.headers["Signature-Input"]
+            approval.signed_body = envelope.body
+            approval.tap_signature_input = sig_input
+            approval.tap_signature = envelope.headers["Signature"]
+            approval.tap_key_id = _keyword(sig_input, "keyid")
+            approval.tap_nonce = _keyword(sig_input, "nonce")
+            approval.verified = True
+            s.add(approval)
+            plan = {**plan, "status": "APPROVED"}
+            run.residual_plan = plan
+            s.flush()
+            return self.execute_residual_plan(s, run=run, employer=employer)
+        approval.verified = False
+        s.add(approval)
+        run.residual_plan = {**plan, "status": "HELD_BY_HUMAN"}
+        self._append_event(s, run, "approval",
+                           f"{user.email} held the residual plan; held lines stay HELD.", "warning")
+        s.commit()
+        return run
+
+    def execute_residual_plan(self, s: Session, *, run: PayrollRun, employer: Employer) -> PayrollRun:
+        """Phase 2, step 3: settle the residual plan's PAID-marked lines.
+
+        Refuses unless the CURRENT residual plan carries a fresh approval —
+        the phase-1 approval never covers the remainder. Journals post only
+        for the lines settled here; no second platform fee is charged.
+        Idempotency: each line pays through its stored ``request_id``.
+        """
+        plan = run.residual_plan
+        if run.status != "PARTIALLY_SETTLED" or not plan or plan.get("status") != "APPROVED":
+            raise RuntimeConflict(
+                "Residual execution refused: the held lines need a FRESH residual-plan approval first — "
+                "the original run approval does not cover them.")
+        acct = employer.airwallex_account_id
+        key = employer.ledger_key
+        by_id = {pl.id: pl for pl in run.pay_lines}
+        paid_marks = [l for l in plan["lines"] if l["mark"] == "PAID"]
+        ordered = sorted(paid_marks, key=lambda l: l["position"])
+        with self.lock:
+            # FX first, per currency: convert exactly the priced requirement
+            # (salaries + payout fees) for the lines about to settle.
+            by_ccy: dict[str, Decimal] = {}
+            for mark in ordered:
+                pl = by_id[uuid.UUID(mark["pay_line_id"])]
+                fee = PAYROLL_POLICY.payout_fee(pl.currency, pl.method)
+                by_ccy[pl.currency] = by_ccy.get(pl.currency, Decimal("0")) + pl.amount + fee
+            for ccy, required in sorted(by_ccy.items()):
+                if ccy == "USD":
+                    continue
+                required = round_money(required)
+                quote = self.recorder.create_fx_quote(
+                    request_id=request_id_for(str(run.id), f"rescue-fx-quote-{ccy}"), on_behalf_of=acct,
+                    sell_currency="USD", buy_currency=ccy, buy_amount=required)
+                conversion = self.recorder.create_fx_conversion(
+                    request_id=request_id_for(str(run.id), f"rescue-fx-{ccy}"), on_behalf_of=acct,
+                    quote_id=quote["id"], buy_amount=required, sell_currency="USD", buy_currency=ccy)
+                sell = round_money(to_decimal(str(conversion["sell_amount"])))
+                self.ledger.post([(f"{key}:cash:USD", -sell), (f"{key}:fx_clearing:USD", sell),
+                                  (f"{key}:fx_clearing:{ccy}", -required), (f"{key}:cash:{ccy}", required)],
+                                 memo=f"{run.id} rescue FX USD->{ccy}")
+            for mark in ordered:
+                pl = by_id[uuid.UUID(mark["pay_line_id"])]
+                if pl.status == "PAID":
+                    continue  # idempotent replay: this line already settled
+                contractor = s.get(Contractor, pl.contractor_id) if pl.contractor_id else None
+                bene = self.recorder.create_beneficiary(
+                    request_id=request_id_for(str(run.id), f"rescue-beneficiary-{pl.position}"),
+                    on_behalf_of=acct, name=pl.beneficiary_name, currency=pl.currency, method=pl.method,
+                    country_code=contractor.country if contractor else "DE",
+                    iban=contractor.iban if contractor else "", swift_code=contractor.swift_code if contractor else "",
+                    account_number=contractor.account_number if contractor else "",
+                    routing_code=contractor.routing_code if contractor else "")
+                transfer = self.recorder.create_transfer(
+                    request_id=pl.request_id, on_behalf_of=acct, beneficiary_id=bene["id"],
+                    amount=pl.amount, currency=pl.currency, method=pl.method)
+                self.recorder.transition_transfer(
+                    request_id=request_id_for(str(run.id), f"rescue-pay-{pl.position}-transition"),
+                    on_behalf_of=acct, transfer_id=transfer["id"], target_status="PAID")
+                fee = round_money(to_decimal(str(transfer.get("fee_amount", "0"))))
+                self.ledger.post([(f"{key}:cash:{pl.currency}", -(pl.amount + fee)),
+                                  (f"external:payees:{pl.currency}", pl.amount),
+                                  (f"external:payout_fees:{pl.currency}", fee)],
+                                 memo=f"{run.id} payout rescue {pl.position} {pl.beneficiary_name}")
+                pl.status = "PAID"
+                pl.payout_fee = fee
+                pl.airwallex_transfer_id = transfer.get("id")
+                pl.settled_phase = 2
+                pl.settled_at = datetime.now(UTC)
+                self._append_event(s, run, "execute",
+                                   f"Rescue: paid {pl.beneficiary_name} {pl.currency} "
+                                   f"{money_str(pl.amount)} via {pl.method} (phase 2, fresh approval).",
+                                   "success")
+            self._flush_calls(s, run.organization_id, employer.id, run.id)
+            self._flush_ledger(s, {key: (run.organization_id, employer.id)})
+            if not self.ledger.is_balanced():
+                raise RuntimeError("Ledger trial balance does not sum to zero after residual execution.")
+            remaining_held = [pl for pl in run.pay_lines if pl.status == "HELD"]
+            run.residual_plan = {**plan, "status": "EXECUTED"}
+            if remaining_held:
+                # Recompute the residual honestly for the lines still held:
+                # their full USD cost minus the spendable balance now left.
+                rates = self.services.usd_rates
+                held_cost = round_money(sum(
+                    (line_cost_usd(ContractorPayroll(name=pl.beneficiary_name, amount=pl.amount,
+                                                     currency=pl.currency, method=pl.method),
+                                   rates, PAYROLL_POLICY) for pl in remaining_held), Decimal("0")))
+                spendable_after = round_money(
+                    self._available_usd(s, employer) - PAYROLL_POLICY.reserve_floor_usd)
+                run.residual_shortfall_usd = round_money(max(Decimal("0"), held_cost - spendable_after))
+                self._append_event(s, run, "reconcile",
+                                   f"Residual execution reconciled: {len(remaining_held)} line(s) still "
+                                   "HELD; run remains PARTIALLY_SETTLED.", "warning")
+            else:
+                run.status = "SETTLED"
+                run.residual_shortfall_usd = Decimal("0.00")
+                run.settled_at = datetime.now(UTC)
+                self._append_event(s, run, "reconcile",
+                                   "Residual execution reconciled: every line is now PAID; run SETTLED "
+                                   "in two phases.", "success")
+            s.commit()
+        return run

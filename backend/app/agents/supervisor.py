@@ -40,6 +40,7 @@ Decider = Callable[[Services, dict, dict], dict]
 _OUTCOME_BY_STATUS = {
     "SETTLED": "settled",
     "PARTIALLY_PAID": "partial",
+    "PARTIALLY_SETTLED": "partial",
     "ATTEST_PENDING": "settled",
     "SENT_FEE_FAILED": "failed",
     "SENT_UNRECONCILED": "failed",
