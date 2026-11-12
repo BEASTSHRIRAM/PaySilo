@@ -357,6 +357,12 @@ frontend/              Next.js: landing, login/signup, dashboard (runs, employer
 deploy/agentcore/      AgentCore wrapping notes + sample config
 ```
 
+## Proof of payment
+
+| Feature | What you get | Docs |
+|---|---|---|
+| **Proof of payment PDFs** | Per-contractor proof (or an honest *NOT PAID* status notice) and a run-level statement, with masked bank details, Airwallex transfer id, status timeline, ledger receipt hash, an HMAC integrity block and a public `/verify/{token}` page (VALID/INVALID) plus a "Where is my money?" trace. It says what Airwallex reported, never a bank credit time it does not have. | `backend/docs/proof-of-payment.md` |
+
 ## Honest limits of this build
 
 - **Live Airwallex sandbox: partly verified.** Login, balances and the connected-accounts list work (tested from India); account creation was fixed after the first live run (#22). A full live payroll (FX → payout → fee) is still being verified (#14). Most response fixtures in the tests are documented assumptions (`backend/docs/airwallex-fee-path.md`).
