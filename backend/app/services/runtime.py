@@ -153,16 +153,12 @@ class PlatformRuntime:
         else:
             self.chain = MockSettlementChain()
         self.vic = build_vic_adapter(settings)
-        if settings.vic_credential:
-            if self.vic.cli_available:
-                logger.info("Visa VIC: live Airi adapter configured (credential %s, test_card=%s).",
-                            self.vic.credential_ref, self.vic.test_card)
-            else:
-                logger.warning(
-                    "Visa VIC: VIC_CREDENTIAL is set but the Airi CLI is not available "
-                    "(set AIRI_CLI_PATH) — benefit purchases will fail closed, never simulate.")
+        if self.vic.mode == "VIC":
+            logger.info("Visa VIC: live mode (real airi-cli, two-phase mandate flow, test_card=%s). "
+                        "Readiness is checked per call; it fails closed, never simulates.",
+                        self.vic.test_card)
         else:
-            logger.info("Visa VIC: no VIC_CREDENTIAL set — benefits run in SIMULATED mode (%s).",
+            logger.info("Visa VIC: VIC_MODE=simulated — benefits run in SIMULATED mode (%s).",
                         self.vic.credential_ref)
         self.services = Services(airwallex=self.recorder, ledger=self.ledger, chain=self.chain,
                                  usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer)

@@ -168,7 +168,9 @@ def _seed_benefits(s: Session, runtime: PlatformRuntime, org: Organization, user
             try:
                 if req.status == "REQUESTED":
                     decide_request(s, request=req, decision="approve", user=user)
-                if req.status in ("APPROVED", "FAILED"):
+                # Live VIC is two-phase and needs a real human in Airi: never
+                # seed a mandate (or a fake PURCHASED row) in live mode.
+                if req.status in ("APPROVED", "FAILED") and not getattr(runtime.vic, "two_phase", False):
                     execute_purchase(s, runtime, request=req, user=user)
             except BenefitError as exc:
                 logger.warning("Seeded benefit purchase %s / %s was not completed: %s",

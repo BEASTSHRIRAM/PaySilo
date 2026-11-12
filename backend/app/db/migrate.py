@@ -26,7 +26,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.schema import Column
 
-from .models import RUN_STATUSES, Base
+from .models import BENEFIT_PURCHASE_STATUSES, RUN_STATUSES, Base
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +117,20 @@ def widen_run_status_check(conn: Connection) -> None:
     conn.execute(text(f'ALTER TABLE "payroll_runs" ADD CONSTRAINT ck_run_status CHECK (status IN ({allowed}))'))
 
 
+def widen_benefit_purchase_check(conn: Connection) -> None:
+    """Postgres: accept the PENDING purchase status (live Airi mandate awaiting the human)."""
+    if not inspect(conn).has_table("benefit_purchases"):
+        return
+    allowed = ", ".join("'" + s + "'" for s in BENEFIT_PURCHASE_STATUSES)
+    conn.execute(text('ALTER TABLE "benefit_purchases" DROP CONSTRAINT IF EXISTS ck_benefit_purchase_status'))
+    conn.execute(text('ALTER TABLE "benefit_purchases" ADD CONSTRAINT ck_benefit_purchase_status '
+                      f"CHECK (status IN ({allowed}))"))
+
+
 def migrate(engine: Engine) -> list[str]:
     added = add_missing_columns(engine)
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:
             widen_run_status_check(conn)
+            widen_benefit_purchase_check(conn)
     return added

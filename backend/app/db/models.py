@@ -556,7 +556,7 @@ class SourceImportRow(Base):
 # ---------------------------------------------------------------------------
 
 BENEFIT_REQUEST_STATUSES = ("REQUESTED", "APPROVED", "DENIED", "PURCHASED", "FAILED")
-BENEFIT_PURCHASE_STATUSES = ("SUCCEEDED", "FAILED")
+BENEFIT_PURCHASE_STATUSES = ("SUCCEEDED", "FAILED", "PENDING")
 VIC_MODES = ("SIMULATED", "VIC")
 
 
@@ -662,3 +662,8 @@ class BenefitPurchase(TimestampMixin, Base):
     amount: Mapped[Decimal] = mapped_column(Money, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     journal_txn_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_transactions.id", ondelete="SET NULL"))
+    # Live Airi mandate (two-phase flow). Never any card data: only the mandate
+    # id, the human approval URL and a coarse mandate state / credential receipt.
+    provider_mandate_id: Mapped[str | None] = mapped_column(String(80))
+    approval_url: Mapped[str | None] = mapped_column(Text)
+    mandate_status: Mapped[str | None] = mapped_column(String(40))

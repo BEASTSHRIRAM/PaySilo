@@ -392,6 +392,8 @@ class VicStatusOut(BaseModel):
     test_card: bool
     tx_limit_usd: str | None
     cli_available: bool
+    authenticated: bool = True
+    two_phase: bool = False
 
 
 class BenefitBudgetOut(BaseModel):
@@ -472,6 +474,13 @@ class BenefitPurchaseOut(BaseModel):
     currency: str
     journal_txn_id: int | None
     created_at: datetime
+    provider_mandate_id: str | None = None
+    approval_url: str | None = None
+    mandate_status: str | None = None
+
+
+class BenefitCompleteIn(BaseModel):
+    purchase_confirmed: bool = False
 
 
 class BenefitRequestOut(BaseModel):

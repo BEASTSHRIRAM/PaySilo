@@ -38,7 +38,15 @@ from sqlalchemy.orm import Session
 
 from ..db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Contractor, Employer, PayrollRun, User, utcnow
 from ..money import money_str, round_money
-from ..partners.vic import TEST_CARD_TX_LIMIT_USD, VicUnavailable
+from ..partners.vic import (
+    AWAITING_AUTH,
+    TEST_CARD_TX_LIMIT_USD,
+    CheckoutExecutor,
+    HumanConfirmedCheckoutExecutor,
+    VicError,
+    VicUnavailable,
+    merchant_url_for,
+)
 
 APPROVAL_TTL_DAYS = 7
 HELD_RUN_STATUSES = ("HELD_SHORTFALL", "HELD_BY_HUMAN")
@@ -146,6 +154,15 @@ def execute_purchase(s: Session, runtime, *, request: BenefitRequest, user: User
     if existing_success is not None:
         return existing_success
 
+    # 1b. Live two-phase: one mandate per purchase attempt. A retry while a
+    # mandate is still awaiting the human returns that same pending purchase.
+    existing_pending = s.scalar(
+        select(BenefitPurchase).where(BenefitPurchase.request_id == request.id,
+                                      BenefitPurchase.status == "PENDING")
+        .order_by(BenefitPurchase.attempt_no))
+    if existing_pending is not None:
+        return existing_pending
+
     # 2. Only an approved request (or a failed attempt being retried) can buy.
     if request.status not in ("APPROVED", "FAILED"):
         raise BenefitError("REQUEST_NOT_APPROVED",
@@ -211,7 +228,13 @@ def execute_purchase(s: Session, runtime, *, request: BenefitRequest, user: User
     attempt_no = int(attempt_count) + 1
     idempotency_key = f"benefit:{request.id}:{attempt_no}"
 
-    # 9. Provider attempt. A live-but-unavailable VIC fails closed.
+    # 9a. Live two-phase VIC: create an Airi mandate and wait for the human to
+    # authorize it in Airi. Nothing is spent and no money moves in this phase.
+    if getattr(runtime.vic, "two_phase", False):
+        return _create_live_mandate(s, runtime, request=request, attempt_no=attempt_no,
+                                    idempotency_key=idempotency_key)
+
+    # 9. Provider attempt (simulated). A live-but-unavailable VIC fails closed.
     try:
         result = runtime.vic.purchase(merchant=request.merchant, amount=Decimal(request.amount),
                                       currency=request.currency, idempotency_key=idempotency_key)
@@ -230,21 +253,126 @@ def execute_purchase(s: Session, runtime, *, request: BenefitRequest, user: User
     s.flush()
 
     if result.ok:
-        # 10. Success: spend from the benefits budget only. The journal
-        # touches benefits_* accounts exclusively — never cash — so
-        # reconciliation identities and golden payroll numbers cannot move.
-        purchase.status = "SUCCEEDED"
-        request.status = "PURCHASED"
-        budget.spent_this_period = Decimal(budget.spent_this_period) + Decimal(request.amount)
-        ccy = request.currency
-        journal = runtime.post_employer_journal(
-            s, employer,
-            [(f"{employer.ledger_key}:benefits_expense:{ccy}", Decimal(request.amount)),
-             (f"{employer.ledger_key}:benefits_budget:{ccy}", -Decimal(request.amount))],
-            memo=f"Benefit purchase — {request.item} · {request.merchant} (VIC {runtime.vic.mode})")
-        purchase.journal_txn_id = journal.id
+        _finalize_success(s, runtime, request=request, purchase=purchase, employer=employer, budget=budget)
     else:
         # 11. Failed attempt: recorded, request can be retried.
         request.status = "FAILED"
+    s.flush()
+    return purchase
+
+
+def _finalize_success(s: Session, runtime, *, request: BenefitRequest, purchase: BenefitPurchase,
+                      employer: Employer, budget: BenefitBudget) -> None:
+    """10. Success: spend from the benefits budget only. The journal touches
+    benefits_* accounts exclusively — never cash — so reconciliation
+    identities and golden payroll numbers cannot move."""
+    purchase.status = "SUCCEEDED"
+    request.status = "PURCHASED"
+    budget.spent_this_period = Decimal(budget.spent_this_period) + Decimal(request.amount)
+    ccy = request.currency
+    journal = runtime.post_employer_journal(
+        s, employer,
+        [(f"{employer.ledger_key}:benefits_expense:{ccy}", Decimal(request.amount)),
+         (f"{employer.ledger_key}:benefits_budget:{ccy}", -Decimal(request.amount))],
+        memo=f"Benefit purchase — {request.item} · {request.merchant} (VIC {runtime.vic.mode})")
+    purchase.journal_txn_id = journal.id
+
+
+def _create_live_mandate(s: Session, runtime, *, request: BenefitRequest, attempt_no: int,
+                         idempotency_key: str) -> BenefitPurchase:
+    try:
+        runtime.vic.ensure_ready()  # fail closed first: CLI present and signed in
+    except VicUnavailable as exc:
+        raise BenefitError("VIC_UNAVAILABLE", str(exc)) from None
+    url = merchant_url_for(request.merchant)
+    if url is None:
+        raise BenefitError("MERCHANT_URL_REQUIRED",
+                           "Live VIC needs the merchant as a website, e.g. 'coursera.org'. "
+                           "Create a new request with the merchant's website.")
+    try:
+        info = runtime.vic.create_mandate(
+            merchant=request.merchant, merchant_url=url, amount=Decimal(request.amount),
+            currency=request.currency, item=request.item,
+            description=f"PaySilo benefit: {request.item}"[:200])
+    except VicUnavailable as exc:
+        raise BenefitError("VIC_UNAVAILABLE", str(exc)) from None
+    except VicError as exc:
+        raise BenefitError(exc.code, exc.detail) from None
+    purchase = BenefitPurchase(
+        organization_id=request.organization_id, employer_id=request.employer_id,
+        request_id=request.id, attempt_no=attempt_no, idempotency_key=idempotency_key,
+        mode=runtime.vic.mode, credential_ref=info.payment_method_ref, provider_ref=None,
+        status="PENDING", amount=Decimal(request.amount), currency=request.currency,
+        provider_mandate_id=info.mandate_id, approval_url=info.approval_url,
+        mandate_status=AWAITING_AUTH)
+    s.add(purchase)
+    s.flush()
+    return purchase
+
+
+def complete_purchase(s: Session, runtime, *, request: BenefitRequest, purchase: BenefitPurchase,
+                      purchase_confirmed: bool, executor: CheckoutExecutor | None = None) -> BenefitPurchase:
+    """Phase B: an explicit human click. Fetches the credential receipt and
+    reports the mandate result. The model never calls this."""
+    if purchase.status != "PENDING":
+        return purchase  # idempotent: already settled
+    if not purchase.provider_mandate_id:
+        raise BenefitError("NO_MANDATE", "This purchase has no Airi mandate.")
+    employer = s.get(Employer, request.employer_id)
+    budget = s.scalar(select(BenefitBudget).where(BenefitBudget.employer_id == request.employer_id,
+                                                  BenefitBudget.currency == request.currency))
+    if employer is None or budget is None or not budget.enabled:
+        raise BenefitError("BUDGET_NOT_ENABLED",
+                           f"No enabled {request.currency} benefits budget exists for this employer.")
+    if employer_payroll_held(s, request.employer_id):
+        raise BenefitError("PAYROLL_HELD", "Payroll for this employer is held; wages are funded before benefits.")
+    period = current_period()
+    if budget.period != period:
+        budget.spent_this_period = Decimal("0.00")
+        budget.period = period
+    if Decimal(budget.spent_this_period) + Decimal(request.amount) > Decimal(budget.monthly_cap):
+        raise BenefitError("MONTHLY_CAP_EXCEEDED", "This purchase would now exceed the monthly benefits cap.")
+
+    executor = executor or HumanConfirmedCheckoutExecutor(purchase_confirmed)
+    try:
+        res = runtime.vic.complete(
+            mandate_id=purchase.provider_mandate_id, merchant=request.merchant,
+            amount=Decimal(request.amount), currency=request.currency, executor=executor)
+    except VicUnavailable as exc:
+        raise BenefitError("VIC_UNAVAILABLE", str(exc)) from None
+    except VicError as exc:
+        raise BenefitError(exc.code, exc.detail) from None
+
+    if res.state == AWAITING_AUTH:
+        purchase.mandate_status = AWAITING_AUTH
+    elif res.ok:
+        purchase.mandate_status = "COMPLETED"
+        purchase.provider_ref = purchase.provider_mandate_id
+        _finalize_success(s, runtime, request=request, purchase=purchase, employer=employer, budget=budget)
+    else:
+        purchase.status = "FAILED"
+        purchase.mandate_status = res.state
+        purchase.failure_code = res.failure_code
+        purchase.failure_detail = res.failure_detail
+        request.status = "FAILED"
+    s.flush()
+    return purchase
+
+
+def cancel_purchase(s: Session, runtime, *, request: BenefitRequest, purchase: BenefitPurchase) -> BenefitPurchase:
+    """Cancel a pending mandate (human action). The request can be retried."""
+    if purchase.status != "PENDING" or not purchase.provider_mandate_id:
+        raise BenefitError("NOT_PENDING", "Only a purchase awaiting authorization can be cancelled.")
+    try:
+        runtime.vic.cancel_mandate(purchase.provider_mandate_id)
+    except VicUnavailable as exc:
+        raise BenefitError("VIC_UNAVAILABLE", str(exc)) from None
+    except VicError as exc:
+        raise BenefitError(exc.code, exc.detail) from None
+    purchase.status = "FAILED"
+    purchase.mandate_status = "CANCELLED"
+    purchase.failure_code = "MANDATE_CANCELLED"
+    purchase.failure_detail = "The Airi mandate was cancelled before the purchase."
+    request.status = "FAILED"
     s.flush()
     return purchase

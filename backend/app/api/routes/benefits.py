@@ -10,9 +10,10 @@ cannot use it — the append-only BenefitPurchase rows plus
 ``decided_by`` / ``decided_at`` on requests ARE the audit trail. This
 module does not force benefits into ``agent_events``.
 
-All purchases run in SIMULATED mode (labelled everywhere) until a VIC
-credential and the Airi CLI are configured; the live adapter fails
-closed and never falls back to simulation.
+All purchases run in SIMULATED mode (labelled everywhere) unless
+VIC_MODE=live and the real airi-cli is installed and signed in; the live
+adapter is two-phase (mandate -> human authorizes in Airi -> explicit
+"complete" click), fails closed and never falls back to simulation.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from ...db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Employe
 from ...partners.vic import vic_status
 from ...services.benefits import (
     BenefitError,
+    cancel_purchase,
+    complete_purchase,
     create_request,
     current_period,
     decide_request,
@@ -40,6 +43,7 @@ from ..schemas import (
     BenefitBudgetIn,
     BenefitBudgetOut,
     BenefitDecisionIn,
+    BenefitCompleteIn,
     BenefitPurchaseOut,
     BenefitRequestIn,
     BenefitRequestOut,
@@ -182,6 +186,51 @@ def purchase_benefit_request(request_id: uuid.UUID,
     req = _load_request(db, tenant, request_id)
     try:
         purchase = execute_purchase(db, runtime, request=req, user=tenant.user)
+    except BenefitError as exc:
+        db.rollback()
+        raise _benefit_error(exc) from None
+    db.commit()
+    db.refresh(purchase)
+    return benefit_purchase_out(purchase)
+
+
+def _load_purchase(db: Session, tenant: Tenant, purchase_id: uuid.UUID) -> BenefitPurchase:
+    p = db.scalar(select(BenefitPurchase).where(
+        BenefitPurchase.id == purchase_id,
+        BenefitPurchase.organization_id == tenant.organization.id))
+    if p is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Benefit purchase not found.")
+    return p
+
+
+@router.post("/purchases/{purchase_id}/complete", response_model=BenefitPurchaseOut)
+def complete_benefit_purchase(purchase_id: uuid.UUID, body: BenefitCompleteIn,
+                              tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+                              db: Session = Depends(get_db),
+                              runtime: PlatformRuntime = Depends(get_runtime)) -> BenefitPurchaseOut:
+    """Phase B of a live VIC purchase: an explicit human click (never the LLM)."""
+    purchase = _load_purchase(db, tenant, purchase_id)
+    req = _load_request(db, tenant, purchase.request_id)
+    try:
+        complete_purchase(db, runtime, request=req, purchase=purchase,
+                          purchase_confirmed=body.purchase_confirmed)
+    except BenefitError as exc:
+        db.rollback()
+        raise _benefit_error(exc) from None
+    db.commit()
+    db.refresh(purchase)
+    return benefit_purchase_out(purchase)
+
+
+@router.post("/purchases/{purchase_id}/cancel", response_model=BenefitPurchaseOut)
+def cancel_benefit_purchase(purchase_id: uuid.UUID,
+                            tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
+                            db: Session = Depends(get_db),
+                            runtime: PlatformRuntime = Depends(get_runtime)) -> BenefitPurchaseOut:
+    purchase = _load_purchase(db, tenant, purchase_id)
+    req = _load_request(db, tenant, purchase.request_id)
+    try:
+        cancel_purchase(db, runtime, request=req, purchase=purchase)
     except BenefitError as exc:
         db.rollback()
         raise _benefit_error(exc) from None

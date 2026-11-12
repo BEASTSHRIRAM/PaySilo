@@ -97,12 +97,15 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
-    # Visa VIC via Airi CLI (Silo Benefits). Until VIC_CREDENTIAL is set,
-    # benefits run in honest SIMULATED mode with the test card. When a
-    # credential IS set, the Airi CLI must also be available — the live
+    # Visa VIC via the real Airi CLI (Silo Benefits). VIC_MODE=simulated (the
+    # default) keeps benefits in honest SIMULATED mode with the published test
+    # card. VIC_MODE=live uses `airi-cli` (npm i -g @airwallex/airi-cli@beta,
+    # then `airi-cli auth login`); if the CLI is missing or signed out the live
     # adapter fails closed and never falls back to simulation.
-    vic_credential: str | None = None
-    airi_cli_path: str | None = None
+    # AIRI_CLI_COMMAND is shell-split, e.g. "wsl -d Ubuntu-24.04 -- airi-cli".
+    vic_mode: str = "simulated"
+    airi_cli_command: str = "airi-cli"
+    vic_merchant_country: str = "US"
     vic_test_card: bool = True
 
     @property

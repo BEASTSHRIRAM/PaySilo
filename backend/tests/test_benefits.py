@@ -667,7 +667,7 @@ def test_journal_posted_and_balanced(demo_client):
 
 def test_vic_unavailable_fails_closed():
     # A second app, built exactly the way conftest builds the first, but
-    # with a VIC credential configured and the airi CLI missing: VIC mode
+    # with VIC_MODE=live and the airi CLI missing: VIC mode
     # was requested, cannot run, and must fail CLOSED. (If second-app
     # construction ever proves too fragile in the merged tree, the
     # fallback for this test is adapter-level: AiriVicAdapter.purchase
@@ -680,7 +680,7 @@ def test_vic_unavailable_fails_closed():
 
     settings = Settings(
         database_url="sqlite://", jwt_secret="test-secret-" + "x" * 32, seed_demo=True,
-        vic_credential="test-token", airi_cli_path="/nonexistent/airi-cli")
+        vic_mode="live", airi_cli_command="/nonexistent/airi-cli")
     app = create_app(settings, Database.from_url("sqlite://"))
     with TestClient(app) as c:
         login = c.post("/auth/login", json={"email": DEMO_EMAIL, "password": DEMO_PASSWORD})

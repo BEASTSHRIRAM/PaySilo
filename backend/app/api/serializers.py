@@ -89,6 +89,7 @@ def benefit_purchase_out(p: BenefitPurchase) -> BenefitPurchaseOut:
         mode=p.mode, credential_ref=p.credential_ref, provider_ref=p.provider_ref, status=p.status,
         failure_code=p.failure_code, failure_detail=p.failure_detail, amount=money_str(p.amount),
         currency=p.currency, journal_txn_id=p.journal_txn_id, created_at=p.created_at,
+        provider_mandate_id=p.provider_mandate_id, approval_url=p.approval_url, mandate_status=p.mandate_status,
     )
 
 
