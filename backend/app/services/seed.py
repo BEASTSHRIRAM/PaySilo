@@ -89,36 +89,6 @@ DEMO_EMPLOYERS: list[dict] = [
              "iban": "NL02ABNA0123456789", "swift_code": "INGBNL2AXXX", "default_amount": Decimal("3600")},
         ],
     },
-    # PARTIAL settlement showcase (priority order): wallet USD 5,000,
-    # gross need USD 10,000 over five USD LOCAL lines (payout fee USD 0).
-    # Spendable = 5,000 − 1,000 reserve = 4,000. Priority walk: Elena 2,000 fits
-    # (run fee 149 deducted at this first settlement -> 1,851 left); Marcus 3,000
-    # does not fit and is HELD while the walk continues; Priya 1,500 fits (351
-    # left); Jonas 2,000 and Aisha 1,500 are HELD. Paid 3,500 + one fee 149 ->
-    # balance 1,351; the five lines need 10,000, so the held lines wait for more funding (Pay held lines).
-    {
-        "name": "Dunmore Textiles", "pay_frequency": "MONTHLY", "pay_in_days": 9, "country": "US",
-        "contact_name": "Dana Whitfield",
-        "contact_email": "dana@dunmore.example", "funding_usd": Decimal("5000"),
-        "settlement_mode": "PARTIAL",
-        "contractors": [
-            {"full_name": "Elena Brooks", "country": "US", "currency": "USD", "payout_method": "LOCAL",
-             "account_number": "000234567891", "routing_code": "021000021", "default_amount": Decimal("2000"),
-             "priority": 1},
-            {"full_name": "Marcus Reed", "country": "US", "currency": "USD", "payout_method": "LOCAL",
-             "account_number": "000234567892", "routing_code": "021000021", "default_amount": Decimal("3000"),
-             "priority": 2},
-            {"full_name": "Priya Nair", "country": "US", "currency": "USD", "payout_method": "LOCAL",
-             "account_number": "000234567893", "routing_code": "021000021", "default_amount": Decimal("1500"),
-             "priority": 3},
-            {"full_name": "Jonas Weber", "country": "US", "currency": "USD", "payout_method": "LOCAL",
-             "account_number": "000234567894", "routing_code": "021000021", "default_amount": Decimal("2000"),
-             "priority": 4},
-            {"full_name": "Aisha Bello", "country": "US", "currency": "USD", "payout_method": "LOCAL",
-             "account_number": "000234567895", "routing_code": "021000021", "default_amount": Decimal("1500"),
-             "priority": 5},
-        ],
-    },
 ]
 
 
@@ -614,6 +584,11 @@ _WORKFLOW_TEMPLATES.extend([
 ])
 
 
+# Templates that PREPARE payroll runs or continuations on their own are seeded switched off: an open prepared run
+# blocks starting another payroll for that employer, so the owner opts in (Workflows > enable).
+_SEEDED_DISABLED = {"Monthly Payroll Day", "Held Payroll Rescue", "Friday Funding Reminder"}
+
+
 def _seed_workflows(s: Session, org: Organization, user: User) -> None:
     from ..db.models import Workflow
     from .workflows import trigger_type_of, validate_graph
@@ -627,7 +602,8 @@ def _seed_workflows(s: Session, org: Organization, user: User) -> None:
         if errors:  # a broken template must be loud in logs, never silently seeded
             logger.warning("Seed workflow %r failed validation: %s", name, errors)
             continue
-        s.add(Workflow(organization_id=org.id, name=name, description=description, enabled=True,
+        s.add(Workflow(organization_id=org.id, name=name, description=description,
+                       enabled=name not in _SEEDED_DISABLED,
                        trigger_type=trigger_type_of(graph) or "", graph=graph, created_by_id=user.id))
     s.flush()
 

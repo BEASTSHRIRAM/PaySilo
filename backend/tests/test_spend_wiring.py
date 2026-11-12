@@ -194,8 +194,8 @@ def test_kit_completion_mails_contractor_once(demo_client):
     r = demo_client.post(f"/onboarding-kits/kits/{kit['id']}/purchase-all")
     assert r.status_code == 200, r.text
     assert r.json()["kit"]["status"] == "COMPLETED"
-    again = demo_client.post(f"/onboarding-kits/kits/{kit['id']}/purchase-all")  # idempotent: nothing re-bought
-    assert again.status_code == 200
+    again = demo_client.post(f"/onboarding-kits/kits/{kit['id']}/purchase-all")  # a completed kit buys nothing more
+    assert again.status_code == 409
     rows = _mails(demo_client, "KIT_COMPLETED", "worker-complete@example.com")
     assert len(rows) == 1
     assert "25.00" in rows[0].body and "Welcome gift card" in rows[0].body

@@ -210,6 +210,49 @@ Demo: after Delta's partial run (wallet USD 2,461.12), add USD 4,000, press
 12.85 fee) is paid, no second run fee, wallet USD 2,559.24, run `SETTLED`; the
 original run stays `PARTIALLY_PAID` and links to the continuation.
 
+### Settlement mode and payment priority
+
+Every employer chooses what happens when its own wallet cannot cover the whole batch (plus payout fees, the
+USD 149 run fee and the USD 1,000 reserve). Owners and admins set it on the employer page.
+
+| Mode | When the wallet is short |
+|---|---|
+| `ALL_OR_NOTHING` (default for employers created from now on) | Nobody is paid. The run is `HELD_SHORTFALL` with funding guidance; once the wallet is funded, `Pay held lines` (or autopilot) continues it. |
+| `PARTIAL` (what every employer that existed before this option keeps) | Pay what fits and hold the rest (`PARTIALLY_PAID`, the continuation flow above). Lines are walked by contractor **priority** (lower number first), ties smallest first; a line that does not fit is held and the walk goes on. |
+
+Contractor priority (default 100) is edited in the contractor panel and only matters in `PARTIAL` mode. The risk
+gate applies in both modes: a risk-held line is always just that line held; the mode decides affordability over
+the remaining lines. The approval snapshot binds exactly which lines pay and which are held.
+
+### Spend categories: Onboarding kits and Travel
+
+Besides Silo Benefits, an employer can have an **onboarding budget** (new-joiner kits: background check, software
+seats, gift card, peripherals) and a **travel budget** (trips with per-category caps for transport, lodging,
+per-diem and other). Each has its own journal book (`onboarding_expense`, `travel_expense`) and can never touch
+wage funds; payroll that is held locks them (wages first). A kit or trip is approved by a person as ONE snapshot
+(hash over every item and the expiry). Purchases use the same two-phase Airi flow as Benefits: one mandate per
+item, a human authorizes it in Airi and clicks Complete; in simulated mode items complete instantly and are
+labelled SIMULATED. A kit or trip is complete only when every item is. A component above the credential's
+per-transaction limit (USD 200 on the test card) is approvable but blocked with `TX_LIMIT_EXCEEDED`: never faked,
+never split. Silo chat can read and *propose* kits and trips, never approve or buy.
+
+### Workflows (what they can and cannot do)
+
+`/dashboard/workflows` is a visual builder (React Flow) for saved node graphs that a deterministic engine runs
+when an event happens (employer added, contractor joined, payroll held or settled, funds received, kit
+approved/completed, trip proposed, benefit requested, or on a weekly/monthly schedule). There is no model at run
+time. Actions: draft an onboarding kit, create an approval request, send an email (queued through the
+**Notifications** outbox, never sent inline), create an exception, post a chat notice, create a funding reminder
+(the platform funding service), prepare a payroll run (the normal run-start path: priced and left waiting for a
+human) and revalidate held payroll (the same guarded path as autopilot: a parent run never gets two
+continuations; if one exists the step links to it).
+
+A workflow can **never** approve, sign, pay, purchase, verify a bank change or bypass the risk gate: no such
+action exists, graphs containing one are rejected, and a `Wait for approval` gate only resumes from the real human
+decision endpoints (run decision, kit decision, trip decision). Every workflow query is scoped to the caller's
+organization. The **Morning brief** (`/dashboard/workflows/brief`) shows, per employer, what is needed, what the
+wallet holds, the shortfall and who will be paid versus held; approving goes through the normal run decision.
+
 ### Risk rules (the risk gate, code-decided)
 
 A new `risk` node runs before pricing. It holds (never pays) lines that trip a deterministic rule; the held

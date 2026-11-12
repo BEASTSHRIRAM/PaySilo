@@ -495,7 +495,8 @@ def test_api_seed_templates_present_and_valid(demo_client):
     for row in rows:
         if row["name"] in EXPECTED_TEMPLATES:
             assert validate_graph(row["graph"]) == [], (row["name"], validate_graph(row["graph"]))
-            assert row["enabled"] is True and row["trigger_type"].startswith("trigger.")
+            assert row["enabled"] is (row["name"] not in {"Monthly Payroll Day", "Held Payroll Rescue", "Friday Funding Reminder"})
+            assert row["trigger_type"].startswith("trigger.")
 
 
 def test_api_workflow_crud_and_validation(demo_client):

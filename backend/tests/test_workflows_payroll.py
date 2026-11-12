@@ -78,6 +78,12 @@ def _db_rows(client, model, **filters):
         return rows
 
 
+def _enable_rescue(client):
+    wf = next(w for w in client.get("/workflows").json() if w["name"] == "Held Payroll Rescue")
+    assert wf["enabled"] is False  # seeded off: it prepares continuations, so the owner opts in
+    assert client.put(f"/workflows/{wf['id']}", json={"enabled": True}).status_code == 200
+
+
 def _rescue_runs(client):
     wf = next(w for w in client.get("/workflows").json() if w["name"] == "Held Payroll Rescue")
     return [r for r in _db_rows(client, WorkflowRun, workflow_id=uuid.UUID(wf["id"]))]
@@ -105,11 +111,11 @@ def test_action_registry_has_no_money_or_approval_capability():
 
 
 def test_no_workflow_endpoint_can_decide_anything(demo_client):
-    paths = [r.path for r in demo_client.app.routes if getattr(r, "path", "").startswith("/workflows")]
+    spec = demo_client.get("/openapi.json").json()["paths"]
+    paths = [p for p in spec if p.startswith("/workflows")]
     assert paths and not [p for p in paths if re.search(r"approv|purchase|pay|sign|verif|decision", p)], paths
-    # and the only HTTP verbs on read-only collections are GET
-    brief = [r for r in demo_client.app.routes if getattr(r, "path", "") == "/workflows/brief"]
-    assert brief and all(r.methods == {"GET"} for r in brief)
+    # and the brief is read-only
+    assert set(spec["/workflows/brief"]) == {"get"}
 
 
 def test_gates_resume_only_from_the_real_decision_endpoints():
@@ -128,6 +134,7 @@ def test_gates_resume_only_from_the_real_decision_endpoints():
 
 
 def test_rescue_never_approves_or_pays(demo_client):
+    _enable_rescue(demo_client)
     emp, parent = _delta_partial(demo_client)
     transfers = {c.request_id for c in demo_client.app.state.runtime.recorder.log if c.operation == "create_transfer"}
     _fund(demo_client, emp, "4000")
@@ -140,6 +147,7 @@ def test_rescue_never_approves_or_pays(demo_client):
 
 # ----------------------------------------------------------------- rescue
 def test_funds_received_rescue_prepares_one_continuation_and_gate_resumes_on_real_approval(demo_client):
+    _enable_rescue(demo_client)
     emp, parent = _delta_partial(demo_client)
     _fund(demo_client, emp, "4000")  # AUTO_CONTINUE_HELD is off: the workflow prepares it
     cont = _continuations(demo_client, emp, parent["id"])
@@ -164,6 +172,7 @@ def test_funds_received_rescue_prepares_one_continuation_and_gate_resumes_on_rea
 
 
 def test_rescue_is_idempotent_with_autopilot(demo_client):
+    _enable_rescue(demo_client)
     demo_client.app.state.settings.auto_continue_held = True
     emp, parent = _delta_partial(demo_client)
     _fund(demo_client, emp, "4000")  # autopilot creates it first, then funds.received fires the workflow
@@ -178,6 +187,7 @@ def test_rescue_is_idempotent_with_autopilot(demo_client):
 
 
 def test_rescue_still_short_creates_nothing(demo_client):
+    _enable_rescue(demo_client)
     emp, parent = _delta_partial(demo_client)
     _fund(demo_client, emp, "100")
     assert _continuations(demo_client, emp, parent["id"]) == []
