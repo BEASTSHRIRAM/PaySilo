@@ -5,13 +5,17 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import Contractor, Employer, PayrollRun, SettlementReceipt
+from ..db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Contractor, Employer, PayrollRun, SettlementReceipt
 from ..risk import RISK_MESSAGES
 from ..money import money_str
+from ..services.benefits import budget_lock
 from ..services.contractor_trust import effective_tax_form_status
 from ..services.runtime import PlatformRuntime
 from .schemas import (
     ApprovalOut,
+    BenefitBudgetOut,
+    BenefitPurchaseOut,
+    BenefitRequestOut,
     ContractorOut,
     EmployerDetailOut,
     EmployerOut,
@@ -73,6 +77,44 @@ def _explorer_url(runtime: PlatformRuntime, tx_hash: str | None) -> str | None:
     if not tx_hash or not base:
         return None
     return f"{base.rstrip('/')}/tx/{tx_hash}"
+
+
+def benefit_budget_out(s: Session, b: BenefitBudget, employer: Employer) -> BenefitBudgetOut:
+    locked, lock_reason = budget_lock(s, employer.id)
+    remaining = b.monthly_cap - b.spent_this_period
+    return BenefitBudgetOut(
+        id=b.id, employer_id=b.employer_id, employer_name=employer.name, currency=b.currency,
+        monthly_cap=money_str(b.monthly_cap),
+        per_tx_limit=money_str(b.per_tx_limit) if b.per_tx_limit is not None else None,
+        spent_this_period=money_str(b.spent_this_period), remaining=money_str(remaining),
+        period=b.period, enabled=b.enabled, locked=locked, lock_reason=lock_reason,
+    )
+
+
+def benefit_purchase_out(p: BenefitPurchase) -> BenefitPurchaseOut:
+    return BenefitPurchaseOut(
+        id=p.id, request_id=p.request_id, employer_id=p.employer_id, attempt_no=p.attempt_no,
+        mode=p.mode, credential_ref=p.credential_ref, provider_ref=p.provider_ref, status=p.status,
+        failure_code=p.failure_code, failure_detail=p.failure_detail, amount=money_str(p.amount),
+        currency=p.currency, journal_txn_id=p.journal_txn_id, created_at=p.created_at,
+        provider_mandate_id=p.provider_mandate_id, approval_url=p.approval_url, mandate_status=p.mandate_status,
+    )
+
+
+def benefit_request_out(r: BenefitRequest, employer_name: str,
+                        latest_purchase: BenefitPurchase | None = None) -> BenefitRequestOut:
+    return BenefitRequestOut(
+        id=r.id, employer_id=r.employer_id, employer_name=employer_name,
+        contractor_id=str(r.contractor_id) if r.contractor_id else None,
+        contractor_name=r.contractor_name, merchant=r.merchant, item=r.item,
+        amount=money_str(r.amount), currency=r.currency, status=r.status,
+        requested_by_email=r.requested_by_email, decided_by_email=r.decided_by_email,
+        decided_at=r.decided_at.isoformat() if r.decided_at else None,
+        deny_reason=r.deny_reason,
+        approval_expires_at=r.approval_expires_at.isoformat() if r.approval_expires_at else None,
+        approval_hash=r.approval_hash, created_at=r.created_at,
+        latest_purchase=benefit_purchase_out(latest_purchase) if latest_purchase else None,
+    )
 
 
 def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDetailOut:

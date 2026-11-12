@@ -1,7 +1,13 @@
-# Visa TAP signing — PaySilo implementation notes
+# TAP-style signing — PaySilo implementation notes
 
-PaySilo signs two money-critical messages with Visa Trusted Agent Protocol
-(TAP) style signatures (`app/partners/tap.py`, `app/partners/tap_signing.py`):
+**Status / claim discipline:** TAP is not available as a sponsor tool in
+this hackathon, and this module is not a Visa product integration. It is
+PaySilo's internal approval-integrity mechanism, implemented following the
+TAP signature scheme from Visa's published sample. PaySilo's Visa
+integration is VIC via Airi (`app/partners/vic.py`).
+
+PaySilo signs two money-critical messages with Trusted Agent Protocol
+(TAP)-style signatures (`app/partners/tap.py`, `app/partners/tap_signing.py`):
 
 1. **Human approvals** — a decision is signed over a canonical body pinning
    the run, employer silo, amounts, currencies and every pay line.

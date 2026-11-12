@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     metal_registry_address: str | None = None
     metal_explorer_url: str | None = None  # e.g. https://testnet-explorer.example (no trailing slash needed)
 
+    # Visa VIC via the real Airi CLI (Silo Benefits). VIC_MODE=simulated (the
+    # default) keeps benefits in honest SIMULATED mode with the published test
+    # card. VIC_MODE=live uses `airi-cli` (npm i -g @airwallex/airi-cli@beta,
+    # then `airi-cli auth login`); if the CLI is missing or signed out the live
+    # adapter fails closed and never falls back to simulation.
+    # AIRI_CLI_COMMAND is shell-split, e.g. "wsl -d Ubuntu-24.04 -- airi-cli".
+    vic_mode: str = "simulated"
+    airi_cli_command: str = "airi-cli"
+    vic_merchant_country: str = "US"
+    vic_test_card: bool = True
+
     # Email via Brevo SMTP (stdlib smtplib, STARTTLS). Without BREVO_SMTP_USER + BREVO_SMTP_KEY the outbox
     # only queues messages ("not configured"); nothing is sent. The key is a secret: never logged.
     brevo_smtp_host: str = "smtp-relay.brevo.com"

@@ -255,7 +255,7 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
           {run.approvals.map((ap, i) => (
             <p key={i} className="font-semibold text-sage-300">
               <span className="font-extrabold text-sand-100">{ap.decided_by_email}</span> chose <span className="font-extrabold">{ap.decision}</span>
-              {ap.tap_key_id && <> · Visa TAP {ap.verified ? "verified" : "not verified"} <span className="break-all text-sage-500">({ap.tap_key_id})</span></>}
+              {ap.tap_key_id && <> · Signature {ap.verified ? "verified" : "not verified"} <span className="break-all text-sage-500">({ap.tap_key_id})</span></>}
             </p>
           ))}
           {run.receipt && (

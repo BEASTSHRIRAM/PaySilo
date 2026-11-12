@@ -98,10 +98,10 @@ flowchart TD
         INTAKE["intake — Intake Agent (LLM)<br/>email/sheet → structured pay lines"]
         PRICE["price — Pricing Agent (code)<br/>fees BEFORE FX, per currency/method"]
         ASSESS["assess — Balance & Policy Agent (code)<br/>own wallet vs payroll + $149 fee + $1,000 reserve"]
-        APPR{{"approval — INTERRUPT<br/>Visa TAP-signed human approve / hold"}}
+        APPR{{"approval — INTERRUPT<br/>signed human approve / hold"}}
         ESC{{"escalate — INTERRUPT<br/>shortfall held for a human"}}
         REF["refused — policy refusal<br/>(unknown payee, missing bank details, no fee schedule)"]
-        EXEC["execute — FX & Payout Agent (tools)<br/>x-on-behalf-of, TAP-signed payouts, idempotent request_ids"]
+        EXEC["execute — FX & Payout Agent (tools)<br/>x-on-behalf-of, signature-verified payouts, idempotent request_ids"]
         FEE["fee — Fee Agent (tools)<br/>USD 149, only if the payroll ran"]
         REC["reconcile — Reconciliation Agent (code)<br/>ledger must match wallet and balance"]
         ATT["attest — Attestation Agent (tools)<br/>Metal: receipt hash anchored"]
@@ -128,9 +128,9 @@ flowchart TD
 | `intake` | **LLM** | Reads payroll sheets and emails into structured pay lines (Claude). Names are then matched against *this employer's own* contractor directory — a name that is not in the directory gets no bank details and cannot be paid. |
 | `price` | code | Prices salaries plus payout fees per currency and method (SWIFT EUR 12.85 per payout) *before* any FX conversion. Unknown currency rate or fee schedule is a refusal, never a guess. |
 | `assess` | code | Checks only this employer's wallet against payroll + the USD 149 run fee + the USD 1,000 reserve floor. If the full batch doesn't fit, pays the smallest lines it can (Kit 6 partial payout) and escalates the rest; routes to approval, escalation, or refusal. |
-| `approval` | human interrupt | Pauses the run. It resumes only with a Visa TAP signature over the exact run, employer, amounts, the lines to pay and (for a partial payout) the held lines; a missing, tampered or replayed signature rejects the approval and moves no money. |
+| `approval` | human interrupt | Pauses the run. It resumes only with a TAP-style signature (our internal approval-integrity mechanism) over the exact run, employer, amounts, the lines to pay and (for a partial payout) the held lines; a missing, tampered or replayed signature rejects the approval and moves no money. |
 | `escalate` | human interrupt | Holds a short payroll and surfaces the exact shortfall and the employer's options. A short payroll can only be held — there is no "approve anyway" path. |
-| `execute` | tools | Re-checks affordability against fresh balances, then converts and pays on the employer's behalf only (`x-on-behalf-of`), each payout TAP-signed and verified immediately before the transfer, every call carrying a deterministic idempotent `request_id`. |
+| `execute` | tools | Re-checks affordability against fresh balances, then converts and pays on the employer's behalf only (`x-on-behalf-of`), each payout signed and verified against the signed approval immediately before the transfer, every call carrying a deterministic idempotent `request_id`. |
 | `fee` | tools | Collects the USD 149 platform run fee — only from payrolls that actually ran. Held or refused runs are charged nothing. |
 | `reconcile` | code | Proves the double-entry ledger matches the wallet in every currency and the books balance; a mismatch refuses to close the run. |
 | `attest` | tools | Anchors a hash of the reconciliation receipt on the settlement chain (Metal). Hashes only — no raw financial data on chain. |
@@ -240,7 +240,7 @@ to the employer contact and the approvers. Run settled / payment failed notices 
 - **Tenant isolation is absolute.** Organisation and employer context
   come from the authenticated session, never from model input; every
   query and every money call is scoped to one employer's silo.
-- **Money moves only on a TAP-signed human approval.** The agent
+- **Money moves only on a cryptographically signed human approval.** The agent
   proposes, deterministic code decides, the API moves money. No tool —
   chat, intake, or otherwise — approves or transfers.
 - **Allow-listed beneficiaries only.** A pay line must resolve to a
@@ -270,7 +270,8 @@ approvals) — see `backend/tests/` and the intake eval in
 |---|---|---|
 | **Airwallex** | The money itself: connected accounts (create → update with EIN → submit → ACTIVE), wallets, FX, beneficiaries, SWIFT/LOCAL transfers, platform fee via `charges/create` — every employer-scoped call with `x-on-behalf-of` | `backend/app/airwallex/` |
 | **Claude (Anthropic)** | Reads payroll sheets/emails into pay lines (Intake Agent) and powers the Silo chat (tools + context). Never touches arithmetic or money decisions. Chat can also run on OpenAI / Groq / Meta via `LLM_PROVIDER` | `backend/app/agents/intake.py`, `backend/app/chat/` |
-| **Visa TAP** | Signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
+| **Visa VIC (via Airi)** | The Visa commerce integration: employer-funded benefits (courses, equipment) purchased by the agent with a VIC-tokenized credential obtained through Airi (Kit 9), inside a separate benefits budget that can never touch wage funds. Runs SIMULATED against the published Airwallex test card (US$200 per transaction) unless `VIC_MODE=live` with the real `airi-cli` signed in | `backend/app/partners/vic.py`, Benefits screen |
+| **TAP-style request signing** | PaySilo's *internal* approval-integrity mechanism (not a Visa product integration) — signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
 | **Metal** | Reconciliation receipt anchoring on Metal L2 testnet (`SettlementRegistry.sol`): hashes only, waits for the transaction receipt before claiming "anchored", hash chain continues across restarts. Offline mock chain until configured — always labelled `mock` | `backend/app/partners/metal.py`, `contracts/` |
 | **AWS Bedrock AgentCore** | Deployment runtime: the same graph wrapped as an AgentCore entrypoint | `backend/app/partners/agentcore.py`, `deploy/agentcore/` |
 | **LangGraph** | Agent orchestration: per-employer subgraphs, human-in-the-loop interrupts, durable checkpoints (SQLite / Postgres) | `backend/app/agents/` |
@@ -333,9 +334,10 @@ All keys go in `backend/.env` (gitignored — never commit it, never paste keys 
 | `JWT_SECRET` | sessions (required in live) | `python -c "import secrets;print(secrets.token_urlsafe(48))"` |
 | `AIRWALLEX_CLIENT_ID`, `AIRWALLEX_API_KEY` | real sandbox money movement | Airwallex sandbox web app → Developer → API keys. IP whitelist is optional (leave it empty for a dynamic IP or teammates on other networks). |
 | `AIRWALLEX_BASE_URL` | | `https://api.sandbox.airwallex.com/api/v1` (exactly one `=` after the key name) |
-| `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | Visa TAP signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
+| `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | TAP-style signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
 | `ANTHROPIC_API_KEY` | Claude intake + Silo chat | console.anthropic.com. Without it a deterministic fallback answers. |
 | `METAL_RPC_URL`, `METAL_PRIVATE_KEY`, `METAL_REGISTRY_ADDRESS`, `METAL_EXPLORER_URL` | optional: real Metal L2 anchoring | funded testnet wallet + `backend/scripts/deploy_settlement_registry.py` |
+| `VIC_MODE`, `AIRI_CLI_COMMAND`, `VIC_TEST_CARD`, `VIC_MERCHANT_COUNTRY` | optional: live Silo Benefits via the real Airi CLI | `VIC_MODE=simulated` (default) or `live`; `AIRI_CLI_COMMAND` is the shell-split CLI command (default `airi-cli`; WSL: `wsl -d Ubuntu-24.04 -- bash -lc 'airi-cli {args}'`) |
 | `BREVO_SMTP_USER`, `BREVO_SMTP_KEY`, `EMAIL_FROM`, `EMAIL_FROM_NAME`, `BREVO_SMTP_HOST`, `BREVO_SMTP_PORT`, `APP_BASE_URL` | optional: real email for funding reminders and approval requests | Brevo → SMTP & API → SMTP (host `smtp-relay.brevo.com`, port 587, STARTTLS); `EMAIL_FROM` must be a verified sender. Without them the notifications outbox only queues messages. `APP_BASE_URL` builds the links in emails. |
 | `FUNDING_REMINDERS` | background funding sweep + email delivery | `on` (default) or `off` |
 | `APP_ENV` | | `demo` (simulator + demo org) or `live` (real sandbox) |
@@ -346,6 +348,14 @@ Steps:
 2. Set the keys above and `APP_ENV=live`, restart the backend. On the first start against an existing database the backend adds any new columns automatically (`Schema migration: added …` in the log).
 3. Live mode does **not** seed or expose the demo account. Sign up your own organization at `/signup`, then **Add employer** — this creates and activates the employer's Airwallex connected account (with a sandbox placeholder EIN if none is given).
 4. Add contractors (IBAN + SWIFT for SWIFT payouts), **Add funds** (sandbox simulated deposit into that employer's wallet), wait about 3 minutes after activation (new accounts briefly reject FX with `unconfigured_client_fee`; the client retries), then **Run payroll → Approve & sign**.
+
+### Going live — Silo Benefits (Visa VIC via the Airi CLI)
+
+Benefits are SIMULATED until you turn on the real flow:
+
+1. `npm i -g @airwallex/airi-cli@beta`, then `airi-cli auth login` (open the URL, enter the code) and add an agent-enabled card at app.airi.com.
+2. Set `VIC_MODE=live` (and `AIRI_CLI_COMMAND` if the CLI is not plain `airi-cli` on the backend's PATH). `GET /benefits/status` and the Benefits banner report `VIC` only when the CLI is present **and** signed in, otherwise `VIC_UNAVAILABLE` — it never silently simulates.
+3. Purchases are two-phase. **Purchase** on an approved request creates an Airi *mandate* and shows an **Authorize this purchase in Airi** link; the human approves it in the browser. Then a human presses **Complete purchase**, which fetches the single-use credential to a private temp file (deleted right after) and reports `mandate result`. PaySilo never reads, stores or logs card data, and has no merchant checkout in this build: the result is `SUCCEEDED` only if the credential was obtained and the human ticked that the purchase happened, otherwise `CANCELLED`. The merchant must be entered as a website (e.g. `coursera.org`).
 
 Airwallex MCP servers are optional dev aids: the **docs** MCP needs no login; the **developer** MCP needs a sandbox login and is not available in some regions (e.g. India). Neither is used at runtime — the developer MCP can't send `x-on-behalf-of`, so all employer money movement goes through the REST client.
 

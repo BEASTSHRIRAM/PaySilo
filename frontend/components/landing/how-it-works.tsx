@@ -11,7 +11,7 @@ const STEPS = [
   { icon: ScanSearch, title: "Read", body: "The Intake Agent turns a messy payroll email into clean pay lines.", tag: "Claude" },
   { icon: Calculator, title: "Price fees first", body: "Salaries + EUR 12.85 SWIFT fees + the run fee, before a single cent is converted.", tag: "Code" },
   { icon: Banknote, title: "Check its own silo", body: "Only this employer's wallet is read. Short? It's held, never borrowed.", tag: "Code" },
-  { icon: Fingerprint, title: "Signed approval", body: "You approve the exact amounts. The decision is Visa TAP-signed and single-use.", tag: "Visa TAP" },
+  { icon: Fingerprint, title: "Signed approval", body: "You approve the exact amounts. The decision is cryptographically signed and single-use.", tag: "Signatures" },
   { icon: BadgeCheck, title: "Convert, pay, reconcile", body: "FX + payouts on the employer's behalf, then the books must balance to close.", tag: "Airwallex" },
   { icon: Link2, title: "Anchor the receipt", body: "A hash of the reconciliation receipt is anchored as tamper-proof evidence.", tag: "Metal" },
 ];

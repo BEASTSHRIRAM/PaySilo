@@ -2,7 +2,13 @@
 // this origin (Next proxies it), so the HttpOnly session cookie is first-party.
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public fields: Record<string, string> = {}) {
+  constructor(
+    public status: number,
+    message: string,
+    public fields: Record<string, string> = {},
+    /** Machine-readable code when the backend sent `detail: {code, message}` (e.g. a 409 policy refusal). */
+    public code: string | null = null,
+  ) {
     super(message);
   }
 }
@@ -13,7 +19,11 @@ function parseError(status: number, body: unknown): ApiError {
   const detail = (body as { detail?: unknown } | null)?.detail;
   if (typeof detail === "string") return new ApiError(status, detail);
   if (detail && typeof detail === "object" && !Array.isArray(detail)) {
-    const d = detail as { message?: string; needs_contractor?: { row_number: number; beneficiary_name?: string | null }[] };
+    // Structured refusal: {code, message} — keep the server message verbatim
+    // and expose the code so callers (e.g. Benefits) can branch on it.
+    const d = detail as { code?: unknown; message?: string; needs_contractor?: { row_number: number; beneficiary_name?: string | null }[] };
+    const code = typeof d.code === "string" && d.code ? d.code : null;
+    if (code) return new ApiError(status, typeof d.message === "string" && d.message ? d.message : code, {}, code);
     const names = (d.needs_contractor ?? []).map((r) => r.beneficiary_name || `row ${r.row_number}`).join(", ");
     if (d.message) return new ApiError(status, names ? `${d.message} Missing contractors: ${names}.` : d.message);
   }
@@ -540,6 +550,162 @@ export const v3Downloads = {
 // Pages in this lane import { api } for the pre-existing calls above and
 // { apiV3 } for the calls in this section; the two are kept as separate
 // objects so this section stays append-only for the cross-lane merge.
+
+// ==================================================================
+// VIC lane — Silo Benefits (employer-funded benefits bought via Visa
+// VIC / Airi). Appended as its own delimited section, like the v3
+// lanes above. All endpoints are org-scoped by the session cookie;
+// every money field is a decimal string; every id is a string.
+// Policy refusals arrive as HTTP 409 with body
+//   {detail: {code, message}}
+// which parseError() above surfaces as ApiError.message (verbatim) +
+// ApiError.code — see benefitError() in the Benefits page.
+// ==================================================================
+
+// ------------------------------------------------------------------ VIC types
+export type VicMode = "SIMULATED" | "VIC" | "VIC_UNAVAILABLE";
+
+/** GET /benefits/status — how benefit purchases will be executed right now. */
+export interface VicStatus {
+  mode: VicMode;
+  /** Masked credential reference (never a raw credential). */
+  credential_ref: string;
+  /** True when purchases run against the published Airwallex test card. */
+  test_card: boolean;
+  /** Per-transaction ceiling imposed by the credential, when known. */
+  tx_limit_usd: string | null;
+  cli_available: boolean;
+  /** `airi-cli auth whoami` reports a signed-in session (live mode only). */
+  authenticated: boolean;
+  /** Live purchases are two-phase: mandate, human authorizes in Airi, then Complete. */
+  two_phase: boolean;
+}
+
+/** One employer's benefits budget: GET /benefits/budgets[]. */
+export interface BenefitBudget {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit: string | null;
+  spent_this_period: string;
+  remaining: string;
+  period: string;
+  enabled: boolean;
+  /** True while payroll for this employer is held — wages come first. */
+  locked: boolean;
+  lock_reason: string | null;
+}
+
+export interface BenefitBudgetIn {
+  currency: string;
+  monthly_cap: string;
+  per_tx_limit: string | null;
+  enabled: boolean;
+}
+
+export type BenefitRequestStatus = "REQUESTED" | "APPROVED" | "DENIED" | "PURCHASED" | "FAILED";
+
+/** One purchase attempt against a benefit request: GET /benefits/purchases[]. */
+export interface BenefitPurchase {
+  id: string;
+  request_id: string;
+  employer_id: string;
+  attempt_no: number;
+  mode: "SIMULATED" | "VIC";
+  credential_ref: string;
+  provider_ref: string | null;
+  status: "SUCCEEDED" | "FAILED" | "PENDING";
+  /** Live Airi mandate (no card data is ever stored). */
+  provider_mandate_id: string | null;
+  approval_url: string | null;
+  mandate_status: string | null;
+  failure_code: string | null;
+  failure_detail: string | null;
+  amount: string;
+  currency: string;
+  journal_txn_id: number | null;
+  created_at: string;
+}
+
+/** One benefit request: GET /benefits/requests[]. */
+export interface BenefitRequest {
+  id: string;
+  employer_id: string;
+  employer_name: string;
+  contractor_id: string | null;
+  contractor_name: string;
+  merchant: string;
+  item: string;
+  amount: string;
+  currency: string;
+  status: BenefitRequestStatus;
+  requested_by_email: string;
+  decided_by_email: string | null;
+  decided_at: string | null;
+  deny_reason: string | null;
+  approval_expires_at: string | null;
+  approval_hash: string | null;
+  created_at: string;
+  latest_purchase: BenefitPurchase | null;
+}
+
+export interface BenefitRequestIn {
+  employer_id: string;
+  contractor_id?: string | null;
+  contractor_name?: string | null;
+  merchant: string;
+  item: string;
+  amount: string;
+  currency: string;
+}
+
+export interface BenefitDecisionIn {
+  decision: "approve" | "deny";
+  reason?: string;
+}
+
+export interface BenefitListParams {
+  employer_id?: string;
+  status?: string;
+}
+
+function benefitsQuery(params?: BenefitListParams): string {
+  const q = new URLSearchParams();
+  if (params?.employer_id) q.set("employer_id", params.employer_id);
+  if (params?.status) q.set("status", params.status);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+// ------------------------------------------------------------------ VIC calls
+export const apiBenefits = {
+  vicStatus: () => request<VicStatus>("/benefits/status"),
+  budgets: () => request<BenefitBudget[]>("/benefits/budgets"),
+  updateBudget: (employerId: string, body: BenefitBudgetIn) =>
+    request<BenefitBudget>(`/benefits/budgets/${encodeURIComponent(employerId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  requests: (params?: BenefitListParams) =>
+    request<BenefitRequest[]>(`/benefits/requests${benefitsQuery(params)}`),
+  createRequest: (body: BenefitRequestIn) => post<BenefitRequest>("/benefits/requests", body),
+  decide: (id: string, body: BenefitDecisionIn) =>
+    post<BenefitRequest>(`/benefits/requests/${encodeURIComponent(id)}/decision`, body),
+  /** Returns 200 even when the attempt FAILED — always inspect `.status`. */
+  purchase: (id: string) =>
+    post<BenefitPurchase>(`/benefits/requests/${encodeURIComponent(id)}/purchase`),
+  /** Phase B of a live purchase: an explicit human click. */
+  completePurchase: (id: string, purchaseConfirmed: boolean) =>
+    post<BenefitPurchase>(`/benefits/purchases/${encodeURIComponent(id)}/complete`, {
+      purchase_confirmed: purchaseConfirmed,
+    }),
+  cancelPurchase: (id: string) =>
+    post<BenefitPurchase>(`/benefits/purchases/${encodeURIComponent(id)}/cancel`),
+  purchases: (params?: BenefitListParams) =>
+    request<BenefitPurchase[]>(`/benefits/purchases${benefitsQuery(params)}`),
+};
 
 // ====================================================================== contractor trust (onboarding, tax, bank-change control)
 // Statuses and dates only - never tax ids, documents or full bank values.

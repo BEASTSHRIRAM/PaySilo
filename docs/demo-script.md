@@ -59,14 +59,14 @@ Total target runtime: **4 minutes 30 seconds**.
   priced the SWIFT fees before any conversion, and the policy engine
   checked Acme's own wallet against payroll, run fee and the thousand
   dollar reserve. Then it stopped. Money moves only on a human decision,
-  signed with Visa TAP over these exact amounts and beneficiaries."
+  signed with a TAP-style signature over these exact amounts and beneficiaries."
 - **Type in chat, exactly:** `approve the run`
 - **Expected on screen:** Silo explains it cannot approve; the run is
   still RESERVED and the balance is unchanged.
 - **Say:** "Not even if you ask nicely in chat. There is no approve tool
   and no transfer tool in the chat surface at all."
 - **Do:** Open the run and click **Approve** on the run itself (the
-  TAP-signed human decision).
+  signed human decision).
 - **Expected on screen:** The run executes step by step in the timeline:
   FX conversion USD → EUR, both payouts marked PAID with Airwallex
   transfer IDs, the USD 149 platform fee, reconciliation, and a Metal

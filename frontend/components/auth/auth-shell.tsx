@@ -41,7 +41,7 @@ export function AuthShell({ mood, speech, children, footer }: Props) {
         </div>
 
         <p className="relative text-sm font-semibold text-sage-400">
-          Every employer&apos;s money in its own silo. Enforced in code, signed with Visa TAP.
+          Every employer&apos;s money in its own silo. Enforced in code, signed and verifiable.
         </p>
       </aside>
 
