@@ -245,7 +245,7 @@ approvals) — see `backend/tests/` and the intake eval in
 |---|---|---|
 | **Airwallex** | The money itself: connected accounts (create → update with EIN → submit → ACTIVE), wallets, FX, beneficiaries, SWIFT/LOCAL transfers, platform fee via `charges/create` — every employer-scoped call with `x-on-behalf-of` | `backend/app/airwallex/` |
 | **Claude (Anthropic)** | Reads payroll sheets/emails into pay lines (Intake Agent) and powers the Silo chat (tools + context). Never touches arithmetic or money decisions. Chat can also run on OpenAI / Groq / Meta via `LLM_PROVIDER` | `backend/app/agents/intake.py`, `backend/app/chat/` |
-| **Visa VIC (via Airi)** | The Visa commerce integration: employer-funded benefits (courses, equipment) purchased by the agent with a VIC-tokenized credential obtained through Airi (Kit 9), inside a separate benefits budget that can never touch wage funds. Runs SIMULATED against the published Airwallex test card (US$200 per transaction) until `VIC_CREDENTIAL` is set | `backend/app/partners/vic.py`, Benefits screen |
+| **Visa VIC (via Airi)** | The Visa commerce integration: employer-funded benefits (courses, equipment) purchased by the agent with a VIC-tokenized credential obtained through Airi (Kit 9), inside a separate benefits budget that can never touch wage funds. Runs SIMULATED against the published Airwallex test card (US$200 per transaction) unless `VIC_MODE=live` with the real `airi-cli` signed in | `backend/app/partners/vic.py`, Benefits screen |
 | **TAP-style request signing** | PaySilo's *internal* approval-integrity mechanism (not a Visa product integration) — signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
 | **Metal** | Reconciliation receipt anchoring on Metal L2 testnet (`SettlementRegistry.sol`): hashes only, waits for the transaction receipt before claiming "anchored", hash chain continues across restarts. Offline mock chain until configured — always labelled `mock` | `backend/app/partners/metal.py`, `contracts/` |
 | **AWS Bedrock AgentCore** | Deployment runtime: the same graph wrapped as an AgentCore entrypoint | `backend/app/partners/agentcore.py`, `deploy/agentcore/` |
@@ -312,6 +312,7 @@ All keys go in `backend/.env` (gitignored — never commit it, never paste keys 
 | `TAP_PRIVATE_KEY`, `TAP_KEY_ID` | TAP-style signing (required in live) | `uv run python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"` and `TAP_KEY_ID=paysilo-agent-1`. Keep it stable — a new key can't verify old approvals. |
 | `ANTHROPIC_API_KEY` | Claude intake + Silo chat | console.anthropic.com. Without it a deterministic fallback answers. |
 | `METAL_RPC_URL`, `METAL_PRIVATE_KEY`, `METAL_REGISTRY_ADDRESS`, `METAL_EXPLORER_URL` | optional: real Metal L2 anchoring | funded testnet wallet + `backend/scripts/deploy_settlement_registry.py` |
+| `VIC_MODE`, `AIRI_CLI_COMMAND`, `VIC_TEST_CARD`, `VIC_MERCHANT_COUNTRY` | optional: live Silo Benefits via the real Airi CLI | `VIC_MODE=simulated` (default) or `live`; `AIRI_CLI_COMMAND` is the shell-split CLI command (default `airi-cli`; WSL: `wsl -d Ubuntu-24.04 -- bash -lc 'airi-cli {args}'`) |
 | `APP_ENV` | | `demo` (simulator + demo org) or `live` (real sandbox) |
 
 Steps:
@@ -320,6 +321,14 @@ Steps:
 2. Set the keys above and `APP_ENV=live`, restart the backend. On the first start against an existing database the backend adds any new columns automatically (`Schema migration: added …` in the log).
 3. Live mode does **not** seed or expose the demo account. Sign up your own organization at `/signup`, then **Add employer** — this creates and activates the employer's Airwallex connected account (with a sandbox placeholder EIN if none is given).
 4. Add contractors (IBAN + SWIFT for SWIFT payouts), **Add funds** (sandbox simulated deposit into that employer's wallet), wait about 3 minutes after activation (new accounts briefly reject FX with `unconfigured_client_fee`; the client retries), then **Run payroll → Approve & sign**.
+
+### Going live — Silo Benefits (Visa VIC via the Airi CLI)
+
+Benefits are SIMULATED until you turn on the real flow:
+
+1. `npm i -g @airwallex/airi-cli@beta`, then `airi-cli auth login` (open the URL, enter the code) and add an agent-enabled card at app.airi.com.
+2. Set `VIC_MODE=live` (and `AIRI_CLI_COMMAND` if the CLI is not plain `airi-cli` on the backend's PATH). `GET /benefits/status` and the Benefits banner report `VIC` only when the CLI is present **and** signed in, otherwise `VIC_UNAVAILABLE` — it never silently simulates.
+3. Purchases are two-phase. **Purchase** on an approved request creates an Airi *mandate* and shows an **Authorize this purchase in Airi** link; the human approves it in the browser. Then a human presses **Complete purchase**, which fetches the single-use credential to a private temp file (deleted right after) and reports `mandate result`. PaySilo never reads, stores or logs card data, and has no merchant checkout in this build: the result is `SUCCEEDED` only if the credential was obtained and the human ticked that the purchase happened, otherwise `CANCELLED`. The merchant must be entered as a website (e.g. `coursera.org`).
 
 Airwallex MCP servers are optional dev aids: the **docs** MCP needs no login; the **developer** MCP needs a sandbox login and is not available in some regions (e.g. India). Neither is used at runtime — the developer MCP can't send `x-on-behalf-of`, so all employer money movement goes through the REST client.
 

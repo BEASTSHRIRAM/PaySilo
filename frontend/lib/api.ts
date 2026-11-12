@@ -571,6 +571,10 @@ export interface VicStatus {
   /** Per-transaction ceiling imposed by the credential, when known. */
   tx_limit_usd: string | null;
   cli_available: boolean;
+  /** `airi-cli auth whoami` reports a signed-in session (live mode only). */
+  authenticated: boolean;
+  /** Live purchases are two-phase: mandate, human authorizes in Airi, then Complete. */
+  two_phase: boolean;
 }
 
 /** One employer's benefits budget: GET /benefits/budgets[]. */
@@ -608,7 +612,11 @@ export interface BenefitPurchase {
   mode: "SIMULATED" | "VIC";
   credential_ref: string;
   provider_ref: string | null;
-  status: "SUCCEEDED" | "FAILED";
+  status: "SUCCEEDED" | "FAILED" | "PENDING";
+  /** Live Airi mandate (no card data is ever stored). */
+  provider_mandate_id: string | null;
+  approval_url: string | null;
+  mandate_status: string | null;
   failure_code: string | null;
   failure_detail: string | null;
   amount: string;
@@ -684,6 +692,13 @@ export const apiBenefits = {
   /** Returns 200 even when the attempt FAILED — always inspect `.status`. */
   purchase: (id: string) =>
     post<BenefitPurchase>(`/benefits/requests/${encodeURIComponent(id)}/purchase`),
+  /** Phase B of a live purchase: an explicit human click. */
+  completePurchase: (id: string, purchaseConfirmed: boolean) =>
+    post<BenefitPurchase>(`/benefits/purchases/${encodeURIComponent(id)}/complete`, {
+      purchase_confirmed: purchaseConfirmed,
+    }),
+  cancelPurchase: (id: string) =>
+    post<BenefitPurchase>(`/benefits/purchases/${encodeURIComponent(id)}/cancel`),
   purchases: (params?: BenefitListParams) =>
     request<BenefitPurchase[]>(`/benefits/purchases${benefitsQuery(params)}`),
 };

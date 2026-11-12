@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Check, CreditCard, Gift, Lock, Pencil, RefreshCw, ShieldCheck,
+  Check, CreditCard, ExternalLink, Gift, Lock, Pencil, RefreshCw, ShieldCheck,
   ShoppingBag, TriangleAlert, X,
 } from "lucide-react";
 
@@ -95,9 +95,10 @@ function VicStatusBanner({ status }: { status: VicStatus }) {
             Purchases run in <span className="uppercase">Simulated</span> mode
           </p>
           <p className="text-sm text-sage-300">
-            No live Visa VIC credential is configured. Benefit purchases are simulated against the published
+            The live Airi connection is switched off. Benefit purchases are simulated against the published
             Airwallex test card (US$200.00 per transaction) — no real card is charged.
-            Set <span className="font-mono font-bold text-sand-100">VIC_CREDENTIAL</span> from Airi to go live.
+            Set <span className="font-mono font-bold text-sand-100">VIC_MODE=live</span> and sign in with{" "}
+            <span className="font-mono font-bold text-sand-100">airi-cli auth login</span> to go live.
           </p>
         </div>
         <Badge tone="warning" className="ml-auto h-fit shrink-0">Simulated</Badge>
@@ -111,10 +112,10 @@ function VicStatusBanner({ status }: { status: VicStatus }) {
         <div className="grid gap-1">
           <p className="font-extrabold text-sand-100">Live via Visa VIC (Airi)</p>
           <p className="text-sm text-sage-300">
-            Purchases are executed with credential{" "}
-            <span className="break-all font-mono font-bold text-sand-100">{status.credential_ref}</span>
-            {status.tx_limit_usd ? <> · per-transaction limit {formatMoney(status.tx_limit_usd, "USD")}</> : null}.
-            Real funds move when a purchase is confirmed.
+            Airi is connected and signed in
+            {status.tx_limit_usd ? <> · test card limit {formatMoney(status.tx_limit_usd, "USD")} per transaction</> : null}.
+            Each purchase creates an Airi mandate that you authorize in Airi, then you complete it here. PaySilo
+            never sees or stores card numbers.
           </p>
         </div>
         <Badge tone="sage" className="ml-auto h-fit shrink-0 border-sage-500 bg-sage-500 text-ink-900">Live</Badge>
@@ -125,11 +126,14 @@ function VicStatusBanner({ status }: { status: VicStatus }) {
     <div className="flex gap-3 rounded-3xl border-2 border-coral-600/60 bg-coral-500/10 px-5 py-4" role="alert">
       <TriangleAlert className="mt-0.5 size-6 shrink-0 text-coral-300" />
       <div className="grid gap-1">
-        <p className="font-extrabold text-coral-300">VIC credential configured, but the Airi CLI is unavailable</p>
+        <p className="font-extrabold text-coral-300">
+          {status.cli_available ? "Live mode is on, but Airi is not signed in" : "Live mode is on, but the Airi CLI was not found"}
+        </p>
         <p className="text-sm text-coral-300/90">
-          A credential is set (<span className="break-all font-mono font-bold">{status.credential_ref}</span>) but the
-          Airi CLI cannot be reached, so purchases are refused. They are never simulated silently while a live
-          credential is configured.
+          {status.cli_available
+            ? "Run airi-cli auth login on the server, then reload."
+            : "Install it with npm i -g @airwallex/airi-cli@beta (and check AIRI_CLI_COMMAND)."}{" "}
+          Purchases are refused until then. They are never simulated silently while live mode is on.
         </p>
       </div>
       <Badge tone="danger" className="ml-auto h-fit shrink-0">Unavailable</Badge>
@@ -232,7 +236,7 @@ function BudgetCard({
         </div>
         <p className="text-xs font-semibold text-sage-400">
           {effTx !== null
-            ? <>Effective per-purchase limit: <span className="font-display font-bold tabular-nums text-sand-100">{formatMoney(effTx.toFixed(2), effTxIsCred ? "USD" : budget.currency)}</span>{effTxIsCred ? " (set by the VIC credential)" : ""}</>
+            ? <>Effective per-purchase limit: <span className="font-display font-bold tabular-nums text-sand-100">{formatMoney(effTx.toFixed(2), effTxIsCred ? "USD" : budget.currency)}</span>{effTxIsCred ? " (test card limit)" : ""}</>
             : "No per-purchase limit set."}
           {budget.per_tx_limit ? <> Budget limit {formatMoney(budget.per_tx_limit, budget.currency)}.</> : null}
         </p>
@@ -309,6 +313,7 @@ export default function BenefitsPage() {
   const [confirmFor, setConfirmFor] = useState<BenefitRequest | null>(null);
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
   const [purchasing, setPurchasing] = useState(false);
+  const [confirmedIds, setConfirmedIds] = useState<Record<string, boolean>>({});
 
   // New-request form
   const [formEmployerId, setFormEmployerId] = useState("");
@@ -419,6 +424,10 @@ export default function BenefitsPage() {
           `${formatMoney(purchase.amount, purchase.currency)} in ${purchase.mode} mode.` +
           (purchase.journal_txn_id !== null ? ` Posted as Journal #${purchase.journal_txn_id}.` : ""),
         );
+      } else if (purchase.status === "PENDING") {
+        setNotice(
+          `Airi mandate created for ${confirmFor.item}. Open the authorization link on the request, approve it in Airi, then press Complete purchase.`,
+        );
       } else {
         setActionError(
           `Purchase attempt ${purchase.attempt_no} failed: ${purchase.failure_detail || purchase.failure_code || "The provider refused the purchase."}`,
@@ -431,6 +440,40 @@ export default function BenefitsPage() {
       setPurchaseError(benefitError(e));
     }
     setPurchasing(false);
+  }
+
+  async function completeLive(req: BenefitRequest, purchase: BenefitPurchase) {
+    setBusyId(req.id);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const done = await apiBenefits.completePurchase(purchase.id, confirmedIds[purchase.id] === true);
+      if (done.status === "SUCCEEDED") {
+        setNotice(`Purchase completed: ${req.item} at ${req.merchant}.`);
+      } else if (done.status === "PENDING") {
+        setNotice("Airi is still waiting for you to authorize this purchase. Open the authorization link, approve it, then try again.");
+      } else {
+        setActionError(done.failure_detail || done.failure_code || "The purchase did not complete.");
+      }
+      await Promise.all([loadCore(), loadRequests()]);
+    } catch (e) {
+      setActionError(benefitError(e));
+    }
+    setBusyId(null);
+  }
+
+  async function cancelLive(req: BenefitRequest, purchase: BenefitPurchase) {
+    setBusyId(req.id);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await apiBenefits.cancelPurchase(purchase.id);
+      setNotice("The Airi mandate was cancelled. You can start a new purchase.");
+      await Promise.all([loadCore(), loadRequests()]);
+    } catch (e) {
+      setActionError(benefitError(e));
+    }
+    setBusyId(null);
   }
 
   async function createRequest(e: React.FormEvent) {
@@ -661,7 +704,50 @@ export default function BenefitsPage() {
                   </div>
                 )}
 
-                {canDecide && req.status === "APPROVED" && (
+                {req.status === "APPROVED" && req.latest_purchase?.status === "PENDING" && (
+                  <div className="grid gap-3 rounded-2xl border-2 border-sand-400/50 bg-sand-300/10 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge tone="warning">Waiting for your authorization in Airi</Badge>
+                      <ModeBadge mode={req.latest_purchase.mode} />
+                    </div>
+                    {req.latest_purchase.approval_url && (
+                      <a
+                        href={req.latest_purchase.approval_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex w-fit items-center gap-2 font-extrabold text-sand-100 underline underline-offset-4"
+                      >
+                        <ExternalLink className="size-4" /> Authorize this purchase in Airi
+                      </a>
+                    )}
+                    {canDecide && (
+                      <>
+                        <label className="flex items-start gap-2 text-sm font-semibold text-sage-300">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5 size-4"
+                            checked={confirmedIds[req.latest_purchase.id] === true}
+                            onChange={(e) => {
+                              const id = req.latest_purchase!.id;
+                              setConfirmedIds((m) => ({ ...m, [id]: e.target.checked }));
+                            }}
+                          />
+                          <span>I completed this purchase with the merchant. PaySilo does not check out for you; if unticked, the mandate is reported as cancelled.</span>
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          <Button size="sm" onClick={() => void completeLive(req, req.latest_purchase!)} disabled={busyId === req.id}>
+                            <Check /> {busyId === req.id ? "Working…" : "Complete purchase"}
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => void cancelLive(req, req.latest_purchase!)} disabled={busyId === req.id}>
+                            <X /> Cancel mandate
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {canDecide && req.status === "APPROVED" && req.latest_purchase?.status !== "PENDING" && (
                   <div className="flex flex-wrap items-center gap-3">
                     <Button
                       size="sm"
@@ -672,7 +758,7 @@ export default function BenefitsPage() {
                     </Button>
                     {purchaseBlocked && (
                       <span className="text-sm font-bold text-coral-300">
-                        Purchases are refused while the VIC credential is unavailable.
+                        Purchases are refused while Airi is unavailable.
                       </span>
                     )}
                     {req.approval_expires_at && (
@@ -720,7 +806,7 @@ export default function BenefitsPage() {
             )}
             {status?.mode === "VIC" && (
               <p className="rounded-2xl border-2 border-sage-600/60 bg-sage-500/10 px-4 py-3 text-sm font-bold text-sage-300">
-                This purchase is live via Visa VIC and will charge the configured credential.
+                This starts a live Airi mandate. You then authorize it in Airi and complete the purchase here.
               </p>
             )}
             {purchaseError && (
@@ -755,7 +841,7 @@ export default function BenefitsPage() {
                     <th scope="col" className="px-3 py-3 font-extrabold">Item</th>
                     <th scope="col" className="px-3 py-3 text-right font-extrabold">Amount</th>
                     <th scope="col" className="px-3 py-3 font-extrabold">Mode</th>
-                    <th scope="col" className="px-3 py-3 font-extrabold">Credential</th>
+                    <th scope="col" className="px-3 py-3 font-extrabold">Payment method</th>
                     <th scope="col" className="px-3 py-3 font-extrabold">Provider ref</th>
                     <th scope="col" className="px-3 py-3 font-extrabold">Status</th>
                     <th scope="col" className="px-3 py-3 font-extrabold">Journal</th>
@@ -780,7 +866,7 @@ export default function BenefitsPage() {
                         <td className="max-w-40 break-all px-3 py-3 font-mono text-xs font-semibold text-sage-300">{p.credential_ref}</td>
                         <td className="max-w-40 break-all px-3 py-3 font-mono text-xs font-semibold text-sage-300">{p.provider_ref ?? "—"}</td>
                         <td className="px-3 py-3">
-                          <Badge tone={p.status === "SUCCEEDED" ? "success" : "danger"}>{p.status}</Badge>
+                          <Badge tone={p.status === "SUCCEEDED" ? "success" : p.status === "PENDING" ? "warning" : "danger"}>{p.mandate_status && p.status !== "SUCCEEDED" ? p.mandate_status.replaceAll("_", " ").toLowerCase() : p.status}</Badge>
                         </td>
                         <td className="px-3 py-3 font-semibold text-sage-300">
                           {p.journal_txn_id !== null ? `Journal #${p.journal_txn_id}` : "—"}
