@@ -412,9 +412,16 @@ Steps:
 
 Benefits are SIMULATED until you turn on the real flow:
 
-1. `npm i -g @airwallex/airi-cli@beta`, then `airi-cli auth login` (open the URL, enter the code) and add an agent-enabled card at app.airi.com.
+1. `npm i -g @airwallex/airi-cli@beta` (the backend Dockerfile installs the pinned `@airwallex/airi-cli@0.1.0-beta.4`, SHA256-verified), then sign in from the app: set `VIC_MODE=live`, open **Benefits** as an owner/admin and press **Connect Airi** (open the link, enter the code; the page connects by itself). `airi-cli auth login` on the server still works too. Add an agent-enabled card at app.airi.com.
 2. Set `VIC_MODE=live` (and `AIRI_CLI_COMMAND` if the CLI is not plain `airi-cli` on the backend's PATH). `GET /benefits/status` and the Benefits banner report `VIC` only when the CLI is present **and** signed in, otherwise `VIC_UNAVAILABLE` — it never silently simulates.
 3. Purchases are two-phase. **Purchase** on an approved request creates an Airi *mandate* and shows an **Authorize this purchase in Airi** link; the human approves it in the browser. Then a human presses **Complete purchase**, which fetches the single-use credential to a private temp file (deleted right after) and reports `mandate result`. PaySilo never reads, stores or logs card data, and has no merchant checkout in this build: the result is `SUCCEEDED` only if the credential was obtained and the human ticked that the purchase happened, otherwise `CANCELLED`. The merchant must be entered as a website (e.g. `coursera.org`).
+
+**Connect Airi (owner/admin only).** The banner on Benefits, Onboarding kits and Travel shows **Connect Airi** when live mode is on but the CLI is signed out. It calls `POST /benefits/airi/connect` (runs `airi-cli auth login --client-name PaySilo`, returns the link + code), then the browser polls `POST /benefits/airi/poll` every ~3 s (each call waits at most 8 s). `GET /benefits/airi/status` and `POST /benefits/airi/disconnect` (runs `auth logout`) complete the set. Only https links on `airi.com` / `airwallex.com` are ever shown; the code is never logged or audited (the audit log line records org + user + outcome); connect is limited to 5 per 10 minutes per organisation; in simulated mode these routes answer 409. A chip shows the session expiry and warns under 15 minutes.
+
+Cloud deployment notes:
+- **One Airi account per server.** The CLI holds a single session, so every organisation on that server shares it. Connecting or disconnecting affects all of them.
+- **Persist the CLI session.** It lives under `$HOME` of the runtime user (the Dockerfile sets `HOME=/home/paysilo` and declares it a `VOLUME`; mount a persistent disk there). The exact subdirectory is not documented and was not verified, so the whole home directory is persisted. Without it you must press Connect Airi after each redeploy.
+- Run a single backend replica (the in-flight login and the CLI session are per process/host). AWS Bedrock AgentCore and other stateless/ephemeral runtimes are not suitable for live VIC: there is no persistent disk for the session.
 
 Airwallex MCP servers are optional dev aids: the **docs** MCP needs no login; the **developer** MCP needs a sandbox login and is not available in some regions (e.g. India). Neither is used at runtime — the developer MCP can't send `x-on-behalf-of`, so all employer money movement goes through the REST client.
 
