@@ -178,13 +178,26 @@ CREATE TABLE contractors (
 	default_amount NUMERIC(19, 2), 
 	airwallex_beneficiary_id VARCHAR(64), 
 	is_active BOOLEAN NOT NULL, 
+	tax_status VARCHAR(10) DEFAULT 'UNKNOWN' NOT NULL, 
+	tax_form_type VARCHAR(8) DEFAULT 'NONE' NOT NULL, 
+	tax_form_status VARCHAR(10) DEFAULT 'MISSING' NOT NULL, 
+	tax_form_received_at DATE, 
+	tax_form_expires_at DATE, 
+	bank_verification_status VARCHAR(24) DEFAULT 'VERIFIED' NOT NULL, 
+	bank_details_changed_at TIMESTAMP WITH TIME ZONE, 
+	bank_change_requested_by_id UUID, 
+	bank_verified_by_id UUID, 
+	bank_verified_at TIMESTAMP WITH TIME ZONE, 
+	onboarded_at TIMESTAMP WITH TIME ZONE, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	CONSTRAINT ck_contractor_method CHECK (payout_method IN ('SWIFT', 'LOCAL')), 
 	CONSTRAINT ck_contractor_bank_details CHECK (iban IS NOT NULL OR account_number IS NOT NULL), 
 	CONSTRAINT ck_contractor_amount_positive CHECK (default_amount IS NULL OR default_amount > 0), 
 	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
-	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(bank_change_requested_by_id) REFERENCES users (id) ON DELETE SET NULL, 
+	FOREIGN KEY(bank_verified_by_id) REFERENCES users (id) ON DELETE SET NULL
 );
 CREATE INDEX ix_contractors_employer_id ON contractors (employer_id);
 CREATE INDEX ix_contractors_organization_id ON contractors (organization_id);
@@ -313,6 +326,46 @@ CREATE TABLE benefit_requests (
 CREATE INDEX ix_benefit_requests_employer_id ON benefit_requests (employer_id);
 CREATE INDEX ix_benefit_requests_org_employer ON benefit_requests (organization_id, employer_id);
 CREATE INDEX ix_benefit_requests_organization_id ON benefit_requests (organization_id);
+
+CREATE TABLE contractor_changes (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	contractor_id UUID NOT NULL, 
+	change_group VARCHAR(12) NOT NULL, 
+	summary TEXT NOT NULL, 
+	changed_by_id UUID, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_contractor_change_group CHECK (change_group IN ('bank', 'profile', 'tax', 'onboarding')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(contractor_id) REFERENCES contractors (id) ON DELETE CASCADE, 
+	FOREIGN KEY(changed_by_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_contractor_changes_contractor ON contractor_changes (contractor_id, created_at);
+CREATE INDEX ix_contractor_changes_organization_id ON contractor_changes (organization_id);
+
+CREATE TABLE contractor_onboarding_invites (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID NOT NULL, 
+	contractor_id UUID NOT NULL, 
+	email VARCHAR(254), 
+	token_hash VARCHAR(64) NOT NULL, 
+	status VARCHAR(16) NOT NULL, 
+	expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	created_by_id UUID, 
+	accepted_at TIMESTAMP WITH TIME ZONE, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT ck_onboarding_invite_status CHECK (status IN ('PENDING', 'ACCEPTED', 'REVOKED')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE CASCADE, 
+	FOREIGN KEY(contractor_id) REFERENCES contractors (id) ON DELETE CASCADE, 
+	UNIQUE (token_hash), 
+	FOREIGN KEY(created_by_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_contractor_onboarding_invites_contractor_id ON contractor_onboarding_invites (contractor_id);
+CREATE INDEX ix_contractor_onboarding_invites_organization_id ON contractor_onboarding_invites (organization_id);
 
 CREATE TABLE ledger_transactions (
 	id BIGSERIAL NOT NULL, 
@@ -518,6 +571,8 @@ ALTER TABLE "agent_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "airwallex_requests" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "approvals" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "benefit_requests" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "contractor_changes" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "contractor_onboarding_invites" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_transactions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;

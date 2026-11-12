@@ -8,12 +8,15 @@ balances exist as real ledger entries (never typed in).
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..db.models import BenefitBudget, BenefitRequest, Contractor, Employer, Membership, Organization, User
+from ..db.models import (
+    BenefitBudget, BenefitRequest, Contractor, ContractorChange, Employer, Membership, Organization, User,
+)
 from ..security import hash_password
 from .benefits import BenefitError, create_request, current_period, decide_request, execute_purchase
 from .runtime import PlatformRuntime
@@ -68,6 +71,41 @@ DEMO_EMPLOYERS: list[dict] = [
 ]
 
 
+def _seed_contractor_trust(s: Session, org: Organization, user: User) -> None:
+    """Varied tax / verification states so the compliance page has something to show.
+
+    Only contractors still at the defaults (tax status UNKNOWN) are touched, so edits survive restarts.
+    No payroll runs are seeded (existing tests assert a fresh org has none): the 1099 watch lights up
+    after real payments to a US-person contractor reach the configured threshold.
+    """
+    today = datetime.now(UTC).date()
+    specs = {
+        "Sam Lee": dict(tax_status="US_PERSON", tax_form_type="W9", tax_form_status="RECEIVED",
+                        tax_form_received_at=today - timedelta(days=200)),
+        "Lena Fischer": dict(tax_status="NON_US", tax_form_type="W8BEN", tax_form_status="RECEIVED",
+                             tax_form_received_at=today - timedelta(days=120),
+                             tax_form_expires_at=today + timedelta(days=365 * 3 - 120)),
+        "Noor van Dijk": dict(tax_status="NON_US", tax_form_type="W8BEN", tax_form_status="RECEIVED",
+                              tax_form_received_at=today - timedelta(days=1065),
+                              tax_form_expires_at=today + timedelta(days=30)),  # expiring soon
+        "Tomas Rivera": dict(tax_status="NON_US"),  # form still missing
+        "Pieter Jansen": dict(tax_status="NON_US", tax_form_type="W8BEN", tax_form_status="RECEIVED",
+                              tax_form_received_at=today - timedelta(days=90),
+                              tax_form_expires_at=today + timedelta(days=365 * 3 - 90),
+                              bank_verification_status="PENDING_VERIFICATION"),  # bank change awaiting a second person
+    }
+    for c in s.scalars(select(Contractor).where(Contractor.organization_id == org.id,
+                                                Contractor.full_name.in_(list(specs)))):
+        if c.tax_status != "UNKNOWN":
+            continue
+        for key, value in specs[c.full_name].items():
+            setattr(c, key, value)
+        if c.bank_verification_status == "PENDING_VERIFICATION":
+            c.bank_details_changed_at = datetime.now(UTC) - timedelta(hours=5)
+            s.add(ContractorChange(organization_id=org.id, contractor_id=c.id, change_group="bank",
+                                   summary="Bank details submitted for verification (demo data)", changed_by_id=None))
+
+
 def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
     org = s.scalar(select(Organization).where(Organization.slug == DEMO_ORG_SLUG))
     if org is None:
@@ -101,6 +139,8 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
             runtime.fund(s, emp, spec["funding_usd"], reference="seed")
         logger.info("Seeded demo employer %s", emp.name)
 
+    s.flush()
+    _seed_contractor_trust(s, org, user)
     _seed_benefits(s, runtime, org, user)
     s.commit()
     return org

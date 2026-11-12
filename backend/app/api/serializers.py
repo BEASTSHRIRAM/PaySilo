@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Contractor, Employer, PayrollRun, SettlementReceipt
 from ..money import money_str
 from ..services.benefits import budget_lock
+from ..services.contractor_trust import effective_tax_form_status
 from ..services.runtime import PlatformRuntime
 from .schemas import (
     ApprovalOut,
@@ -35,6 +36,12 @@ def contractor_out(c: Contractor) -> ContractorOut:
         payout_method=c.payout_method, iban_last4=_last4(c.iban), account_last4=_last4(c.account_number),
         swift_code=c.swift_code, default_amount=money_str(c.default_amount) if c.default_amount else None,
         is_active=c.is_active,
+        tax_status=c.tax_status, tax_form_type=c.tax_form_type,
+        tax_form_status=effective_tax_form_status(c),
+        tax_form_received_at=c.tax_form_received_at, tax_form_expires_at=c.tax_form_expires_at,
+        bank_verification_status=c.bank_verification_status, bank_details_changed_at=c.bank_details_changed_at,
+        bank_change_requested_by_id=c.bank_change_requested_by_id, bank_verified_at=c.bank_verified_at,
+        onboarded_at=c.onboarded_at,
     )
 
 

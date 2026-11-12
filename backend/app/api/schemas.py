@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
@@ -205,6 +205,17 @@ class ContractorOut(BaseModel):
     swift_code: str | None
     default_amount: str | None
     is_active: bool
+    # contractor trust (status/dates only - never tax ids, never full bank values)
+    tax_status: str = "UNKNOWN"
+    tax_form_type: str = "NONE"
+    tax_form_status: str = "MISSING"  # MISSING|RECEIVED|EXPIRED (EXPIRED computed on read)
+    tax_form_received_at: date | None = None
+    tax_form_expires_at: date | None = None
+    bank_verification_status: str = "VERIFIED"
+    bank_details_changed_at: datetime | None = None
+    bank_change_requested_by_id: uuid.UUID | None = None
+    bank_verified_at: datetime | None = None
+    onboarded_at: datetime | None = None
 
 
 class EmployerOut(BaseModel):

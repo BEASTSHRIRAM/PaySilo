@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -81,6 +82,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cors_origins: list[str] = ["http://localhost:3000"]
     seed_demo: bool = True
+    # 1099-NEC watch: US-person contractors whose calendar-year-to-date payments reach this many USD.
+    # USD 2,000 applies to payments made after 2025-12-31 (vendor sources) - confirm with your tax advisor.
+    tax_1099_threshold_usd: Decimal = Decimal("2000")
 
     # Visa TAP signing key. TAP_PRIVATE_KEY accepts PEM text or base64
     # (base64-encoded PEM, or a base64 raw 32-byte Ed25519 seed). When set,

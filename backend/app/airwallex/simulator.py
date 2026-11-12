@@ -209,6 +209,27 @@ class AirwallexSimulator:
 
         return self._once(request_id, _create)
 
+    def validate_beneficiary(self, *, on_behalf_of: str, name: str = "", currency: str = "EUR",
+                             country_code: str = "DE", method: str = "SWIFT", iban: str = "",
+                             swift_code: str = "", account_number: str = "", routing_code: str = "",
+                             **_: str) -> dict:
+        """Validate-only: valid unless the IBAN / account / routing number is obviously malformed."""
+        errors: list[str] = []
+        if iban and not (15 <= len(iban) <= 34 and iban[:2].isalpha() and iban[2:4].isdigit()
+                         and iban.isalnum()):
+            errors.append("beneficiary.bank_details.iban")
+        if account_number and not (4 <= len(account_number) <= 34 and account_number.isalnum()):
+            errors.append("beneficiary.bank_details.account_number")
+        if routing_code and not routing_code.replace("-", "").isalnum():
+            errors.append("beneficiary.bank_details.account_routing_value1")
+        if currency == "USD" and routing_code and not (routing_code.isdigit() and len(routing_code) == 9):
+            errors.append("beneficiary.bank_details.account_routing_value1")
+        if swift_code and not (len(swift_code) in (8, 11) and swift_code.isalnum()):
+            errors.append("beneficiary.bank_details.swift_code")
+        if not (iban or account_number):
+            errors.append("beneficiary.bank_details.account_number")
+        return {"valid": not errors, "errors": sorted(set(errors))}
+
     def create_transfer(self, *, request_id: str, on_behalf_of: str, beneficiary_id: str,
                         amount: object, currency: str = "EUR", method: str = "SWIFT") -> dict:
         amount = round_money(to_decimal(amount))
