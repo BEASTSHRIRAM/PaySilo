@@ -124,7 +124,7 @@ function RegistryField({ field, value, error, onChange }: { field: ConfigFieldDe
 function PaletteItem({ def, onAdd, onDragStart }: { def: WorkflowNodeDef; onAdd: () => void; onDragStart?: (e: React.DragEvent) => void }) {
   return (
     <button type="button" draggable={!!onDragStart} onDragStart={onDragStart} onClick={onAdd}
-      className="grid gap-0.5 rounded-xl border-2 border-ink-600 bg-ink-900/60 px-3 py-2 text-left transition-colors hover:border-sage-500 hover:bg-ink-800"
+      className="grid w-full min-w-0 gap-0.5 rounded-xl border-2 border-ink-600 bg-ink-900/60 px-3 py-2 text-left transition-colors hover:border-sage-500 hover:bg-ink-800"
       title={`${def.label}: ${def.description}`}>
       <span className="flex items-center gap-2">
         <span className={cn("inline-flex rounded-full px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-wide", kindChipClass(def.kind))}>{kindLabel(def.kind)}</span>
@@ -144,6 +144,7 @@ function EditorInner() {
   const reactFlow = useReactFlow();
   const isLg = useMedia("(min-width: 1024px)");
   const isXl = useMedia("(min-width: 1280px)");
+  const is2xl = useMedia("(min-width: 1536px)");
 
   const [detail, setDetail] = useState<WorkflowDetail | null>(null);
   const [name, setName] = useState("");
@@ -172,6 +173,8 @@ function EditorInner() {
   const [picker, setPicker] = useState<PickerState | null>(null);
   const [lastStepsByNode, setLastStepsByNode] = useState<Record<string, WorkflowRunStep>>({});
 
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const nodesRef = useRef<RFNode[]>([]);
   const connectStart = useRef<OnConnectStartParams | null>(null);
   const connectMade = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -218,18 +221,34 @@ function EditorInner() {
   useEffect(() => {
     api.overview().then((o) => setEmployers(o.employers.map((e) => ({ id: e.id, name: e.name })))).catch(() => undefined);
   }, []);
+  /** Fit the graph, but never smaller than a readable zoom: a wide flow is anchored at its trigger (left) and panned. */
+  const fitReadable = useCallback((list: RFNode[]) => {
+    const el = canvasRef.current;
+    if (!el || list.length === 0) return;
+    const minX = Math.min(...list.map((n) => n.position.x)), minY = Math.min(...list.map((n) => n.position.y));
+    const maxX = Math.max(...list.map((n) => n.position.x + 240)), maxY = Math.max(...list.map((n) => n.position.y + 150));
+    const w = maxX - minX + 100, h = maxY - minY + 100;
+    const fit = Math.min(1, el.clientWidth / w, el.clientHeight / h);
+    const zoom = Math.max(fit, 0.6);
+    const x = fit >= 0.6 ? (el.clientWidth - (maxX - minX) * zoom) / 2 - minX * zoom : 40 - minX * zoom;
+    const y = fit >= 0.6 ? (el.clientHeight - (maxY - minY) * zoom) / 2 - minY * zoom : 50 - minY * zoom;
+    reactFlow.setViewport({ x, y, zoom }, { duration: 250 });
+  }, [reactFlow]);
   useEffect(() => {
-    if (!loading && nodes.length > 0) { const t = setTimeout(() => reactFlow.fitView({ padding: 0.2, maxZoom: 1 }), 60); return () => clearTimeout(t); }
+    if (!loading && nodes.length > 0) { const t = setTimeout(() => fitReadable(nodes), 120); return () => clearTimeout(t); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, detail?.id]);
 
+  // Stable identity: a new nodeTypes object remounts every node (and React Flow would re-measure in a loop).
+  const unknownTypesKey = nodes.filter((n) => n.type && !isKnownNodeType(n.type)).map((n) => n.type).sort().join("|");
   const nodeTypes = useMemo(() => {
     const extra: Record<string, typeof WorkflowNode> = {};
-    for (const n of nodes) if (n.type && !isKnownNodeType(n.type)) extra[n.type] = WorkflowNode;
+    for (const t of unknownTypesKey.split("|")) if (t) extra[t] = WorkflowNode;
     return { ...baseNodeTypes, ...extra };
-  }, [nodes]);
+  }, [unknownTypesKey]);
 
   // Derived display data: which outputs are connected (hides their "+") and the scoped employer's name.
+  nodesRef.current = nodes;
   const displayNodes = useMemo(() => {
     const out = new Map<string, string[]>();
     for (const e of edges) {
@@ -394,7 +413,7 @@ function EditorInner() {
   function tidyLayout() {
     const pos = layoutPositions(flowToGraph(nodes, edges));
     setNodes((cur) => cur.map((n) => ({ ...n, position: pos[n.id] ?? n.position })));
-    setTimeout(() => reactFlow.fitView({ padding: 0.2, maxZoom: 1, duration: 300 }), 50);
+    setTimeout(() => fitReadable(nodes.map((n) => ({ ...n, position: pos[n.id] ?? n.position }))), 60);
   }
 
   function importEnvelope(env: WorkflowEnvelope) {
@@ -404,7 +423,7 @@ function EditorInner() {
     setSelectedNodeId(null); setSelectedEdgeId(null); setSheetInspector(false); setJsonOpen(false);
     setSaveErrors([]);
     setNotice("Imported into the canvas. It is NOT saved yet: review it, then press Save (Reload discards it).");
-    setTimeout(() => reactFlow.fitView({ padding: 0.2, maxZoom: 1, duration: 300 }), 80);
+    setTimeout(() => fitReadable(n), 100);
   }
 
   const save = useCallback(async () => {
@@ -469,14 +488,14 @@ function EditorInner() {
         <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-sage-400" />
         <Input value={paletteQuery} onChange={(e) => setPaletteQuery(e.target.value)} placeholder="Search steps" aria-label="Search palette" className="h-10 pl-9" />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto pr-1" data-testid="palette-scroll">
-        <div className="grid gap-3 pb-2">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1" data-testid="palette-scroll">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-3 pb-2">
           {PALETTE_GROUPS.map((group) => {
             const defs = paletteDefs.filter((d) => d.group === group);
             if (defs.length === 0) return null;
             const collapsed = !!collapsedGroups[group];
             return (
-              <div key={group} className="grid gap-1.5">
+              <div key={group} className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5">
                 <button type="button" onClick={() => setCollapsedGroups((c) => ({ ...c, [group]: !c[group] }))} aria-expanded={!collapsed} className="flex items-center justify-between text-left">
                   <span className="text-[11px] font-extrabold uppercase tracking-widest text-sage-500">{GROUP_LABELS[group]}</span>
                   <ChevronDown className={cn("size-4 text-sage-400 transition-transform", collapsed && "-rotate-90")} />
@@ -557,11 +576,13 @@ function EditorInner() {
   );
 
   const inspectorOpenOnSheet = !isXl && sheetInspector && (selectedNode || selectedEdge);
+  // The inspector is its own column whenever something is selected (the canvas gets the full width otherwise).
+  const inspectorColumn = isXl && !!(selectedNode || selectedEdge);
 
   return (
     <div>
       {session ? <AppBar session={session} /> : <div className="h-6" />}
-      <div className="mx-auto flex h-[calc(100dvh-14.5rem)] min-h-[420px] max-w-[1600px] flex-col gap-2.5 px-3 sm:px-5 lg:h-[calc(100dvh-8.5rem)]" data-testid="editor-shell">
+      <div className="mx-auto flex h-[calc(100dvh-15rem)] min-h-[420px] max-w-[1600px] flex-col gap-2.5 px-3 pt-2 sm:px-5 lg:h-[calc(100dvh-9rem)]" data-testid="editor-shell">
         {/* ---- compact header row */}
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <Link href="/dashboard/workflows" aria-label="Back to workflows" title="Workflows" className="grid size-10 shrink-0 place-items-center rounded-xl text-sage-300 hover:bg-ink-700 hover:text-sand-100"><ArrowLeft className="size-5" /></Link>
@@ -595,7 +616,7 @@ function EditorInner() {
         {error && <SectionError message={error} onRetry={() => void load()} />}
 
         {detail && !loading && (
-          <div className="grid min-h-0 flex-1 gap-2.5 lg:grid-cols-[250px_minmax(0,1fr)] xl:grid-cols-[250px_minmax(0,1fr)_320px]">
+          <div className={cn("grid min-h-0 flex-1 gap-2.5 lg:grid-cols-[240px_minmax(0,1fr)]", inspectorColumn && "xl:grid-cols-[240px_minmax(0,1fr)_320px]")}>
             {/* ---- palette column (lg+) */}
             {isLg && (
               <Card className="flex min-h-0 flex-col gap-2.5 p-3" data-testid="palette">
@@ -606,7 +627,7 @@ function EditorInner() {
 
             {/* ---- canvas */}
             <Card className="relative min-h-0 overflow-hidden p-0">
-              <div className="paysilo-flow relative h-full w-full" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }} onDrop={onDrop} data-testid="workflow-canvas">
+              <div ref={canvasRef} className="paysilo-flow relative h-full w-full" onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }} onDrop={onDrop} data-testid="workflow-canvas">
                 <ReactFlow
                   nodes={displayNodes} edges={edges} nodeTypes={nodeTypes}
                   onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
@@ -617,12 +638,12 @@ function EditorInner() {
                   onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); setSheetInspector(false); }}
                   deleteKeyCode={["Delete", "Backspace"]}
                   snapToGrid snapGrid={[20, 20]}
-                  fitView fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
-                  minZoom={0.3}
+                  minZoom={0.25}
+                  onInit={() => setTimeout(() => fitReadable(nodesRef.current), 80)}
                 >
                   <Background variant={BackgroundVariant.Dots} gap={20} size={1.6} color="#D9B98A" />
                   <Controls showInteractive={false} position="bottom-left" />
-                  {isLg && <MiniMap position="bottom-right" nodeColor={(n) => kindMiniMapColor(nodeDef(n.type ?? "").kind)} maskColor="rgba(251,233,208,0.6)" pannable zoomable />}
+                  {is2xl && <MiniMap position="bottom-right" style={{ width: 150, height: 96 }} nodeColor={(n) => kindMiniMapColor(nodeDef(n.type ?? "").kind)} maskColor="rgba(251,233,208,0.6)" pannable zoomable />}
                 </ReactFlow>
 
                 {toast && (
@@ -657,7 +678,7 @@ function EditorInner() {
             </Card>
 
             {/* ---- inspector column (xl+) */}
-            {isXl && (
+            {inspectorColumn && (
               <Card className="min-h-0 overflow-y-auto p-4" data-testid="inspector" aria-label="Step configuration">
                 <p className="mb-3 text-sm font-extrabold text-sand-100">Configuration</p>
                 {inspectorBody}

@@ -183,7 +183,7 @@ export default function CalendarPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {canCreateSchedule && employers.length > 0 && (
-              <Button size="sm" onClick={() => setScheduleOpen(true)}><CalendarClock /> Create payroll schedule</Button>
+              <Button size="sm" className="w-full sm:w-auto" onClick={() => setScheduleOpen(true)}><CalendarClock /> Create payroll schedule</Button>
             )}
             <Button variant="outline" size="sm" onClick={() => shiftMonth(-1)} aria-label="Previous month">
               <ChevronLeft />
@@ -239,14 +239,14 @@ export default function CalendarPage() {
               ))}
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-[1fr_22rem] lg:items-start">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
               <Card className="overflow-hidden">
-                <div className="grid grid-cols-7 bg-ink-900/70 text-center text-xs font-extrabold uppercase tracking-widest text-sage-500">
+                <div className="grid grid-cols-[repeat(7,minmax(0,1fr))] bg-ink-900/70 text-center text-xs font-extrabold uppercase tracking-widest text-sage-500">
                   {WEEKDAYS.map((d) => (
                     <div key={d} className="py-3">{d}</div>
                   ))}
                 </div>
-                <div className="grid grid-cols-7">
+                <div className="grid grid-cols-[repeat(7,minmax(0,1fr))]">
                   {grid.map((day) => {
                     const iso = isoOf(day);
                     const inMonth = day.getMonth() === cursor.getMonth();
@@ -261,7 +261,7 @@ export default function CalendarPage() {
                         aria-pressed={isSelected}
                         aria-label={`${day.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}${dayEvents.length ? `, ${dayEvents.length} event${dayEvents.length === 1 ? "" : "s"}` : ""}`}
                         className={cn(
-                          "min-h-24 border border-ink-800/70 p-1.5 text-left align-top transition-colors sm:min-h-28 sm:p-2",
+                          "min-h-24 min-w-0 overflow-hidden border border-ink-800/70 p-1.5 text-left align-top transition-colors sm:min-h-28 sm:p-2",
                           inMonth ? "bg-ink-850/40" : "bg-ink-950/50",
                           isSelected ? "bg-ink-800 ring-2 ring-inset ring-coral-500" : "hover:bg-ink-800/70",
                         )}
@@ -277,7 +277,7 @@ export default function CalendarPage() {
                             <Link key={`${o.workflow_id}-${o.date}`} href={`/dashboard/workflows/${o.workflow_id}`}
                                   onClick={(e) => e.stopPropagation()}
                                   title={`Scheduled workflow: ${o.workflow_name} at ${o.time} ${o.timezone}`}
-                                  className="flex items-center gap-1 truncate rounded-md border border-sage-500/60 bg-sage-500/15 px-1.5 py-0.5 text-[11px] font-bold leading-tight text-sage-300 hover:bg-sage-500/30">
+                                  className="flex min-w-0 items-center gap-1 truncate rounded-md border border-sage-500/60 bg-sage-500/15 px-1.5 py-0.5 text-[11px] font-bold leading-tight text-sage-300 hover:bg-sage-500/30">
                               <CalendarClock className="size-3 shrink-0" />
                               <span className="truncate">{o.employer_name ?? o.workflow_name} {o.time}</span>
                             </Link>

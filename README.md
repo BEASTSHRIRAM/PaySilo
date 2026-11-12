@@ -253,6 +253,22 @@ decision endpoints (run decision, kit decision, trip decision). Every workflow q
 organization. The **Morning brief** (`/dashboard/workflows/brief`) shows, per employer, what is needed, what the
 wallet holds, the shortfall and who will be paid versus held; approving goes through the normal run decision.
 
+**Builder (v2).** The canvas flows left to right (input on a step's left edge, output on its right; conditions have
+Yes / No outputs), drag a step's right circle to the next step's left circle to connect, click a line and press
+Delete to remove it. Invalid connections (trigger to trigger, a second trigger, loops, duplicates) show a short
+toast that says what to do instead, and the server enforces the same rules on save. The editor fits the viewport
+(palette | canvas | inspector, bottom sheets on phones). **JSON** drawer: copy, download, paste or upload; import is
+validated by the server and only replaces the canvas, nothing is saved until Save. **Schedule trigger**: one
+employer, monthly (day 1-31 / last day) / weekly / once, time + timezone (default Asia/Kolkata), weekend rule, and a
+server-computed "next 3 runs". **Create payroll schedule** (employer page and calendar) builds *Schedule -> Prepare
+payroll run -> email approvers -> Wait for approval* for one employer and enables it only after an explicit confirm;
+scheduled occurrences show as read-only chips on the calendar. The schedule tick is idempotent (one run per
+occurrence), catches up at most one missed occurrence within 24 hours and never fires across organisations.
+**Build with Silo** asks the chat agent to draft a workflow: validated by the same rules (2 retries with the
+validator's errors), saved **disabled** and flagged for a human to review; the agent cannot enable, run, approve or
+delete anything. Without a model key only "monthly payroll for <employer> on day N" and the standard templates can
+be drafted. See `backend/docs/workflows.md`.
+
 ### Risk rules (the risk gate, code-decided)
 
 A new `risk` node runs before pricing. It holds (never pays) lines that trip a deterministic rule; the held
