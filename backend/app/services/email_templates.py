@@ -86,3 +86,19 @@ def invite(org: str, inviter: str, role: str, url: str) -> tuple[str, str, str]:
     text = (f"Hello,\n\n{inviter} invited you to join {org} on PaySilo as {role}.\n\nAccept the invitation "
             f"here (the link works once and expires):\n{url}\n\nThank you,\nPaySilo")
     return f"You are invited to {org} on PaySilo", text, render_html(text, ("Accept invitation", url))
+
+
+
+def onboarding_link(contractor: str, employer: str, org: str, url: str, days: int) -> tuple[str, str, str]:
+    text = (f"Hello {contractor},\n\n{org} is paying you for {employer} and needs your payout and tax details. "
+            f"Use your private link (it works once and expires in {days} days):\n{url}\n\n"
+            f"Never share this link. If you did not expect this email, ignore it.\n\n{_sign(org)}")
+    return f"Add your payout details for {employer}", text, render_html(text, ("Add my details", url))
+
+
+def bank_change_callback(contractor: str, employer: str, masked: str, url: str, org: str) -> tuple[str, str, str]:
+    text = (f"Hello,\n\nThe bank details of {contractor} ({employer}) were changed or submitted (account {masked}). "
+            "They will NOT be paid until a second person verifies them.\n\n"
+            "Please call the contractor on a phone number you already know (not one from an email) and confirm the "
+            f"change, then verify it here:\n{url}\n\n{_sign(org)}")
+    return f"Verify new bank details: {contractor}", text, render_html(text, ("Open the employer", url))

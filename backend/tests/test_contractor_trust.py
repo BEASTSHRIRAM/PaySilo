@@ -369,7 +369,7 @@ def test_non_us_contractor_never_on_1099_watch(demo_client):
 
 def test_overview_lists_seeded_states_and_csv_export(demo_client):
     ov = demo_client.get("/compliance/overview").json()
-    assert ov["counts"]["bank_pending"] == 1 and ov["bank_pending"][0]["full_name"] == "Pieter Jansen"
+    assert ov["counts"]["bank_pending"] == 1 and ov["bank_pending"][0]["full_name"] == "Sam Lee"
     assert ov["bank_pending"][0]["age_hours"] >= 4
     issues = {r["full_name"]: r["issue"] for r in ov["tax_forms"]}
     assert issues["Tomas Rivera"] == "missing" and issues["Noor van Dijk"] == "expiring_soon"

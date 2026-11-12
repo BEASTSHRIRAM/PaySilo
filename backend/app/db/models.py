@@ -71,7 +71,7 @@ INVITATION_STATUSES = ("PENDING", "ACCEPTED", "REVOKED")
 PAY_FREQUENCIES = ("WEEKLY", "BIWEEKLY", "MONTHLY")
 NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE", "FUNDS_RECEIVED",
                       "APPROVAL_REQUESTED", "HELD_LINES_REMINDER", "RUN_SETTLED", "PAYMENT_FAILED", "INVITE",
-                      "PAYMENT_NOTICE", "GENERIC")
+                      "PAYMENT_NOTICE", "ONBOARDING_LINK", "BANK_CHANGE_CALLBACK", "GENERIC")
 NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED")
 
 
@@ -187,6 +187,10 @@ class Notification(TimestampMixin, Base):
     dedupe_key: Mapped[str | None] = mapped_column(String(120))
     meta: Mapped[dict | None] = mapped_column(JsonType)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # SENSITIVE mail (private links/tokens): ``body`` holds only a redaction placeholder that is safe to show;
+    # the real text lives in ``secret`` ({"text", "html"}) until delivered, then it is erased. Never in any API.
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    secret: Mapped[dict | None] = mapped_column(JsonType)
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +396,7 @@ class PayLine(Base):
     method: Mapped[str] = mapped_column(String(8), nullable=False, default="SWIFT")
     payout_fee: Mapped[Decimal | None] = mapped_column(Money)
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDING")
+    hold_reason: Mapped[str | None] = mapped_column(String(40))  # risk gate code when held (BANK_UNVERIFIED ...)
     request_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)  # Airwallex idempotency key
     airwallex_transfer_id: Mapped[str | None] = mapped_column(String(64))
 

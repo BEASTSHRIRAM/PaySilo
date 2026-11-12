@@ -19,7 +19,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 def notification_out(n: Notification, employer_name: str | None = None) -> dict:
     return {
         "id": str(n.id), "kind": n.kind, "channel": n.channel, "recipient": n.recipient, "subject": n.subject,
-        "body": n.body, "status": n.status, "provider": n.provider,
+        "body": n.body, "sensitive": bool(n.sensitive), "status": n.status, "provider": n.provider,
         "attempts": n.attempts or 0, "error": n.error,
         "last_attempt_at": n.last_attempt_at.isoformat() if n.last_attempt_at else None,
         "employer_id": str(n.employer_id) if n.employer_id else None, "employer_name": employer_name,

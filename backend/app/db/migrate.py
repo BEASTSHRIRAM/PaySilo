@@ -117,9 +117,20 @@ def widen_run_status_check(conn: Connection) -> None:
     conn.execute(text(f'ALTER TABLE "payroll_runs" ADD CONSTRAINT ck_run_status CHECK (status IN ({allowed}))'))
 
 
+def widen_notification_kind_check(conn: Connection) -> None:
+    """Postgres: replace ``ck_notification_kind`` so newly added notification kinds are accepted."""
+    from .models import NOTIFICATION_KINDS
+
+    allowed = ", ".join("'" + k + "'" for k in NOTIFICATION_KINDS)
+    conn.execute(text('ALTER TABLE "notifications" DROP CONSTRAINT IF EXISTS ck_notification_kind'))
+    conn.execute(text(f'ALTER TABLE "notifications" ADD CONSTRAINT ck_notification_kind CHECK (kind IN ({allowed}))'))
+
+
 def migrate(engine: Engine) -> list[str]:
     added = add_missing_columns(engine)
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:
             widen_run_status_check(conn)
+            if inspect(conn).has_table("notifications"):
+                widen_notification_kind_check(conn)
     return added

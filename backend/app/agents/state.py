@@ -30,6 +30,12 @@ class PayLineDict(TypedDict, total=False):
     routing_code: str
     country_code: str
     contractor_id: str
+    # risk-gate facts (strings so they checkpoint cleanly) and the reason a line was held
+    bank_status: str  # the contractor's bank_verification_status
+    bank_changed_at: str  # ISO timestamp of the last bank-detail change
+    bank_second_verified: str  # "yes" when a second person verified the change after a callback
+    prev_paid: str  # the contractor's last paid amount in this currency (Decimal text)
+    hold_reason: str  # BANK_UNVERIFIED | RECENT_BANK_CHANGE_LARGE_PAYMENT
 
 
 class PayrollRunState(TypedDict, total=False):

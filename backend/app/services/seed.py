@@ -77,8 +77,11 @@ def _seed_contractor_trust(s: Session, org: Organization, user: User) -> None:
     """
     today = datetime.now(UTC).date()
     specs = {
+        # Sam Lee (Cobalt, not part of the Delta shortfall or Acme payroll stories) carries the demo bank change
+        # awaiting a second person, so every seeded payroll story still pays as documented.
         "Sam Lee": dict(tax_status="US_PERSON", tax_form_type="W9", tax_form_status="RECEIVED",
-                        tax_form_received_at=today - timedelta(days=200)),
+                        tax_form_received_at=today - timedelta(days=200),
+                        bank_verification_status="PENDING_VERIFICATION"),
         "Lena Fischer": dict(tax_status="NON_US", tax_form_type="W8BEN", tax_form_status="RECEIVED",
                              tax_form_received_at=today - timedelta(days=120),
                              tax_form_expires_at=today + timedelta(days=365 * 3 - 120)),
@@ -88,8 +91,7 @@ def _seed_contractor_trust(s: Session, org: Organization, user: User) -> None:
         "Tomas Rivera": dict(tax_status="NON_US"),  # form still missing
         "Pieter Jansen": dict(tax_status="NON_US", tax_form_type="W8BEN", tax_form_status="RECEIVED",
                               tax_form_received_at=today - timedelta(days=90),
-                              tax_form_expires_at=today + timedelta(days=365 * 3 - 90),
-                              bank_verification_status="PENDING_VERIFICATION"),  # bank change awaiting a second person
+                              tax_form_expires_at=today + timedelta(days=365 * 3 - 90)),
     }
     for c in s.scalars(select(Contractor).where(Contractor.organization_id == org.id,
                                                 Contractor.full_name.in_(list(specs)))):
@@ -101,6 +103,27 @@ def _seed_contractor_trust(s: Session, org: Organization, user: User) -> None:
             c.bank_details_changed_at = datetime.now(UTC) - timedelta(hours=5)
             s.add(ContractorChange(organization_id=org.id, contractor_id=c.id, change_group="bank",
                                    summary="Bank details submitted for verification (demo data)", changed_by_id=None))
+
+
+def _move_demo_bank_change(s: Session, org: Organization) -> None:
+    """Older demo databases held the demo bank change on Pieter Jansen (the Delta shortfall story needs him
+    payable). Release only that seeded marker and park it on Sam Lee; real edits are never touched."""
+    pieter = s.scalar(select(Contractor).where(Contractor.organization_id == org.id,
+                                               Contractor.full_name == "Pieter Jansen"))
+    if pieter is None or pieter.bank_verification_status != "PENDING_VERIFICATION" or pieter.bank_change_requested_by_id is not None:
+        return
+    marker = s.scalar(select(ContractorChange).where(
+        ContractorChange.contractor_id == pieter.id, ContractorChange.summary.like("%(demo data)%")))
+    if marker is None:
+        return
+    pieter.bank_verification_status, pieter.bank_details_changed_at = "VERIFIED", None
+    s.delete(marker)
+    sam = s.scalar(select(Contractor).where(Contractor.organization_id == org.id, Contractor.full_name == "Sam Lee"))
+    if sam is not None and sam.bank_verification_status == "VERIFIED" and sam.bank_details_changed_at is None:
+        sam.bank_verification_status = "PENDING_VERIFICATION"
+        sam.bank_details_changed_at = datetime.now(UTC) - timedelta(hours=5)
+        s.add(ContractorChange(organization_id=org.id, contractor_id=sam.id, change_group="bank",
+                               summary="Bank details submitted for verification (demo data)", changed_by_id=None))
 
 
 def _fill_schedule(emp: Employer, spec: dict) -> None:
@@ -148,5 +171,6 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
         logger.info("Seeded demo employer %s", emp.name)
     s.flush()
     _seed_contractor_trust(s, org, user)
+    _move_demo_bank_change(s, org)
     s.commit()
     return org
