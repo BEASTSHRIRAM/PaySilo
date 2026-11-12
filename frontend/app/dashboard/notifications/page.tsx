@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Mail, RefreshCw, X } from "lucide-react";
+import { Lock, Mail, RefreshCw, X } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
 import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
@@ -157,6 +157,11 @@ export default function NotificationsPage() {
                     </p>
                   )}
                   {selected.error && selected.status !== "SENT" && <p role="alert" className="text-sm font-bold text-coral-300">Last error: {selected.error}</p>}
+                  {selected.sensitive && (
+                    <p className="flex items-start gap-2 rounded-2xl bg-sand-300/10 p-3 text-sm font-semibold text-sand-200">
+                      <Lock className="mt-0.5 size-4 shrink-0" /> Contains a private link. For security it is not shown here; only the recipient&apos;s email has it.
+                    </p>
+                  )}
                   <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-2xl bg-ink-950/50 p-4 font-sans text-sm leading-relaxed text-sand-100">{selected.body}</pre>
                 </div>
               )}

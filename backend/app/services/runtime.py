@@ -57,6 +57,7 @@ from ..db.models import (
 )
 from ..ledger import Ledger
 from ..money import money_str, round_money, to_decimal
+from ..risk import BANK_UNVERIFIED, RISK_FIELDS, RISK_MESSAGES
 from ..partners.metal import MetalL2SettlementChain, MockSettlementChain
 from ..partners.vic import build_vic_adapter
 from ..partners.tap import load_public_key_pem, public_key_raw
@@ -492,6 +493,11 @@ class PlatformRuntime:
                     f"{str(cont.id)[:8]} ({cont.status}).")
         ids = [pl.contractor_id for pl in held if pl.contractor_id]
         if ids:
+            statuses = dict(s.execute(select(Contractor.id, Contractor.bank_verification_status).where(
+                Contractor.id.in_(ids), Contractor.organization_id == run.organization_id)).all())
+            if all(statuses.get(pl.contractor_id, "VERIFIED") != "VERIFIED" for pl in held):
+                return (f"{RISK_MESSAGES[BANK_UNVERIFIED]} Verify the bank details first, then pay the held lines.")
+        if ids:
             later = s.execute(
                 select(PayLine.beneficiary_name)
                 .join(PayrollRun, PayLine.run_id == PayrollRun.id)
@@ -553,12 +559,15 @@ class PlatformRuntime:
                          parent_run_id=parent_run_id)
         s.add(run)
         s.flush()
+        active = [c for c in employer.contractors if c.is_active]
+        facts = self.risk_facts(s, run.organization_id, active)
         directory = [
             {"name": c.full_name, "currency": c.currency, "method": c.payout_method, "iban": c.iban,
              "swift_code": c.swift_code, "account_number": c.account_number, "routing_code": c.routing_code,
-             "country_code": c.country, "contractor_id": str(c.id)}
-            for c in employer.contractors if c.is_active
+             "country_code": c.country, "contractor_id": str(c.id), **facts[c.id]}
+            for c in active
         ]
+        pay_lines = self._attach_risk_facts(pay_lines, {str(k): v for k, v in facts.items()})
         state = initial_state(
             run_id=str(run.id), employer_key=employer.ledger_key, employer_name=employer.name,
             contact_name=employer.contact_name or "", funding_usd="0", pay_lines=pay_lines or [],
@@ -569,6 +578,64 @@ class PlatformRuntime:
             self._live_threads.add(str(run.id))
             self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(state, config))
         return run
+
+    @staticmethod
+    def _attach_risk_facts(pay_lines: list[dict] | None, facts: dict[str, dict]) -> list[dict] | None:
+        """Stamp each given line with the CURRENT risk facts of its contractor (server-side, never client-supplied).
+
+        A line naming a contractor that is not one of this employer's active contractors is stamped
+        ``bank_status="UNKNOWN"`` so the risk gate holds it (fail closed).
+        """
+        if not pay_lines:
+            return pay_lines
+        out = []
+        for line in pay_lines:
+            line = {k: v for k, v in line.items() if k not in (*RISK_FIELDS, "hold_reason")}
+            cid = line.get("contractor_id")
+            if cid:
+                line.update(facts.get(str(cid), {"bank_status": "UNKNOWN"}))
+            out.append(line)
+        return out
+
+    def risk_facts(self, s: Session, org_id: uuid.UUID, contractors: list[Contractor]) -> dict[uuid.UUID, dict]:
+        """Per contractor: the strings the risk gate needs (bank status, change time, second verification, last paid)."""
+        out: dict[uuid.UUID, dict] = {}
+        for c in contractors:
+            f: dict[str, str] = {"bank_status": c.bank_verification_status}
+            changed = c.bank_details_changed_at
+            if changed is not None:
+                changed = changed if changed.tzinfo else changed.replace(tzinfo=UTC)
+                f["bank_changed_at"] = changed.isoformat()
+                verified = c.bank_verified_at
+                verified = verified if verified is None or verified.tzinfo else verified.replace(tzinfo=UTC)
+                second = (c.bank_verification_status == "VERIFIED" and c.bank_verified_by_id is not None
+                          and c.bank_verified_by_id != c.bank_change_requested_by_id
+                          and verified is not None and verified >= changed)
+                f["bank_second_verified"] = "yes" if second else "no"
+            prev = s.scalar(
+                select(PayLine.amount).join(PayrollRun, PayLine.run_id == PayrollRun.id)
+                .where(PayLine.contractor_id == c.id, PayLine.status == "PAID", PayLine.currency == c.currency,
+                       PayrollRun.organization_id == org_id)
+                .order_by(PayrollRun.created_at.desc(), PayLine.position.desc()).limit(1))
+            if prev is not None:
+                f["prev_paid"] = money_str(prev)
+            out[c.id] = f
+        return out
+
+    def _announce_outcome(self, s: Session, run: PayrollRun) -> None:
+        """Queue the run_settled / payment_failed notice right away (same dedupe keys as the sweep). Never raises."""
+        if run.status not in ("SETTLED", "FAILED"):
+            return
+        try:
+            from . import autopilot, notify  # lazy: autopilot imports this module
+
+            org = s.get(Organization, run.organization_id)
+            if org is not None and autopilot.report_run_outcome(s, self.settings, org, run):
+                s.commit()
+                notify.dispatch_async(self.db.sessionmaker, self.settings)
+        except Exception:  # noqa: BLE001 - a mail problem must never affect the run
+            logger.exception("Queueing the run outcome notice failed for run %s", run.id)
+            s.rollback()
 
     def _invoke_and_persist(self, s: Session, run: PayrollRun, employer: Employer, call,
                             approval: Approval | None = None) -> None:
@@ -594,6 +661,7 @@ class PlatformRuntime:
                 s.add(approval)
         finally:
             s.commit()
+        self._announce_outcome(s, run)
         if failure is not None:
             raise failure
 
@@ -623,6 +691,8 @@ class PlatformRuntime:
         config = {"configurable": {"thread_id": str(run.id)}}
         with self.lock:
             state = self.graph.get_state(config).values
+            if kind == "approval" and decision == "approve":
+                self._reject_changed_bank_details(s, run, state)
             resume: dict = {"decision": decision, "decided_by": user.email}
             approval = Approval(run_id=run.id, kind=kind, decision=decision, decided_by_id=user.id,
                                 decided_by_email=user.email)
@@ -641,6 +711,23 @@ class PlatformRuntime:
             self._invoke_and_persist(s, run, employer, lambda: self.graph.invoke(Command(resume=resume), config),
                                      approval=approval)
         return run
+
+    def _reject_changed_bank_details(self, s: Session, run: PayrollRun, state: dict) -> None:
+        """Bank details must not change between the preview and the approval (re-read from the database)."""
+        lines = [l for l in state.get("pay_lines") or [] if l.get("contractor_id")]
+        if not lines:
+            return
+        ids = [uuid.UUID(l["contractor_id"]) for l in lines]
+        contractors = s.scalars(select(Contractor).where(Contractor.id.in_(ids),
+                                                         Contractor.organization_id == run.organization_id,
+                                                         Contractor.employer_id == run.employer_id)).all()
+        fresh = self.risk_facts(s, run.organization_id, list(contractors))
+        for line in lines:
+            now = fresh.get(uuid.UUID(line["contractor_id"]))
+            if now is None or now["bank_status"] != "VERIFIED" or now.get("bank_changed_at") != line.get("bank_changed_at"):
+                raise RuntimeConflict(
+                    f"{line['name']}'s bank details changed after this payroll was prepared. {RISK_MESSAGES[BANK_UNVERIFIED]} "
+                    "Hold this run and start a new one once they are verified.")
 
     def is_resumable(self, run: PayrollRun) -> bool:
         if run.pending_interrupt is None:
@@ -717,7 +804,8 @@ class PlatformRuntime:
                            amount=to_decimal(line["amount"]), currency=line["currency"],
                            method=line.get("method", "SWIFT"),
                            contractor_id=uuid.UUID(contractor_id) if contractor_id else None,
-                           request_id=request_id_for(str(run.id), f"held-{base + j}"), status="HELD")
+                           request_id=request_id_for(str(run.id), f"held-{base + j}"), status="HELD",
+                           hold_reason=line.get("hold_reason"))
             s.add(held)
             run.pay_lines.append(held)
 

@@ -189,30 +189,36 @@ def remind_held_lines(db: Session, runtime: PlatformRuntime, settings: Settings,
     return queued
 
 
+def report_run_outcome(db: Session, settings: Settings, org: Organization, run: PayrollRun) -> int:
+    """Queue the SETTLED / FAILED notice for one run: one per run and person (shared dedupe key with the sweep)."""
+    if run.status not in ("SETTLED", "FAILED"):
+        return 0
+    queued = 0
+    for user in approvers(db, org):
+        key = f"outcome:{run.id}:{run.status}:{user.id}"
+        if run.status == "SETTLED":
+            subject, text, html = tpl.run_settled(
+                run.employer.name, run_label(run),
+                f"USD {money_str(run.required_usd)}" if run.required_usd is not None else "the full amount",
+                run_url(settings, run.id), org.name)
+            kind = "RUN_SETTLED"
+        else:
+            subject, text, html = tpl.payment_failed(
+                run.employer.name, run_label(run), run.error or "the run stopped before every payment finished.",
+                run_url(settings, run.id), org.name)
+            kind = "PAYMENT_FAILED"
+        before = db.scalar(select(Notification.id).where(
+            Notification.organization_id == org.id, Notification.dedupe_key == key))
+        notify.queue_email(db, org, kind, user.email, subject, text, body_html=html,
+                           employer_id=run.employer_id, dedupe_key=key, meta={"run_id": str(run.id)})
+        queued += before is None
+    return queued
+
+
 def report_outcomes(db: Session, settings: Settings, org: Organization, now: datetime | None = None) -> int:
     """Tell approvers about recently SETTLED / FAILED runs, once per run and person."""
     now = now or datetime.now(UTC)
     runs = db.scalars(select(PayrollRun).options(selectinload(PayrollRun.employer))
                       .where(PayrollRun.organization_id == org.id, PayrollRun.status.in_(("SETTLED", "FAILED")),
                              PayrollRun.updated_at >= now - OUTCOME_LOOKBACK)).all()
-    queued = 0
-    for run in runs:
-        for user in approvers(db, org):
-            key = f"outcome:{run.id}:{run.status}:{user.id}"
-            if run.status == "SETTLED":
-                subject, text, html = tpl.run_settled(
-                    run.employer.name, run_label(run),
-                    f"USD {money_str(run.required_usd)}" if run.required_usd is not None else "the full amount",
-                    run_url(settings, run.id), org.name)
-                kind = "RUN_SETTLED"
-            else:
-                subject, text, html = tpl.payment_failed(
-                    run.employer.name, run_label(run), run.error or "the run stopped before every payment finished.",
-                    run_url(settings, run.id), org.name)
-                kind = "PAYMENT_FAILED"
-            before = db.scalar(select(Notification.id).where(
-                Notification.organization_id == org.id, Notification.dedupe_key == key))
-            notify.queue_email(db, org, kind, user.email, subject, text, body_html=html,
-                               employer_id=run.employer_id, dedupe_key=key, meta={"run_id": str(run.id)})
-            queued += before is None
-    return queued
+    return sum(report_run_outcome(db, settings, org, run) for run in runs)

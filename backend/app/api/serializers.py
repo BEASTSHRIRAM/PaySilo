@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Contractor, Employer, PayrollRun, SettlementReceipt
+from ..risk import RISK_MESSAGES
 from ..money import money_str
 from ..services.benefits import budget_lock
 from ..services.contractor_trust import effective_tax_form_status
@@ -129,7 +130,8 @@ def run_detail_out(s: Session, runtime: PlatformRuntime, r: PayrollRun) -> RunDe
         pay_lines=[PayLineOut(id=str(p.id), position=p.position, beneficiary_name=p.beneficiary_name, amount=money_str(p.amount),
                               currency=p.currency, method=p.method,
                               payout_fee=money_str(p.payout_fee) if p.payout_fee is not None else None,
-                              status=p.status, airwallex_transfer_id=p.airwallex_transfer_id)
+                              status=p.status, airwallex_transfer_id=p.airwallex_transfer_id,
+                              hold_reason=p.hold_reason, hold_message=RISK_MESSAGES.get(p.hold_reason or ""))
                    for p in r.pay_lines],
         events=[EventOut(seq=e.seq, agent=e.agent, level=e.level, message=e.message, created_at=e.created_at)
                 for e in r.events],

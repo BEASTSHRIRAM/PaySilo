@@ -690,3 +690,6 @@ TOOL_FUNCTIONS = {
     "read_benefits": read_benefits,
     "propose_benefit_purchase": propose_benefit_purchase,
 }
+
+
+from . import trace_tool  # noqa: E402,F401  (registers the read-only where_is_my_money tool)

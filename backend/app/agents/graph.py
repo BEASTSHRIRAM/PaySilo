@@ -53,6 +53,7 @@ from ..policy import (
     assess_payroll,
     plan_partial_payout,
 )
+from ..risk import BANK_UNVERIFIED, RISK_FIELDS, RISK_MESSAGES, split_lines
 from .intake import explain_assessment, parse_intake
 from .state import PayrollRunState
 
@@ -65,6 +66,9 @@ AGENTS: dict[str, dict[str, str]] = {
     "assess": {"name": "Balance & Policy Agent", "kind": "code",
                "job": "Checks only this employer's wallet against payroll, run fee and reserve floor; "
                       "when short, selects the smallest lines it can still pay and holds the rest."},
+    "risk": {"name": "Risk Gate", "kind": "code",
+             "job": "Holds any line whose bank details are unverified or recently changed with an unusually "
+                    "large payment; deterministic rules, never paid until a second person verifies."},
     "approval": {"name": "Approval Gate", "kind": "human",
                  "job": "Pauses for a Visa TAP-signed human decision on the exact amounts."},
     "escalate": {"name": "Escalation", "kind": "human",
@@ -113,7 +117,8 @@ def _normalise_line(line: dict) -> dict:
         "currency": str(line["currency"]).upper(),
         "method": str(line.get("method") or "SWIFT").upper(),
     }
-    for key in ("iban", "swift_code", "account_number", "routing_code", "country_code", "contractor_id"):
+    for key in ("iban", "swift_code", "account_number", "routing_code", "country_code", "contractor_id",
+                *RISK_FIELDS, "hold_reason"):
         if line.get(key):
             out[key] = str(line[key])
     return out
@@ -121,7 +126,7 @@ def _normalise_line(line: dict) -> dict:
 
 def _directory_entry(contractor: dict) -> dict:
     keep = ("name", "currency", "method", "iban", "swift_code", "account_number", "routing_code",
-            "country_code", "contractor_id")
+            "country_code", "contractor_id", *RISK_FIELDS)
     out = {k: str(contractor[k]) for k in keep if contractor.get(k)}
     out["name"] = out["name"].strip()
     return out
@@ -208,8 +213,11 @@ def assessment_dict(a: PayrollAssessment) -> dict:
 
 
 def _line_view(line: dict) -> dict:
-    return {"name": line["name"], "amount": line["amount"], "currency": line["currency"],
+    view = {"name": line["name"], "amount": line["amount"], "currency": line["currency"],
             "method": line.get("method", "SWIFT")}
+    if line.get("hold_reason"):
+        view["hold_reason"] = line["hold_reason"]
+    return view
 
 
 def _decision_of(value: object) -> tuple[str, str, dict | None]:
@@ -285,6 +293,24 @@ def build_graph(services: Services, checkpointer=None):
                 "funding_usd": money_str(funding), "pay_lines": pay_lines,
                 "balances": balances_str(account_id), "audit": audit, "events": events}
 
+    def risk_node(state: PayrollRunState) -> dict:
+        lines = state["pay_lines"]
+        if not lines:
+            return {}
+        payable, risk_held = split_lines(lines, lambda: _rates_for(state, awx.get_balances(account_id=state["account_id"])))
+        if not risk_held:
+            return {}
+        audit, events = _log(state, "risk", f"Risk gate holds {len(risk_held)} line(s): "
+                             + "; ".join(f"{l['name']} ({l['hold_reason']})" for l in risk_held) + ".", "warning")
+        held = list(state.get("held_lines") or []) + risk_held
+        if not payable:
+            msg = ("Every line is held by the risk gate: " + RISK_MESSAGES[risk_held[0]["hold_reason"]]
+                   + " Nothing was paid.")
+            _log(state, "risk", f"POLICY REFUSAL: {msg}", "error", audit, events)
+            return {"pay_lines": [], "held_lines": held, "route": "refused", "status": "REFUSED", "error": msg,
+                    "audit": audit, "events": events}
+        return {"pay_lines": payable, "held_lines": held, "audit": audit, "events": events}
+
     def price_node(state: PayrollRunState) -> dict:
         audit, events = _log(state, "price", "Pricing payroll, fees first.")
         if not state["pay_lines"]:
@@ -320,7 +346,10 @@ def build_graph(services: Services, checkpointer=None):
                  f"{money_str(assessment.platform_fee_usd)} run fee; reserve floor USD "
                  f"{money_str(assessment.reserve_floor_usd)} must stay untouched.",
                  audit=audit, events=events)
-        return {"assessment": assessment_dict(assessment), "status": "PRICED",
+        priced = assessment_dict(assessment)
+        if state.get("held_lines"):  # preview before approval: what the risk gate keeps out of this payout
+            priced["risk_held_lines"] = [_line_view(l) for l in state["held_lines"] if l.get("hold_reason")]
+        return {"assessment": priced, "status": "PRICED",
                 "explanation": explain_assessment(state["employer_name"], assessment),
                 "audit": audit, "events": events}
 
@@ -365,6 +394,9 @@ def build_graph(services: Services, checkpointer=None):
         held = [all_lines[i] for i in plan.held]
         partial = assessment_dict(plan.assessment)
         full_shortfall = money_str(plan.full.shortfall_usd)
+        risk_held = [l for l in state.get("held_lines") or [] if l.get("hold_reason")]
+        if risk_held:
+            partial["risk_held_lines"] = [_line_view(l) for l in risk_held]
         partial.update({
             "partial": True,
             "full_required_usd": money_str(plan.full.required_usd),
@@ -391,7 +423,7 @@ def build_graph(services: Services, checkpointer=None):
             "employer's funds."
         )
         return {"route": "approval", "status": "RESERVED", "assessment": partial, "explanation": explanation,
-                "pay_lines": paid, "held_lines": held, "audit": audit, "events": events}
+                "pay_lines": paid, "held_lines": risk_held + held, "audit": audit, "events": events}
 
     def approval_node(state: PayrollRunState) -> dict:
         value = interrupt({
@@ -467,6 +499,12 @@ def build_graph(services: Services, checkpointer=None):
         # original result anyway, and their ledger entries are already posted).
         completed = list(state.get("completed_payouts", []))
         fx_done = list(state.get("fx_done", []))
+        blocked = [l["name"] for l in state["pay_lines"]
+                   if l.get("hold_reason") or l.get("bank_status", "VERIFIED") != "VERIFIED"]
+        if blocked:  # defence in depth: the risk gate removes these before approval; never pay them anyway
+            msg = f"{RISK_MESSAGES[BANK_UNVERIFIED]} ({', '.join(blocked)}). No money moved."
+            _log(state, "execute", f"POLICY REFUSAL: {msg}", "error", audit, events)
+            return {"status": "REFUSED", "error": msg, "audit": audit, "events": events}
         if not fx_done and not completed:
             # Fail closed: re-run the assessment against FRESH balances before any
             # money moves (another run, a charge or a withdrawal may have eaten
@@ -705,14 +743,16 @@ def build_graph(services: Services, checkpointer=None):
         return "fee" if state.get("status") == "SENT" else "close"
 
     builder = StateGraph(PayrollRunState)
-    for name, fn in [("intake", intake_node), ("price", price_node), ("assess", assess_node),
+    for name, fn in [("intake", intake_node), ("risk", risk_node), ("price", price_node), ("assess", assess_node),
                      ("approval", approval_node), ("escalate", escalate_node), ("execute", execute_node),
                      ("fee", fee_node), ("reconcile", reconcile_node), ("attest", attest_node),
                      ("close", close_node)]:
         builder.add_node(name, fn)
 
     builder.add_edge(START, "intake")
-    builder.add_edge("intake", "price")
+    builder.add_edge("intake", "risk")
+    builder.add_conditional_edges("risk", lambda s: "close" if s.get("status") == "REFUSED" else "price",
+                                  {"price": "price", "close": "close"})
     builder.add_conditional_edges("price", lambda s: "close" if s.get("status") == "REFUSED" else "assess",
                                   {"assess": "assess", "close": "close"})
     builder.add_conditional_edges("assess", route_after_assess,

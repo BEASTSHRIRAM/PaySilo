@@ -107,11 +107,15 @@ export interface RunSummary {
 export interface PendingDecision {
   kind: "approval" | "escalation"; message: string;
   partial?: boolean; continuation?: boolean; parent_run_id?: string | null; run_fee_waived?: boolean;
+  /** Lines this payout deliberately does not pay (shortfall or risk gate). */
+  held_lines?: { name: string; amount: string; currency: string; method: string; hold_reason?: string }[];
 }
 export interface RunDetail extends RunSummary {
   assessment: Assessment | null;
   pay_lines: { id: string; position: number; beneficiary_name: string; amount: string; currency: string; method: string;
-    payout_fee: string | null; status: string; airwallex_transfer_id: string | null }[];
+    payout_fee: string | null; status: string; airwallex_transfer_id: string | null;
+    /** Risk gate code when the line was held: BANK_UNVERIFIED | RECENT_BANK_CHANGE_LARGE_PAYMENT. */
+    hold_reason?: string | null; hold_message?: string | null }[];
   events: { seq: number; agent: string; level: string; message: string; created_at: string }[];
   approvals: { kind: string; decision: string; decided_by_email: string; verified: boolean; tap_key_id: string | null;
     tap_signature: string | null; created_at: string }[];
@@ -827,9 +831,11 @@ export interface SweepResult {
 }
 export interface SweepResponse { queued: number; skipped: number; results: SweepResult[] }
 export type NotificationKind = "FUNDING_REMINDER" | "FUNDING_STATEMENT" | "FUNDING_OVERDUE" | "FUNDS_RECEIVED" | "APPROVAL_REQUESTED"
-  | "HELD_LINES_REMINDER" | "RUN_SETTLED" | "PAYMENT_FAILED" | "INVITE" | "PAYMENT_NOTICE" | "GENERIC";
+  | "HELD_LINES_REMINDER" | "RUN_SETTLED" | "PAYMENT_FAILED" | "INVITE" | "PAYMENT_NOTICE" | "ONBOARDING_LINK" | "BANK_CHANGE_CALLBACK" | "GENERIC";
 export interface AppNotification {
   id: string; kind: NotificationKind; channel: string; recipient: string; subject: string; body: string;
+  /** Private-link mail: the body is a redaction placeholder; the real text is only in the recipient's email. */
+  sensitive?: boolean;
   status: "QUEUED" | "SENT" | "FAILED"; provider: string | null; attempts: number; last_attempt_at: string | null; error: string | null;
   employer_id: string | null; employer_name: string | null; created_at: string; sent_at: string | null;
 }
@@ -854,4 +860,38 @@ export const apiFunding = {
     return request<NotificationList>(`/notifications${qs ? `?${qs}` : ""}`);
   },
   statementCsvUrl: (employerId: string) => `/api/employers/${encodeURIComponent(employerId)}/funding-statement?format=csv`,
+};
+
+// ====================================================================== proof of payment
+export interface PaymentTrace {
+  line_id: string; contractor: string; amount: string; currency: string; method: string;
+  transfer_id: string | null;
+  state: "SCHEDULED" | "SENT" | "PAID" | "FAILED" | "HELD" | "RETURNED";
+  paid: boolean; headline: string; diagnosis: string; next_step: string;
+  expected_window: string; failure_code: string | null;
+}
+interface VerifyLine {
+  contractor: string; amount: string; currency: string; method: string; status: string;
+  bank_masked: string | null; transfer_id: string | null; paid_at: string | null;
+}
+export interface VerifyResult {
+  valid: boolean;
+  reason?: string;
+  kind?: "line" | "statement";
+  facts?: {
+    document: "proof" | "notice" | "statement"; agency: string; employer: string; run_id: string;
+    period: string | null; pay_date: string | null; tap_verified: boolean; receipt_hash: string | null;
+    state?: string; line?: VerifyLine; lines?: VerifyLine[];
+  };
+}
+export const apiProof = {
+  trace: (runId: string, lineId: string) =>
+    request<PaymentTrace>(`/runs/${encodeURIComponent(runId)}/lines/${encodeURIComponent(lineId)}/trace`),
+  verify: (token: string) => request<VerifyResult>(`/verify/${encodeURIComponent(token)}`),
+};
+/** Direct-download URLs (PDF attachments; the session cookie is first-party). */
+export const proofDownloads = {
+  line: (runId: string, lineId: string) => `/api/runs/${encodeURIComponent(runId)}/lines/${encodeURIComponent(lineId)}/proof.pdf`,
+  statement: (runId: string) => `/api/runs/${encodeURIComponent(runId)}/statement.pdf`,
+  receipt: (lineId: string, token: string) => `/api/receipts/${encodeURIComponent(lineId)}/proof.pdf?token=${encodeURIComponent(token)}`,
 };

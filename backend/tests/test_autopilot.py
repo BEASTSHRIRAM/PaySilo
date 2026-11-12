@@ -120,7 +120,8 @@ def test_outcome_notices_once_per_run(auto):
     db, st = auto.app.state.db, auto.app.state.settings
     with db.sessionmaker() as s:
         org = s.scalar(select(Organization))
-        assert autopilot.report_outcomes(s, st, org) >= 1
+        # the notice was already queued when the run settled; the sweep shares its dedupe key
+        assert autopilot.report_outcomes(s, st, org) == 0
         assert autopilot.report_outcomes(s, st, org) == 0
         s.commit()
     settled = _notes(db, "RUN_SETTLED")

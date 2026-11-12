@@ -285,6 +285,8 @@ class PayLineOut(BaseModel):
     payout_fee: str | None
     status: str
     airwallex_transfer_id: str | None
+    hold_reason: str | None = None  # risk gate code (BANK_UNVERIFIED, RECENT_BANK_CHANGE_LARGE_PAYMENT)
+    hold_message: str | None = None  # plain-language explanation of hold_reason
 
 
 class EventOut(BaseModel):

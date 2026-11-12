@@ -53,7 +53,7 @@ from ...services.contractor_trust import (
     ytd_paid,
 )
 from ...services.runtime import PlatformRuntime
-from ...services.trust_notify import notify
+from ...services import notify, trust_notify
 from ..deps import APPROVER_ROLES, EDITOR_ROLES, Tenant, current_tenant, get_db, get_runtime, get_settings, require_roles
 from ..schemas import ContractorIn, ContractorOut
 from ..serializers import contractor_out
@@ -138,9 +138,10 @@ _TAX_KEYS = ("tax_status", "tax_form_type", "tax_form_status", "tax_form_receive
 
 
 @router.patch("/employers/{employer_id}/contractors/{contractor_id}", response_model=ContractorPatchOut)
-def patch_contractor(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: ContractorPatchIn,
+def patch_contractor(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: ContractorPatchIn, request: Request,
                      tenant: Tenant = Depends(require_roles(EDITOR_ROLES)), db: Session = Depends(get_db),
-                     runtime: PlatformRuntime = Depends(get_runtime)) -> ContractorPatchOut:
+                     runtime: PlatformRuntime = Depends(get_runtime),
+                     settings: Settings = Depends(get_settings)) -> ContractorPatchOut:
     emp, c = _contractor_or_404(db, tenant, employer_id, contractor_id)
     sent = {k: getattr(body, k) for k in body.model_fields_set}
 
@@ -208,8 +209,8 @@ def patch_contractor(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: Con
         validation = BankValidationOut(**validate_bank(runtime, emp, c))
     db.commit()
     if bank_changed:  # approvers get a "confirm with the contractor by callback" request
-        notify("bank_change_callback_request", to_email=None, organization_id=c.organization_id,
-               context={"contractor_id": str(c.id), "employer": emp.name})
+        if trust_notify.bank_change_callback_request(db, settings, tenant.organization, emp, c):
+            notify.dispatch_async(request.app.state.db.sessionmaker, settings)
     return ContractorPatchOut(contractor=contractor_out(c), bank_change_pending=c.bank_verification_status == "PENDING_VERIFICATION",
                               bank_validation=validation)
 
@@ -284,9 +285,9 @@ def _invite_status(inv: ContractorOnboardingInvite) -> str:
 
 @router.post("/employers/{employer_id}/contractors/{contractor_id}/onboarding-link",
              response_model=OnboardingLinkOut, status_code=status.HTTP_201_CREATED)
-def create_onboarding_link(employer_id: uuid.UUID, contractor_id: uuid.UUID,
+def create_onboarding_link(employer_id: uuid.UUID, contractor_id: uuid.UUID, request: Request,
                            tenant: Tenant = Depends(require_roles(EDITOR_ROLES)),
-                           db: Session = Depends(get_db)) -> OnboardingLinkOut:
+                           db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> OnboardingLinkOut:
     emp, c = _contractor_or_404(db, tenant, employer_id, contractor_id)
     for old in db.scalars(select(ContractorOnboardingInvite).where(
             ContractorOnboardingInvite.contractor_id == c.id, ContractorOnboardingInvite.status == "PENDING")):
@@ -299,8 +300,9 @@ def create_onboarding_link(employer_id: uuid.UUID, contractor_id: uuid.UUID,
     db.add(inv)
     _log(db, c, "onboarding", f"Onboarding link created (valid {INVITE_TTL_DAYS} days)", tenant.user.id)
     db.commit()
-    notify("contractor_onboarding_link", to_email=c.email, organization_id=c.organization_id,
-           context={"invite_path": f"/onboard/{token}", "contractor": c.full_name, "employer": emp.name})
+    if trust_notify.onboarding_link(db, settings, tenant.organization, emp, c, invite_id=inv.id, token=token,
+                                    days=INVITE_TTL_DAYS):
+        notify.dispatch_async(request.app.state.db.sessionmaker, settings)
     return _invite_out(inv, token)
 
 
@@ -463,6 +465,10 @@ def submit_onboarding(token: str, body: OnboardingSubmitIn, request: Request, db
          f"Contractor submitted details via onboarding link: {changes}. Self-declared: "
          f"{'US person' if body.tax_status == 'US_PERSON' else 'non-US person'}. Awaiting staff verification.", None)
     db.commit()
+    settings = request.app.state.settings
+    org = db.get(Organization, c.organization_id)
+    if org is not None and trust_notify.bank_change_callback_request(db, settings, org, emp, c):
+        notify.dispatch_async(request.app.state.db.sessionmaker, settings)
     return OnboardingSubmitOut(status="PENDING_VERIFICATION",
                                message="Your details were sent. Your agency will confirm them before your next payment.")
 

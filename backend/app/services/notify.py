@@ -34,6 +34,8 @@ from ..db.models import NOTIFICATION_KINDS, Notification, Organization
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5
+SENSITIVE_PLACEHOLDER = ("This email contains a private link. For security the content is not stored here or "
+                         "shown in the dashboard: only the recipient's copy contains it.")
 RETRY_BACKOFF_MINUTES = (1, 5, 15, 60)  # wait before attempt 2, 3, 4, 5
 
 
@@ -109,8 +111,13 @@ def email_status(settings: Settings) -> dict:
 def queue_email(db: Session, org: Organization, kind: str, recipient: str, subject: str, body: str, *,
                 body_html: str | None = None, employer_id: uuid.UUID | None = None,
                 contractor_id: uuid.UUID | None = None, dedupe_key: str | None = None,
-                meta: dict | None = None) -> Notification:
-    """Add a QUEUED email to the outbox. Idempotent on ``dedupe_key``: the existing row is returned."""
+                meta: dict | None = None, sensitive: bool = False) -> Notification:
+    """Add a QUEUED email to the outbox. Idempotent on ``dedupe_key``: the existing row is returned.
+
+    ``sensitive=True`` (the text carries a private link or token): ``body``/``body_html`` are stored as a
+    redaction placeholder that is safe for every dashboard member to read; the real text is kept in the
+    row's ``secret`` only until delivery, then erased. It is never returned by any API.
+    """
     if kind not in NOTIFICATION_KINDS:
         raise ValueError(f"Unknown notification kind {kind!r}.")
     if dedupe_key:
@@ -119,8 +126,11 @@ def queue_email(db: Session, org: Organization, kind: str, recipient: str, subje
         if existing is not None:
             return existing
     row = Notification(organization_id=org.id, employer_id=employer_id, contractor_id=contractor_id, kind=kind,
-                       channel="email", recipient=recipient.strip(), subject=subject[:300], body=body,
-                       body_html=body_html, status="QUEUED", attempts=0, dedupe_key=dedupe_key, meta=meta)
+                       channel="email", recipient=recipient.strip(), subject=subject[:300],
+                       body=SENSITIVE_PLACEHOLDER if sensitive else body,
+                       body_html=None if sensitive else body_html, status="QUEUED", attempts=0,
+                       dedupe_key=dedupe_key, meta=meta, sensitive=sensitive,
+                       secret={"text": body, "html": body_html} if sensitive else None)
     try:
         with db.begin_nested():
             db.add(row)
@@ -145,8 +155,9 @@ def deliver(db: Session, notification: Notification, mailer: Mailer) -> Notifica
     try:
         if not notification.recipient:
             raise MailerError("No recipient email address.")
-        mailer.send(to=notification.recipient, subject=notification.subject, text=notification.body,
-                    html=notification.body_html)
+        secret = notification.secret or {}
+        mailer.send(to=notification.recipient, subject=notification.subject,
+                    text=secret.get("text") or notification.body, html=secret.get("html") or notification.body_html)
     except MailerError as exc:
         notification.status, notification.error = "FAILED", str(exc)[:500]
     except Exception as exc:  # noqa: BLE001 - delivery must never crash the sweep
@@ -154,6 +165,9 @@ def deliver(db: Session, notification: Notification, mailer: Mailer) -> Notifica
         notification.status, notification.error = "FAILED", f"Delivery failed ({type(exc).__name__})."
     else:
         notification.status, notification.error, notification.sent_at = "SENT", None, now
+        notification.secret = None
+    if notification.status == "FAILED" and notification.attempts >= MAX_ATTEMPTS:
+        notification.secret = None  # given up: do not keep a private link around
     db.flush()
     return notification
 

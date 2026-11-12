@@ -1,4 +1,4 @@
--- PaySilo schema (generated from app/db/models.py â€” do not edit by hand).
+-- PaySilo schema (generated from app/db/models.py — do not edit by hand).
 -- Regenerate: uv run python -m app.db.export_schema > db/schema.sql
 
 CREATE TABLE organizations (
@@ -405,11 +405,13 @@ CREATE TABLE notifications (
 	dedupe_key VARCHAR(120), 
 	meta JSONB, 
 	sent_at TIMESTAMP WITH TIME ZONE, 
+	sensitive BOOLEAN DEFAULT '0' NOT NULL, 
+	secret JSONB, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	CONSTRAINT uq_notification_org_dedupe UNIQUE (organization_id, dedupe_key), 
 	CONSTRAINT ck_notification_status CHECK (status IN ('QUEUED', 'SENT', 'FAILED')), 
-	CONSTRAINT ck_notification_kind CHECK (kind IN ('FUNDING_REMINDER', 'FUNDING_STATEMENT', 'FUNDING_OVERDUE', 'FUNDS_RECEIVED', 'APPROVAL_REQUESTED', 'HELD_LINES_REMINDER', 'RUN_SETTLED', 'PAYMENT_FAILED', 'INVITE', 'PAYMENT_NOTICE', 'GENERIC')), 
+	CONSTRAINT ck_notification_kind CHECK (kind IN ('FUNDING_REMINDER', 'FUNDING_STATEMENT', 'FUNDING_OVERDUE', 'FUNDS_RECEIVED', 'APPROVAL_REQUESTED', 'HELD_LINES_REMINDER', 'RUN_SETTLED', 'PAYMENT_FAILED', 'INVITE', 'PAYMENT_NOTICE', 'ONBOARDING_LINK', 'BANK_CHANGE_CALLBACK', 'GENERIC')), 
 	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
 	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE SET NULL, 
 	FOREIGN KEY(contractor_id) REFERENCES contractors (id) ON DELETE SET NULL
@@ -427,6 +429,7 @@ CREATE TABLE pay_lines (
 	method VARCHAR(8) NOT NULL, 
 	payout_fee NUMERIC(19, 2), 
 	status VARCHAR(10) NOT NULL, 
+	hold_reason VARCHAR(40), 
 	request_id VARCHAR(64) NOT NULL, 
 	airwallex_transfer_id VARCHAR(64), 
 	PRIMARY KEY (id), 
@@ -532,6 +535,25 @@ CREATE TABLE ledger_entries (
 CREATE INDEX ix_ledger_entries_account ON ledger_entries (account);
 CREATE INDEX ix_ledger_entries_transaction_id ON ledger_entries (transaction_id);
 
+CREATE TABLE proof_accesses (
+	id BIGSERIAL NOT NULL, 
+	organization_id UUID NOT NULL, 
+	run_id UUID NOT NULL, 
+	pay_line_id UUID, 
+	user_id UUID, 
+	kind VARCHAR(16) NOT NULL, 
+	channel VARCHAR(16) NOT NULL, 
+	document_digest VARCHAR(64) NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(run_id) REFERENCES payroll_runs (id) ON DELETE CASCADE, 
+	FOREIGN KEY(pay_line_id) REFERENCES pay_lines (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_proof_accesses_organization_id ON proof_accesses (organization_id);
+CREATE INDEX ix_proof_accesses_run_id ON proof_accesses (run_id);
+
 CREATE TABLE source_import_rows (
 	id BIGSERIAL NOT NULL, 
 	import_id UUID NOT NULL, 
@@ -614,4 +636,5 @@ ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "benefit_purchases" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_entries" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "proof_accesses" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_import_rows" ENABLE ROW LEVEL SECURITY;

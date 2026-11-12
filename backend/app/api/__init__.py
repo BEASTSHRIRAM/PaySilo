@@ -25,6 +25,7 @@ from .routes import auth, bedata, benefits, chat, employers, platform, runs, tap
 from .routes import contractor_trust
 from .routes import funding_plan
 from .routes import notifications
+from .routes import proofs
 
 logger = logging.getLogger("paysilo")
 
@@ -75,4 +76,5 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     app.include_router(contractor_trust.router)
     app.include_router(funding_plan.router)
     app.include_router(notifications.router)
+    app.include_router(proofs.router)
     return app

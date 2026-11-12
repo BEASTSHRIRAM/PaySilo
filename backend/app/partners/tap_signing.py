@@ -231,8 +231,14 @@ def canonical_json(body: dict) -> str:
 
 
 def _line_fields(lines: list[dict]) -> list[dict]:
-    return [{"name": l["name"], "amount": l["amount"], "currency": l["currency"],
-             "method": l.get("method") or "SWIFT"} for l in lines]
+    out = []
+    for l in lines:
+        item = {"name": l["name"], "amount": l["amount"], "currency": l["currency"],
+                "method": l.get("method") or "SWIFT"}
+        if l.get("hold_reason"):  # risk-held lines bind their reason code (absent otherwise: old shape kept)
+            item["hold_reason"] = l["hold_reason"]
+        out.append(item)
+    return out
 
 
 def approval_body(*, run_id: str, employer_key: str, decision: str, assessment: dict,

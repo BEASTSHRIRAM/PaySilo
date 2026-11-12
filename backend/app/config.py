@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 60 * 12
     cookie_secure: bool = False
     cors_origins: list[str] = ["http://localhost:3000"]
+    public_app_url: str | None = None  # base URL printed in proof-PDF verify links/QR (default: first CORS origin)
     seed_demo: bool = True
     # 1099-NEC watch: US-person contractors whose calendar-year-to-date payments reach this many USD.
     # USD 2,000 applies to payments made after 2025-12-31 (vendor sources) - confirm with your tax advisor.

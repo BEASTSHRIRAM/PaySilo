@@ -210,6 +210,31 @@ Demo: after Delta's partial run (wallet USD 2,461.12), add USD 4,000, press
 12.85 fee) is paid, no second run fee, wallet USD 2,559.24, run `SETTLED`; the
 original run stays `PARTIALLY_PAID` and links to the continuation.
 
+### Risk rules (the risk gate, code-decided)
+
+A new `risk` node runs before pricing. It holds (never pays) lines that trip a deterministic rule; the held
+lines carry a reason code, appear in the preview before approval (`assessment.risk_held_lines`, the approval
+`held_lines`), are bound into the Visa TAP-signed approval snapshot, and are saved as `HELD` pay lines with
+`hold_reason`. Nobody, approver included, can approve them into a payout: they are not in `pay_lines`, and
+the execute step refuses any line that is not VERIFIED as a second defence.
+
+| Code | Rule |
+| --- | --- |
+| `BANK_UNVERIFIED` | `bank_verification_status != VERIFIED` (changed or newly submitted, awaiting a second person's callback check). |
+| `RECENT_BANK_CHANGE_LARGE_PAYMENT` | Bank details changed in the last 7 days AND the line is above 2x the contractor's previous paid amount (same currency), or above USD 5,000 when there is no history, unless a different person verified them after the change. Fails closed if no rate is available. |
+
+Other guards: the facts come from the database at run start (a client-supplied value is overwritten; an unknown
+contractor id is held as unverified), bank details that change between preview and approval block the approval,
+and **Pay held lines** is refused until the held contractors are verified (then it works as usual). Existing rows
+migrate as VERIFIED, so nothing changes for existing data. The demo bank change awaiting verification is on Sam Lee
+(Cobalt), not on a Delta contractor.
+
+Emails go through the Notification outbox. Mail carrying a private link (contractor onboarding link, org
+invitation) is marked sensitive: the stored/listed body is a redaction placeholder, the real text is held only
+until it is delivered and is never returned by any API. Bank-change callback requests (masked account only) go
+to the employer contact and the approvers. Run settled / payment failed notices are queued when the run finishes
+(one per run and recipient, shared with the sweep).
+
 ### Safety rules (enforced in code, tested in the suite)
 
 - **Tenant isolation is absolute.** Organisation and employer context
@@ -366,6 +391,12 @@ frontend/              Next.js: landing, login/signup, dashboard (runs, employer
                        funding, exceptions, reconciliation, journals, evidence), Silo chat panel
 deploy/agentcore/      AgentCore wrapping notes + sample config
 ```
+
+## Proof of payment
+
+| Feature | What you get | Docs |
+|---|---|---|
+| **Proof of payment PDFs** | Per-contractor proof (or an honest *NOT PAID* status notice) and a run-level statement, with masked bank details, Airwallex transfer id, status timeline, ledger receipt hash, an HMAC integrity block and a public `/verify/{token}` page (VALID/INVALID) plus a "Where is my money?" trace. It says what Airwallex reported, never a bank credit time it does not have. | `backend/docs/proof-of-payment.md` |
 
 ## Honest limits of this build
 

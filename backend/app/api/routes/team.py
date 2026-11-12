@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...db.models import Invitation, Membership, Organization, User
 from ...security import hash_password, verify_password
+from ...services import email_templates, notify
 from ..deps import Tenant, current_tenant, get_db, get_settings, require_roles
 from ..schemas import SessionOut
 from .auth import _set_session, _session_out
@@ -103,7 +104,8 @@ def remove_member(user_id: uuid.UUID, tenant: Tenant = Depends(require_roles({"o
     db.delete(m); db.commit(); return Response(status_code=204)
 
 @router.post("/org/invitations", status_code=201)
-def create_invitation(body: InviteIn, tenant: Tenant = Depends(require_roles({"owner", "admin"})), db: Session = Depends(get_db)):
+def create_invitation(body: InviteIn, request: Request, tenant: Tenant = Depends(require_roles({"owner", "admin"})),
+                      db: Session = Depends(get_db), settings=Depends(get_settings)):
     if tenant.role == "admin" and body.role == "admin": raise HTTPException(403, "Admins cannot invite admins.")
     email = str(body.email).lower()
     if db.scalar(select(Membership.id).join(User, User.id == Membership.user_id).where(Membership.organization_id == tenant.organization.id, func.lower(User.email) == email)):
@@ -116,6 +118,16 @@ def create_invitation(body: InviteIn, tenant: Tenant = Depends(require_roles({"o
                      token_hash=hashlib.sha256(token.encode()).hexdigest(), invited_by_id=tenant.user.id,
                      status="PENDING", expires_at=datetime.now(UTC) + timedelta(days=7))
     db.add(inv); db.commit(); db.refresh(inv)
+    # Email the link through the outbox as a SENSITIVE message: the token never appears in the notifications list.
+    try:
+        url = f"{settings.app_base_url.rstrip('/')}/invite/{token}"
+        subject, text, html = email_templates.invite(tenant.organization.name, tenant.user.full_name, inv.role, url)
+        notify.queue_email(db, tenant.organization, "INVITE", email, subject, text, body_html=html,
+                           dedupe_key=f"invite:{inv.id}", meta={"invitation_id": str(inv.id)}, sensitive=True)
+        db.commit()
+        notify.dispatch_async(request.app.state.db.sessionmaker, settings)
+    except Exception:  # noqa: BLE001 - a mail problem must not undo the invitation; the link is still returned
+        db.rollback()
     return _invite_data(inv, token)
 
 @router.get("/org/invitations")
