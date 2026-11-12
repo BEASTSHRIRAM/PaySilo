@@ -69,10 +69,14 @@ CREATE TABLE employers (
 	airwallex_account_id VARCHAR(64), 
 	airwallex_global_account_id VARCHAR(64), 
 	status VARCHAR(16) NOT NULL, 
+	pay_frequency VARCHAR(12), 
+	next_pay_date DATE, 
+	funding_lead_days INTEGER DEFAULT '2' NOT NULL, 
 	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
 	PRIMARY KEY (id), 
 	CONSTRAINT uq_employer_org_name UNIQUE (organization_id, name), 
 	CONSTRAINT ck_employer_status CHECK (status IN ('PENDING', 'ACTIVE', 'SUSPENDED')), 
+	CONSTRAINT ck_employer_pay_frequency CHECK (pay_frequency IS NULL OR pay_frequency IN ('WEEKLY', 'BIWEEKLY', 'MONTHLY')), 
 	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
 	UNIQUE (airwallex_account_id)
 );
@@ -382,6 +386,36 @@ CREATE TABLE ledger_transactions (
 CREATE INDEX ix_ledger_transactions_employer_id ON ledger_transactions (employer_id);
 CREATE INDEX ix_ledger_transactions_organization_id ON ledger_transactions (organization_id);
 
+CREATE TABLE notifications (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	employer_id UUID, 
+	contractor_id UUID, 
+	kind VARCHAR(32) NOT NULL, 
+	channel VARCHAR(12) NOT NULL, 
+	recipient VARCHAR(254) NOT NULL, 
+	subject VARCHAR(300) NOT NULL, 
+	body TEXT NOT NULL, 
+	body_html TEXT, 
+	status VARCHAR(8) NOT NULL, 
+	provider VARCHAR(24), 
+	error TEXT, 
+	attempts INTEGER DEFAULT '0' NOT NULL, 
+	last_attempt_at TIMESTAMP WITH TIME ZONE, 
+	dedupe_key VARCHAR(120), 
+	meta JSONB, 
+	sent_at TIMESTAMP WITH TIME ZONE, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_notification_org_dedupe UNIQUE (organization_id, dedupe_key), 
+	CONSTRAINT ck_notification_status CHECK (status IN ('QUEUED', 'SENT', 'FAILED')), 
+	CONSTRAINT ck_notification_kind CHECK (kind IN ('FUNDING_REMINDER', 'FUNDING_STATEMENT', 'FUNDING_OVERDUE', 'FUNDS_RECEIVED', 'APPROVAL_REQUESTED', 'HELD_LINES_REMINDER', 'RUN_SETTLED', 'PAYMENT_FAILED', 'INVITE', 'PAYMENT_NOTICE', 'GENERIC')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(employer_id) REFERENCES employers (id) ON DELETE SET NULL, 
+	FOREIGN KEY(contractor_id) REFERENCES contractors (id) ON DELETE SET NULL
+);
+CREATE INDEX ix_notifications_organization_id ON notifications (organization_id);
+
 CREATE TABLE pay_lines (
 	id UUID NOT NULL, 
 	run_id UUID NOT NULL, 
@@ -574,6 +608,7 @@ ALTER TABLE "benefit_requests" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "contractor_changes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "contractor_onboarding_invites" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "ledger_transactions" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "notifications" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "pay_lines" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "settlement_receipts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "source_imports" ENABLE ROW LEVEL SECURITY;

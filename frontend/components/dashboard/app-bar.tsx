@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   BookOpen, CalendarDays, ClipboardCheck, FileUp, Gift, Landmark, LayoutDashboard,
-  LogOut, Play, Scale, ShieldCheck, TriangleAlert, X, Users,
+  LogOut, Mail, Play, Scale, ShieldCheck, TriangleAlert, X, Users,
 } from "lucide-react";
 
 import { api, type Session } from "@/lib/api";
@@ -34,6 +34,7 @@ export const NAV_GROUPS: { label: string; links: { href: string; label: string; 
     label: "Money movement",
     links: [
       { href: "/dashboard/funding", label: "Funding", icon: Landmark },
+      { href: "/dashboard/notifications", label: "Notifications", icon: Mail },
       { href: "/dashboard/exceptions", label: "Exceptions", icon: TriangleAlert },
       { href: "/dashboard/reconciliation", label: "Reconciliation", icon: Scale },
       { href: "/dashboard/benefits", label: "Benefits", icon: Gift },

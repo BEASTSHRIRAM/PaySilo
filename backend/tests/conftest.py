@@ -4,6 +4,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["PAYSILO_ENV_FILE"] = ""  # never read a developer's .env in tests
 os.environ["APP_ENV"] = "demo"
+os.environ["AUTO_CONTINUE_HELD"] = "off"  # opt in per test
+os.environ["FUNDING_REMINDERS"] = "off"  # no background sweep in tests
 os.environ.pop("ANTHROPIC_API_KEY", None)  # tests never call a real LLM
 os.environ.pop("DATABASE_URL", None)
 
