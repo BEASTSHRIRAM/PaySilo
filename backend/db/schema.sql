@@ -118,6 +118,26 @@ CREATE TABLE memberships (
 );
 CREATE INDEX ix_memberships_user_id ON memberships (user_id);
 
+CREATE TABLE onboarding_states (
+	id UUID NOT NULL, 
+	organization_id UUID NOT NULL, 
+	user_id UUID NOT NULL, 
+	tour_version INTEGER DEFAULT '1' NOT NULL, 
+	status VARCHAR(12) DEFAULT 'NOT_STARTED' NOT NULL, 
+	last_step VARCHAR(64), 
+	completed_chapters JSONB, 
+	checklist_dismissed BOOLEAN DEFAULT '0' NOT NULL, 
+	updated_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	created_at TIMESTAMP WITH TIME ZONE NOT NULL, 
+	PRIMARY KEY (id), 
+	CONSTRAINT uq_onboarding_org_user UNIQUE (organization_id, user_id), 
+	CONSTRAINT ck_onboarding_status CHECK (status IN ('NOT_STARTED', 'IN_PROGRESS', 'COMPLETED', 'SKIPPED')), 
+	FOREIGN KEY(organization_id) REFERENCES organizations (id) ON DELETE CASCADE, 
+	FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX ix_onboarding_states_organization_id ON onboarding_states (organization_id);
+CREATE INDEX ix_onboarding_states_user_id ON onboarding_states (user_id);
+
 CREATE TABLE workflows (
 	id UUID NOT NULL, 
 	organization_id UUID NOT NULL, 
@@ -961,6 +981,7 @@ ALTER TABLE "chat_threads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "employers" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "invitations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "memberships" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "onboarding_states" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "workflows" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "benefit_budgets" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "chat_messages" ENABLE ROW LEVEL SECURITY;

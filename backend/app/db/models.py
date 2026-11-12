@@ -1223,3 +1223,34 @@ class WorkflowTask(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
     created_by_run_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("workflow_runs.id", ondelete="SET NULL"))
+
+
+# ---------------------------------------------------------------------------
+# Product tour (onboarding guide): one row per (organization, user)
+# ---------------------------------------------------------------------------
+
+TOUR_STATUSES = ("NOT_STARTED", "IN_PROGRESS", "COMPLETED", "SKIPPED")
+
+
+class OnboardingState(TimestampMixin, Base):
+    """Where one member is in the guided product tour. Written only by that member for their own org."""
+
+    __tablename__ = "onboarding_states"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id", name="uq_onboarding_org_user"),
+        CheckConstraint(_in("status", TOUR_STATUSES), name="ck_onboarding_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    tour_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="NOT_STARTED",
+                                        server_default="NOT_STARTED")
+    last_step: Mapped[str | None] = mapped_column(String(64))
+    completed_chapters: Mapped[list | None] = mapped_column(JsonType)
+    checklist_dismissed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow,
+                                                 nullable=False)

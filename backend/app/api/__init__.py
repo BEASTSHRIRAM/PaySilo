@@ -25,7 +25,7 @@ from .routes import auth, bedata, benefits, chat, employers, platform, runs, tap
 from .routes import contractor_trust
 from .routes import funding_plan
 from .routes import notifications, onboarding, travel, workflow_tools, workflows
-from .routes import proofs
+from .routes import proofs, tour
 
 logger = logging.getLogger("paysilo")
 
@@ -79,4 +79,5 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     for module in (onboarding, travel, workflow_tools, workflows):
         app.include_router(module.router)
     app.include_router(proofs.router)
+    app.include_router(tour.router)
     return app

@@ -22,6 +22,7 @@ from ..db.models import (
     Employer,
     Membership,
     OnboardingBudget,
+    OnboardingState,
     OnboardingKit,
     Organization,
     TravelBudget,
@@ -196,6 +197,10 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
         logger.info("Seeded demo employer %s", emp.name)
 
     s.flush()
+    # The demo account offers the tour through a pill instead of auto-starting it every time.
+    if not s.scalar(select(OnboardingState.id).where(OnboardingState.organization_id == org.id,
+                                                    OnboardingState.user_id == user.id)):
+        s.add(OnboardingState(organization_id=org.id, user_id=user.id, status="SKIPPED"))
     _seed_contractor_trust(s, org, user)
     _move_demo_bank_change(s, org)
     _seed_benefits(s, runtime, org, user)
