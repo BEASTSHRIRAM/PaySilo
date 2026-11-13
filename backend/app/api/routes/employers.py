@@ -69,6 +69,10 @@ def create_employer(request: Request, body: EmployerIn, tenant: Tenant = Depends
         "employer_id": str(emp.id), "employer_name": emp.name, "contact_email": emp.contact_email,
         "contact_name": emp.contact_name, "currency": emp.funding_currency, "status": emp.status,
         "settlement_mode": emp.settlement_mode})
+    if emp.contact_email:  # same dedupe key as the seeded Employer Welcome workflow: never two welcome mails
+        hooks.queue_itinerary(request, db, tenant, "employer_welcome", emp.contact_email,
+                              {"employer_name": emp.name}, dedupe_key=f"welcome:employer:{emp.id}",
+                              employer_id=emp.id)
     return employer_detail_out(db, runtime, load_employer(db, tenant, emp.id))
 
 

@@ -170,7 +170,8 @@ def seed_demo(s: Session, runtime: PlatformRuntime) -> Organization:
         s.flush()
     user = s.scalar(select(User).where(User.email == DEMO_EMAIL))
     if user is None:
-        user = User(email=DEMO_EMAIL, full_name=DEMO_USER_NAME, password_hash=hash_password(DEMO_PASSWORD))
+        user = User(email=DEMO_EMAIL, full_name=DEMO_USER_NAME, password_hash=hash_password(DEMO_PASSWORD),
+                    email_verified_at=datetime.now(UTC))
         s.add(user)
         s.flush()
     if not s.scalar(select(Membership.id).where(Membership.user_id == user.id,

@@ -51,7 +51,8 @@ def test_funding_creates_one_continuation_awaiting_approval_and_emails_approvers
     assert len(conts) == 1 and conts[0]["status"] == "RESERVED"  # waits for a human; nothing approved
     assert {c.request_id for c in auto.app.state.runtime.recorder.log if c.operation == "create_transfer"} == transfers_before
     assert auto.get(f"/runs/{parent['id']}").json()["continuation_run_id"] == conts[0]["id"]
-    asks = _notes(db, "APPROVAL_REQUESTED")
+    # (the original run's own approval mail is separate: only the continuation's mail is counted here)
+    asks = [n for n in _notes(db, "APPROVAL_REQUESTED") if f"/dashboard/runs/{conts[0]['id']}" in n.body]
     assert len(asks) == 1 and asks[0].recipient == "demo@paysilo.test" and asks[0].status == "QUEUED"
     assert f"/dashboard/runs/{conts[0]['id']}" in asks[0].body and "Nothing is paid until" in asks[0].body
     assert asks[0].body_html and "<a href=" in asks[0].body_html
@@ -62,7 +63,7 @@ def test_funding_creates_one_continuation_awaiting_approval_and_emails_approvers
         org = s.scalar(select(Organization))
         reminders.sweep_organization(s, auto.app.state.runtime, auto.app.state.settings, org)
     assert len([r for r in _runs(auto, emp) if r.get("parent_run_id") == parent["id"]]) == 1
-    assert len(_notes(db, "APPROVAL_REQUESTED")) == 1
+    assert len(_notes(db, "APPROVAL_REQUESTED")) == 2  # the original run's mail + the one continuation's mail
     # only a person can approve it, and that still works
     done = auto.post(f"/runs/{conts[0]['id']}/decision", json={"decision": "approve"}).json()
     assert done["status"] == "SETTLED"
@@ -72,7 +73,8 @@ def test_not_enough_funds_creates_nothing(auto):
     emp, parent = _delta_partial(auto)
     _fund(auto, emp, "100")
     assert [r for r in _runs(auto, emp) if r.get("parent_run_id")] == []
-    assert _notes(auto.app.state.db, "APPROVAL_REQUESTED") == []
+    # only the original run's own approval mail exists; no continuation means no further approval mail
+    assert [n for n in _notes(auto.app.state.db, "APPROVAL_REQUESTED") if parent["id"] not in n.body] == []
 
 
 def test_switch_off_and_later_payroll_guard(auto):

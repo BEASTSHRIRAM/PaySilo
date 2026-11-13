@@ -627,19 +627,18 @@ class PlatformRuntime:
             out[c.id] = f
         return out
 
-    def _announce_outcome(self, s: Session, run: PayrollRun) -> None:
-        """Queue the run_settled / payment_failed notice right away (same dedupe keys as the sweep). Never raises."""
-        if run.status not in ("SETTLED", "FAILED"):
-            return
+    def _announce_outcome(self, s: Session, run: PayrollRun, prev_status: str | None = None) -> None:
+        """Queue the lifecycle mails for the run's new status right away (approval needed, held, partly paid,
+        risk hold, rejected, settled, failed, payment notices). Deduped; never raises."""
         try:
-            from . import autopilot, notify  # lazy: autopilot imports this module
+            from . import notify, payroll_mail  # lazy: these import this module's consumers
 
             org = s.get(Organization, run.organization_id)
-            if org is not None and autopilot.report_run_outcome(s, self.settings, org, run):
+            if org is not None and payroll_mail.announce_run(s, self.settings, org, run, prev_status):
                 s.commit()
                 notify.dispatch_async(self.db.sessionmaker, self.settings)
         except Exception:  # noqa: BLE001 - a mail problem must never affect the run
-            logger.exception("Queueing the run outcome notice failed for run %s", run.id)
+            logger.exception("Queueing the run mails failed for run %s", run.id)
             s.rollback()
 
     def _invoke_and_persist(self, s: Session, run: PayrollRun, employer: Employer, call,
@@ -667,7 +666,7 @@ class PlatformRuntime:
                 s.add(approval)
         finally:
             s.commit()
-        self._announce_outcome(s, run)
+        self._announce_outcome(s, run, prev_status)
         self._dispatch_workflow_status(s, run, prev_status)
         if failure is not None:
             raise failure

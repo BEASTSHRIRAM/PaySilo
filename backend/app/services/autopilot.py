@@ -86,20 +86,9 @@ def _continuable_parents(db: Session, employer: Employer) -> list[PayrollRun]:
 def request_approval(db: Session, settings: Settings, org: Organization, employer: Employer,
                      run: PayrollRun, *, continuation: bool) -> int:
     """Queue one approval-request email per approver (deduped per run + person). Returns how many were new."""
-    total = money_str(run.required_usd) if run.required_usd is not None else "the assessed total"
-    new = 0
-    for user in approvers(db, org):
-        key = f"approval:{run.id}:{user.id}"
-        subject, text, html = tpl.approval_requested(
-            employer.name, run_label(run), f"USD {total}" if run.required_usd is not None else total,
-            run_url(settings, run.id), org.name, continuation=continuation)
-        before = db.scalar(select(Notification.id).where(
-            Notification.organization_id == org.id, Notification.dedupe_key == key))
-        notify.queue_email(db, org, "APPROVAL_REQUESTED", user.email, subject, text, body_html=html,
-                           employer_id=employer.id, dedupe_key=key,
-                           meta={"run_id": str(run.id), "continuation": continuation})
-        new += before is None
-    return new
+    from . import payroll_mail  # lazy: it imports this module
+
+    return payroll_mail.request_approval(db, settings, org, run)
 
 
 def continue_held_for(db: Session, runtime: PlatformRuntime, settings: Settings, org: Organization,
@@ -190,7 +179,7 @@ def on_funds_arrived(db: Session, runtime: PlatformRuntime, settings: Settings, 
         outcome = auto_continue(db, runtime, settings, org, employer)
         _emit_funds_received(db, runtime, org, employer, amount, outcome, reference)
         if employer.contact_email:
-            subject, text, html = tpl.funds_received(employer.name, f"USD {amount}", org.name,
+            subject, text, html = tpl.funds_received(employer.name, tpl.money("USD", amount), org.name,
                                                      continuation_started=outcome["action"] == "created")
             notify.queue_email(db, org, "FUNDS_RECEIVED", employer.contact_email, subject, text, body_html=html,
                                employer_id=employer.id, meta={"amount_usd": amount})
@@ -229,26 +218,9 @@ def report_run_outcome(db: Session, settings: Settings, org: Organization, run: 
     """Queue the SETTLED / FAILED notice for one run: one per run and person (shared dedupe key with the sweep)."""
     if run.status not in ("SETTLED", "FAILED"):
         return 0
-    queued = 0
-    for user in approvers(db, org):
-        key = f"outcome:{run.id}:{run.status}:{user.id}"
-        if run.status == "SETTLED":
-            subject, text, html = tpl.run_settled(
-                run.employer.name, run_label(run),
-                f"USD {money_str(run.required_usd)}" if run.required_usd is not None else "the full amount",
-                run_url(settings, run.id), org.name)
-            kind = "RUN_SETTLED"
-        else:
-            subject, text, html = tpl.payment_failed(
-                run.employer.name, run_label(run), run.error or "the run stopped before every payment finished.",
-                run_url(settings, run.id), org.name)
-            kind = "PAYMENT_FAILED"
-        before = db.scalar(select(Notification.id).where(
-            Notification.organization_id == org.id, Notification.dedupe_key == key))
-        notify.queue_email(db, org, kind, user.email, subject, text, body_html=html,
-                           employer_id=run.employer_id, dedupe_key=key, meta={"run_id": str(run.id)})
-        queued += before is None
-    return queued
+    from . import payroll_mail  # lazy: it imports this module
+
+    return payroll_mail.announce_run(db, settings, org, run, None)
 
 
 def report_outcomes(db: Session, settings: Settings, org: Organization, now: datetime | None = None) -> int:

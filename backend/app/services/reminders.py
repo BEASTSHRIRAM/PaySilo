@@ -41,7 +41,7 @@ def send_funding_email(db: Session, org: Organization, employer: Employer, plan:
     subject, body = draft.draft_funding_email(kind, plan, org.name)
     body, polished = draft.polish_body(body, plan, settings=settings)
     return notify.queue_email(
-        db, org, kind, employer.contact_email or "", subject, body, body_html=tpl.render_html(body),
+        db, org, kind, employer.contact_email or "", subject, body, body_html=tpl.render_html(body, org=org.name, reason=tpl.REASON_EMPLOYER, subject=subject),
         employer_id=employer.id, dedupe_key=dedupe_key,
         meta={**(meta or {}), "pay_date": plan["pay_date"], "fund_by": plan["fund_by"], "gap_usd": plan["gap_usd"],
               "recommended_transfer_usd": plan["recommended_transfer_usd"], "polished": polished})
@@ -115,6 +115,22 @@ def sweep_organization(db: Session, runtime, settings: Settings, org: Organizati
         autopilot.report_outcomes(db, settings, org)
     except Exception:  # noqa: BLE001
         logger.exception("Reporting run outcomes failed for organization %s", org.id)
+        db.rollback()
+    try:
+        from . import payroll_mail
+
+        payroll_mail.remind_waiting_approvals(db, settings, org)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Approval reminders failed for organization %s", org.id)
+        db.rollback()
+    try:
+        from . import compliance_mail
+
+        compliance_mail.tax_form_alert(db, settings, org, today)
+        db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Tax form alert failed for organization %s", org.id)
         db.rollback()
     db.commit()
     return results

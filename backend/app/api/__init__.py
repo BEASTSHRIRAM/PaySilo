@@ -33,6 +33,9 @@ logger = logging.getLogger("paysilo")
 def create_app(settings: Settings | None = None, database: Database | None = None) -> FastAPI:
     settings = settings or load_settings()
     settings.session_secret()  # fail fast: live mode requires JWT_SECRET
+    if settings.email_verification == "on" and not settings.email_configured:
+        raise RuntimeError("EMAIL_VERIFICATION=on needs email delivery: set BREVO_SMTP_USER, BREVO_SMTP_KEY and "
+                           "EMAIL_FROM, or use EMAIL_VERIFICATION=auto.")
     db = database or Database.from_url(settings.database_url)
     runtime = PlatformRuntime(settings, db)
 

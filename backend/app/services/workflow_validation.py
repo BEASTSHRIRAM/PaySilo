@@ -162,6 +162,15 @@ def validate_graph_detailed(graph, *, employer_ids: set[str] | None = None) -> l
                 _err(errors, f"Node '{node_id}': unknown email template '{data['template']}' "
                              f"(use one of {', '.join(TEMPLATE_NAMES)}).", node_id=node_id, field="template",
                      code="invalid_value")
+            if data.get("template") == "custom_message":
+                from .email_custom import MAX_BODY
+
+                if not str(data.get("body") or "").strip():
+                    _err(errors, f"Node '{node_id}': the custom message needs a body (plain text, up to {MAX_BODY} "
+                                 "characters).", node_id=node_id, field="body", code="required")
+                if not str(data.get("subject") or "").strip():
+                    _err(errors, f"Node '{node_id}': the custom message needs a subject.", node_id=node_id,
+                         field="subject", code="required")
             if data.get("recipient", "decider") not in EMAIL_RECIPIENTS:
                 _err(errors, f"Node '{node_id}': send_email recipient must be one of "
                              f"{', '.join(EMAIL_RECIPIENTS)}.", node_id=node_id, field="recipient",

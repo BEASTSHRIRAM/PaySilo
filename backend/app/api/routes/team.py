@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...db.models import Invitation, Membership, Organization, User
 from ...security import hash_password, verify_password
-from ...services import email_templates, notify
+from ...services import email_templates, notify, otp
 from ..deps import Tenant, current_tenant, get_db, get_settings, require_roles
 from ..schemas import SessionOut
 from .auth import _set_session, _session_out
@@ -56,6 +56,16 @@ class PublicInviteOut(BaseModel):
     existing_user: bool
     expires_at: datetime
 
+def _account_mail(request: Request, db: Session, settings, user: User, template: str, org: Organization,
+                  ctx: dict, key: str) -> None:
+    """Queue one account mail for ``user`` in ``org``'s outbox (guarded: a mail problem never undoes the change)."""
+    try:
+        if otp.queue_account_mail(db, settings, user, template, ctx, dedupe_key=key, org=org):
+            db.commit()
+            notify.dispatch_async(request.app.state.db.sessionmaker, settings)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+
 def _invite_or_404(token: str, db: Session) -> Invitation:
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     invite = db.scalar(select(Invitation).where(Invitation.token_hash == token_hash))
@@ -80,7 +90,7 @@ def members(tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_
     return [{"id": u.id, "name": u.full_name, "email": u.email, "role": m.role, "joined_at": m.created_at} for u, m in rows]
 
 @router.patch("/org/members/{user_id}")
-def update_member(user_id: uuid.UUID, body: RoleIn, tenant: Tenant = Depends(require_roles({"owner"})), db: Session = Depends(get_db)):
+def update_member(user_id: uuid.UUID, body: RoleIn, request: Request, tenant: Tenant = Depends(require_roles({"owner"})), db: Session = Depends(get_db)):
     if user_id == tenant.user.id:
         raise HTTPException(400, "You cannot change your own role.")
     m = db.scalar(select(Membership).where(Membership.organization_id == tenant.organization.id, Membership.user_id == user_id))
@@ -88,12 +98,19 @@ def update_member(user_id: uuid.UUID, body: RoleIn, tenant: Tenant = Depends(req
     if m.role == "owner" or body.role == "owner":
         owners = db.scalar(select(func.count()).select_from(Membership).where(Membership.organization_id == tenant.organization.id, Membership.role == "owner")) or 0
         if m.role == "owner" and body.role != "owner" and owners <= 1: raise HTTPException(400, "The last owner cannot be demoted.")
-    m.role = body.role
+    old_role, m.role = m.role, body.role
     db.commit()
+    member = db.get(User, user_id)
+    if member is not None and old_role != body.role:
+        settings = request.app.state.settings
+        _account_mail(request, db, settings, member, "role_changed", tenant.organization,
+                      {"by": tenant.user.full_name, "old_role": old_role, "new_role": body.role,
+                       "url": f"{settings.app_base_url.rstrip('/')}/dashboard"},
+                      f"role:{m.id}:{old_role}:{body.role}:{datetime.now(UTC).isoformat()}")
     return {"id": m.user_id, "role": m.role}
 
 @router.delete("/org/members/{user_id}", status_code=204)
-def remove_member(user_id: uuid.UUID, tenant: Tenant = Depends(require_roles({"owner", "admin"})), db: Session = Depends(get_db)):
+def remove_member(user_id: uuid.UUID, request: Request, tenant: Tenant = Depends(require_roles({"owner", "admin"})), db: Session = Depends(get_db)):
     if user_id == tenant.user.id: raise HTTPException(400, "You cannot remove yourself.")
     m = db.scalar(select(Membership).where(Membership.organization_id == tenant.organization.id, Membership.user_id == user_id))
     if not m: raise HTTPException(404, "Member not found.")
@@ -101,7 +118,13 @@ def remove_member(user_id: uuid.UUID, tenant: Tenant = Depends(require_roles({"o
         if tenant.role != "owner": raise HTTPException(403, "Admins cannot remove owners.")
         owners = db.scalar(select(func.count()).select_from(Membership).where(Membership.organization_id == tenant.organization.id, Membership.role == "owner")) or 0
         if owners <= 1: raise HTTPException(400, "The last owner cannot be removed.")
-    db.delete(m); db.commit(); return Response(status_code=204)
+    member = db.get(User, user_id)
+    membership_id = m.id
+    db.delete(m); db.commit()
+    if member is not None:
+        _account_mail(request, db, request.app.state.settings, member, "member_removed", tenant.organization,
+                      {"by": tenant.user.full_name}, f"removed:{membership_id}")
+    return Response(status_code=204)
 
 @router.post("/org/invitations", status_code=201)
 def create_invitation(body: InviteIn, request: Request, tenant: Tenant = Depends(require_roles({"owner", "admin"})),
@@ -152,7 +175,7 @@ def public_invitation(token: str, db: Session = Depends(get_db)):
                            invited_by=inviter.full_name if inviter else None, existing_user=existing, expires_at=inv.expires_at)
 
 @router.post("/invitations/{token}/accept", response_model=SessionOut)
-def accept_invitation(token: str, response: Response, body: dict, db: Session = Depends(get_db), settings=Depends(get_settings)):
+def accept_invitation(token: str, request: Request, response: Response, body: dict, db: Session = Depends(get_db), settings=Depends(get_settings)):
     inv = _invite_or_404(token, db)
     email = inv.email
     user = db.scalar(select(User).where(func.lower(User.email) == email))
@@ -166,7 +189,8 @@ def accept_invitation(token: str, response: Response, body: dict, db: Session = 
         pwd = payload.password
         if len(pwd.encode()) > 72 or not any(c.isascii() and c.isalpha() for c in pwd) or not any(c.isdigit() for c in pwd):
             raise HTTPException(422, "Password must be 8+ characters and contain a letter and a number (max 72 bytes).")
-        user = User(email=email, full_name=payload.full_name.strip(), password_hash=hash_password(pwd))
+        user = User(email=email, full_name=payload.full_name.strip(), password_hash=hash_password(pwd),
+                    email_verified_at=datetime.now(UTC))  # the emailed invitation link proved the address
         db.add(user); db.flush()
     org = db.get(Organization, inv.organization_id)
     try:
@@ -175,5 +199,10 @@ def accept_invitation(token: str, response: Response, body: dict, db: Session = 
         db.commit()
     except IntegrityError:
         db.rollback(); raise HTTPException(404, "Invitation not found.") from None
+    inviter = db.get(User, inv.invited_by_id) if inv.invited_by_id else None
+    if inviter is not None and inviter.id != user.id:
+        _account_mail(request, db, settings, inviter, "invite_accepted", org,
+                      {"member_name": user.full_name, "member_email": user.email, "role": inv.role,
+                       "url": f"{settings.app_base_url.rstrip('/')}/dashboard/team"}, f"inviteok:{inv.id}")
     _set_session(response, settings, user, org)
     return _session_out(user, org, inv.role)

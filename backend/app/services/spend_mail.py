@@ -34,6 +34,9 @@ def queue_template(db: Session, org: Organization, template: str, to: str, conte
                    contractor_id: uuid.UUID | None = None, meta: dict | None = None) -> Notification:
     """Render one of the spend/workflow templates and queue it. Idempotent on ``dedupe_key``."""
     entry = tpl.SPEND_TEMPLATES.get(template)
+    if entry is None and template in tpl.TEMPLATES:  # registry templates that workflows do not offer
+        spec = tpl.TEMPLATES[template]
+        entry = (spec.build, spec.kind, spec.sensitive)
     if entry is None:
         raise ValueError(f"Unknown email template {template!r}. Known: {', '.join(TEMPLATE_NAMES)}.")
     builder, kind, sensitive = entry

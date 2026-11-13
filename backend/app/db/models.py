@@ -74,7 +74,13 @@ NOTIFICATION_KINDS = ("FUNDING_REMINDER", "FUNDING_STATEMENT", "FUNDING_OVERDUE"
                       "PAYMENT_NOTICE", "ONBOARDING_LINK", "BANK_CHANGE_CALLBACK", "GENERIC",
                       # spend categories + workflow mails
                       "SPEND_APPROVAL_REQUESTED", "KIT_COMPLETED", "TRIP_ITINERARY", "PURCHASE_RECEIPT",
-                      "EMPLOYER_WELCOME", "PAYSLIP_RECEIPT", "WORKFLOW_ALERT")
+                      "EMPLOYER_WELCOME", "PAYSLIP_RECEIPT", "WORKFLOW_ALERT",
+                      # account, payroll lifecycle and workflow mails
+                      "EMAIL_OTP", "ACCOUNT_WELCOME", "PASSWORD_CHANGED", "INVITE_ACCEPTED", "ROLE_CHANGED",
+                      "MEMBER_REMOVED", "ONBOARDING_SUBMITTED", "BANK_VERIFIED", "TAX_FORM_ALERT",
+                      "APPROVAL_REMINDER", "RUN_APPROVED", "RUN_REJECTED", "RUN_PARTIAL", "PAYROLL_HELD",
+                      "RISK_HOLD", "PURCHASE_AUTH_NEEDED", "WORKFLOW_FAILED", "SCHEDULE_SKIPPED", "CUSTOM_MESSAGE")
+OTP_PURPOSES = ("VERIFY_EMAIL", "RESET_PASSWORD")
 SETTLEMENT_MODES = ("ALL_OR_NOTHING", "PARTIAL")
 NOTIFICATION_STATUSES = ("QUEUED", "SENT", "FAILED")
 
@@ -121,8 +127,30 @@ class User(TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when the address is proven (OTP). Existing and seeded users are treated as verified by the migration.
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     memberships: Mapped[list[Membership]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class EmailOtp(TimestampMixin, Base):
+    """A 6 digit one time code for email verification or password reset. Only a keyed HASH is stored."""
+
+    __tablename__ = "email_otps"
+    __table_args__ = (
+        CheckConstraint(_in("purpose", OTP_PURPOSES), name="ck_email_otp_purpose"),
+        Index("ix_email_otps_email_purpose", "email", "purpose"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    request_ip: Mapped[str | None] = mapped_column(String(64))
 
 
 class Membership(TimestampMixin, Base):

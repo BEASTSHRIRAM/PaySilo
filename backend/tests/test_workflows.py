@@ -355,7 +355,9 @@ def test_send_email_unknown_template_fails_the_run_and_queues_nothing(env):
     runs = dispatch_event(env.s, organization_id=env.org.id, event_type="contractor.created",
                           entity_kind="contractor", entity_id=str(env.contractor.id), facts={})
     env.s.commit()
-    assert runs[0].status == "FAILED" and _notes(env) == []
+    assert runs[0].status == "FAILED"
+    # no template mail is queued; the only mail is the new "workflow failed" notice to the owners
+    assert [n for n in _notes(env) if n.kind != "WORKFLOW_FAILED"] == []
     assert any("unknown email template" in e for e in validate_graph(wf.graph))
 
 

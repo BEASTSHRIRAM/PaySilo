@@ -183,7 +183,8 @@ def test_rescue_is_idempotent_with_autopilot(demo_client):
     rev = _steps(demo_client, wf_runs[0])["action.revalidate_held_run"]
     assert rev.output["action"] == "existing" and rev.output["continuation_run_id"] == cont[0]["id"]
     notes = _db_rows(demo_client, Notification, kind="APPROVAL_REQUESTED")
-    assert len(notes) == 1  # one approval mail per approver for the single continuation
+    # one approval mail per approver for the single continuation (the parent run has its own, separate mail)
+    assert len([n for n in notes if f"/dashboard/runs/{cont[0]['id']}" in n.body]) == 1
 
 
 def test_rescue_still_short_creates_nothing(demo_client):

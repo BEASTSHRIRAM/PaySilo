@@ -232,7 +232,7 @@ class VerifyBankIn(BaseModel):
 
 
 @router.post("/employers/{employer_id}/contractors/{contractor_id}/verify-bank", response_model=ContractorOut)
-def verify_bank(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: VerifyBankIn,
+def verify_bank(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: VerifyBankIn, request: Request,
                 tenant: Tenant = Depends(require_roles(APPROVER_ROLES)), db: Session = Depends(get_db),
                 runtime: PlatformRuntime = Depends(get_runtime)) -> ContractorOut:
     emp, c = _contractor_or_404(db, tenant, employer_id, contractor_id)
@@ -255,6 +255,8 @@ def verify_bank(employer_id: uuid.UUID, contractor_id: uuid.UUID, body: VerifyBa
     _log(db, c, "bank", f"Bank details verified (account {mask(c.iban or c.account_number)}) after callback confirmation",
          tenant.user.id)
     db.commit()
+    if trust_notify.bank_verified(db, request.app.state.settings, tenant.organization, emp, c):
+        notify.dispatch_async(request.app.state.db.sessionmaker, request.app.state.settings)
     return contractor_out(c)
 
 
@@ -471,7 +473,9 @@ def submit_onboarding(token: str, body: OnboardingSubmitIn, request: Request, db
     db.commit()
     settings = request.app.state.settings
     org = db.get(Organization, c.organization_id)
-    if org is not None and trust_notify.bank_change_callback_request(db, settings, org, emp, c):
+    if org is not None:
+        trust_notify.onboarding_submitted(db, settings, org, emp, c)
+        trust_notify.bank_change_callback_request(db, settings, org, emp, c)
         notify.dispatch_async(request.app.state.db.sessionmaker, settings)
     return OnboardingSubmitOut(status="PENDING_VERIFICATION",
                                message="Your details were sent. Your agency will confirm them before your next payment.")

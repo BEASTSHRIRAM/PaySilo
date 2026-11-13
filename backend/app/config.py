@@ -128,6 +128,22 @@ class Settings(BaseSettings):
     # Background funding-reminder sweep (every 30 min). Tests turn it off.
     funding_reminders: Literal["on", "off"] = "on"
 
+    # Signup email verification (6 digit OTP). auto = required only when email delivery is configured, so demo
+    # and test setups behave exactly as before. on = always required (fails closed at startup without a mailer).
+    email_verification: Literal["auto", "on", "off"] = "auto"
+    # Remind approvers when a prepared run still waits for a decision (hours between reminders, max 3).
+    approval_reminder_hours: int = 6
+    # Tell the person who prepared a run when an approver signs it (off by default: the settled mail follows).
+    notify_run_approved: bool = False
+    # Email contractors a payment notice (private receipt link) when their line is paid.
+    notify_contractors: bool = True
+
+    @property
+    def email_verification_required(self) -> bool:
+        if self.email_verification == "on":
+            return True
+        return self.email_verification == "auto" and self.email_configured
+
     @property
     def email_configured(self) -> bool:
         return bool(self.brevo_smtp_user and self.brevo_smtp_key and self.email_from)

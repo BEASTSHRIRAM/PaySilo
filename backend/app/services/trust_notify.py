@@ -31,7 +31,8 @@ def onboarding_link(db: Session, settings: Settings, org: Organization, employer
         return False
     try:
         url = f"{settings.app_base_url.rstrip('/')}/onboard/{token}"
-        subject, text, html = tpl.onboarding_link(contractor.full_name, employer.name, org.name, url, days)
+        subject, text, html = tpl.TEMPLATES["onboarding_link"].build(
+            {"contractor": contractor.full_name, "employer": employer.name, "url": url, "days": days}, org.name)
         notify.queue_email(db, org, "ONBOARDING_LINK", contractor.email, subject, text, body_html=html,
                            employer_id=employer.id, contractor_id=contractor.id, dedupe_key=f"onboard:{invite_id}",
                            meta={"invite_id": str(invite_id)}, sensitive=True)
@@ -59,7 +60,8 @@ def bank_change_callback_request(db: Session, settings: Settings, org: Organizat
             if to.lower() in seen:
                 continue
             seen.add(to.lower())
-            subject, text, html = tpl.bank_change_callback(contractor.full_name, employer.name, masked, url, org.name)
+            subject, text, html = tpl.TEMPLATES["bank_change_callback"].build(
+                {"contractor": contractor.full_name, "employer": employer.name, "masked": masked, "url": url}, org.name)
             key = f"bankcb:{contractor.id}:{changed}:{to.lower()}"
             before = db.query(notify.Notification.id).filter_by(organization_id=org.id, dedupe_key=key).first()
             notify.queue_email(db, org, "BANK_CHANGE_CALLBACK", to, subject, text, body_html=html,
@@ -71,3 +73,48 @@ def bank_change_callback_request(db: Session, settings: Settings, org: Organizat
         logger.exception("Queueing the bank-change callback request failed.")
         db.rollback()
         return 0
+
+
+def onboarding_submitted(db: Session, settings: Settings, org: Organization, employer: Employer,
+                         contractor: Contractor) -> int:
+    """Tell the staff (owners, admins, approvers) a contractor submitted details. One per contractor submission."""
+    try:
+        url = f"{settings.app_base_url.rstrip('/')}/dashboard/employers/{employer.id}"
+        stamp = contractor.onboarded_at.isoformat() if contractor.onboarded_at else "x"
+        new = 0
+        for user in autopilot.approvers(db, org):
+            subject, text, html = tpl.TEMPLATES["onboarding_submitted"].build(
+                {"name": (user.full_name or "").split(" ")[0] or None, "contractor_name": contractor.full_name,
+                 "employer_name": employer.name, "url": url}, org.name)
+            key = f"onbsub:{contractor.id}:{stamp}:{user.id}"
+            before = db.query(notify.Notification.id).filter_by(organization_id=org.id, dedupe_key=key).first()
+            notify.queue_email(db, org, "ONBOARDING_SUBMITTED", user.email, subject, text, body_html=html,
+                               employer_id=employer.id, contractor_id=contractor.id, dedupe_key=key)
+            new += before is None
+        db.commit()
+        return new
+    except Exception:  # noqa: BLE001
+        logger.exception("Queueing the onboarding submitted mail failed.")
+        db.rollback()
+        return 0
+
+
+def bank_verified(db: Session, settings: Settings, org: Organization, employer: Employer,
+                  contractor: Contractor) -> bool:
+    """Tell the contractor their bank details were verified (last 4 only)."""
+    if not contractor.email:
+        return False
+    try:
+        digits = "".join(ch for ch in (contractor.iban or contractor.account_number or "") if ch.isalnum())
+        verified = contractor.bank_verified_at.isoformat() if contractor.bank_verified_at else "x"
+        subject, text, html = tpl.TEMPLATES["bank_verified"].build(
+            {"contractor_name": contractor.full_name, "employer_name": employer.name, "last4": digits[-4:]}, org.name)
+        notify.queue_email(db, org, "BANK_VERIFIED", contractor.email, subject, text, body_html=html,
+                           employer_id=employer.id, contractor_id=contractor.id,
+                           dedupe_key=f"bankok:{contractor.id}:{verified}")
+        db.commit()
+        return True
+    except Exception:  # noqa: BLE001
+        logger.exception("Queueing the bank verified mail failed.")
+        db.rollback()
+        return False

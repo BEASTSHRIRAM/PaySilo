@@ -261,6 +261,13 @@ def create_benefit_request(request: Request, body: BenefitRequestIn,
                    {"employer_id": str(req.employer_id), "employer_name": employer.name,
                     "contractor_name": req.contractor_name, "merchant": req.merchant, "item": req.item,
                     "amount": str(req.amount), "currency": req.currency, "status": req.status})
+    hooks.notify_deciders(
+        request, db, tenant, entity_key=f"benefit:{req.id}", employer_id=req.employer_id,
+        context={"entity_label": f"Benefit request for {req.contractor_name}", "employer_name": employer.name,
+                 "requested_for": req.contractor_name, "currency": req.currency, "total": str(req.amount),
+                 "lines": [{"label": f"{req.item} at {req.merchant}", "amount": str(req.amount),
+                            "currency": req.currency}],
+                 "deep_link": "/dashboard/benefits"})
     return _request_out(db, req)
 
 
@@ -280,7 +287,7 @@ def decide_benefit_request(request_id: uuid.UUID, body: BenefitDecisionIn,
 
 
 @router.post("/requests/{request_id}/purchase", response_model=BenefitPurchaseOut)
-def purchase_benefit_request(request_id: uuid.UUID,
+def purchase_benefit_request(request_id: uuid.UUID, request: Request,
                              tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
                              db: Session = Depends(get_db),
                              runtime: PlatformRuntime = Depends(get_runtime)) -> BenefitPurchaseOut:
@@ -292,7 +299,27 @@ def purchase_benefit_request(request_id: uuid.UUID,
         raise _benefit_error(exc) from None
     db.commit()
     db.refresh(purchase)
+    _purchase_mail(request, db, tenant, req, purchase)
     return benefit_purchase_out(purchase)
+
+
+def _purchase_mail(request: Request, db: Session, tenant: Tenant, req: BenefitRequest,
+                   purchase: BenefitPurchase) -> None:
+    """Receipt on success; on a live purchase that waits for Airi, tell the approver who clicked Purchase to open
+    the Benefits page (the Airi link itself is never put in an email)."""
+    base = request.app.state.settings.app_base_url.rstrip("/")
+    if purchase.status == "SUCCEEDED":
+        hooks.queue_itinerary(
+            request, db, tenant, "purchase_receipt", req.requested_by_email or tenant.user.email,
+            {"buyer_label": _employer_name(db, req.employer_id), "item_label": req.item, "merchant": req.merchant,
+             "currency": purchase.currency, "amount": str(purchase.amount), "provider_ref": purchase.provider_ref,
+             "mode": purchase.mode}, dedupe_key=f"receipt:{purchase.id}", employer_id=req.employer_id)
+    elif purchase.status == "PENDING":
+        hooks.queue_itinerary(
+            request, db, tenant, "purchase_auth_needed", tenant.user.email,
+            {"name": (tenant.user.full_name or "").split(" ")[0] or None, "item_label": req.item,
+             "amount": str(purchase.amount), "currency": purchase.currency, "url": f"{base}/dashboard/benefits"},
+            dedupe_key=f"authneeded:{purchase.id}", employer_id=req.employer_id)
 
 
 def _load_purchase(db: Session, tenant: Tenant, purchase_id: uuid.UUID) -> BenefitPurchase:
@@ -305,7 +332,7 @@ def _load_purchase(db: Session, tenant: Tenant, purchase_id: uuid.UUID) -> Benef
 
 
 @router.post("/purchases/{purchase_id}/complete", response_model=BenefitPurchaseOut)
-def complete_benefit_purchase(purchase_id: uuid.UUID, body: BenefitCompleteIn,
+def complete_benefit_purchase(purchase_id: uuid.UUID, body: BenefitCompleteIn, request: Request,
                               tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
                               db: Session = Depends(get_db),
                               runtime: PlatformRuntime = Depends(get_runtime)) -> BenefitPurchaseOut:
@@ -320,6 +347,7 @@ def complete_benefit_purchase(purchase_id: uuid.UUID, body: BenefitCompleteIn,
         raise _benefit_error(exc) from None
     db.commit()
     db.refresh(purchase)
+    _purchase_mail(request, db, tenant, req, purchase)
     return benefit_purchase_out(purchase)
 
 

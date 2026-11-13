@@ -461,7 +461,41 @@ def _fail_run(s: Session, run: WorkflowRun, detail: str) -> WorkflowRun:
     context.pop("waiting_node_id", None)
     run.context = context
     s.flush()
+    _mail_owners(s, run.organization_id, "workflow_failed", f"wffail:{run.id}",
+                 {"workflow_name": _workflow_name(s, run.workflow_id), "detail": detail})
     return run
+
+
+def _workflow_name(s: Session, workflow_id) -> str:
+    workflow = s.get(Workflow, workflow_id) if workflow_id else None
+    return workflow.name if workflow is not None else "a workflow"
+
+
+def _mail_owners(s: Session, organization_id, template: str, key_prefix: str, ctx: dict) -> int:
+    """Mail the owners and admins (once per person and key). Never raises: a mail problem cannot fail a run."""
+    try:
+        from ..config import load_settings
+        from . import notify, otp
+
+        settings = load_settings()
+        org = s.get(Organization, organization_id)
+        if org is None:
+            return 0
+        users = s.scalars(select(User).join(Membership, Membership.user_id == User.id)
+                          .where(Membership.organization_id == organization_id,
+                                 Membership.role.in_(("owner", "admin")), User.is_active.is_(True))
+                          .order_by(User.email)).all()
+        new = 0
+        for user in users:
+            with s.begin_nested():
+                new += otp.queue_account_mail(
+                    s, settings, user, template,
+                    {**ctx, "url": f"{settings.app_base_url.rstrip('/')}/dashboard/workflows"},
+                    dedupe_key=f"{key_prefix}:{user.id}", org=org)
+        return new
+    except Exception:  # noqa: BLE001
+        logger.exception("Queueing %s mail failed (ignored)", template)
+        return 0
 
 
 def dispatch_event(s: Session, *, organization_id: uuid.UUID, event_type: str, entity_kind: str,
@@ -798,6 +832,9 @@ def _act_send_email(s: Session, run: WorkflowRun, node: dict, data: dict, *, run
     if template not in spend_mail.TEMPLATE_NAMES:
         _log_step(s, run, node, "FAILED", f"Unknown email template '{template}'.")
         raise _RunFailure(f"send_email: unknown template '{template}'.")
+    if template == "approval_requested" and recipient == "decider" and _payroll_approval_mail(
+            s, run, node, runtime=runtime):
+        return
     addresses = _recipient_addresses(s, run, recipient, facts)
     if not addresses:
         detail = f"No email address resolved for recipient '{recipient}'."
@@ -808,11 +845,16 @@ def _act_send_email(s: Session, run: WorkflowRun, node: dict, data: dict, *, run
     employer = _resolve_employer(s, run, facts)
     contractor = _resolve_contractor(s, run, facts) if recipient == "contractor" else None
     context = _email_context(s, run, facts, settings)
+    if template == "custom_message":
+        context = {**context, "subject": data.get("subject") or "", "body": data.get("body") or "",
+                   "organization_name": org.name}
     rows = []
     try:
         for address in addresses:
             rows.append(spend_mail.queue_template(
-                s, org, template, address, context, dedupe_key=f"wf:{run.id}:{node['id']}:{address}",
+                s, org, template, address, context,
+                dedupe_key=(f"welcome:employer:{employer.id}" if template == "employer_welcome" and employer
+                            and address == employer.contact_email else f"wf:{run.id}:{node['id']}:{address}"),
                 employer_id=employer.id if employer else None, contractor_id=contractor.id if contractor else None,
                 meta={"workflow_run_id": str(run.id)}))
     except Exception as exc:  # noqa: BLE001
@@ -821,6 +863,22 @@ def _act_send_email(s: Session, run: WorkflowRun, node: dict, data: dict, *, run
     _log_step(s, run, node, "OK", f"Queued {template} email to {', '.join(addresses)} (see Notifications).",
               output={"template": template, "recipient": recipient, "to": addresses,
                       "notification_ids": [str(r.id) for r in rows]})
+
+
+def _payroll_approval_mail(s: Session, run: WorkflowRun, node: dict, *, runtime) -> bool:
+    """'Email deciders' on a payroll run uses the payroll approval mail and the SAME dedupe key as the run's own
+    mail (``approval:{run}:{user}``), so a person never gets two. False when no payroll run is in context."""
+    run_id = _context_run_id(run)
+    payroll = s.get(PayrollRun, _parse_uuid(run_id)) if run_id else None
+    if payroll is None or payroll.organization_id != run.organization_id:
+        return False
+    from . import payroll_mail
+
+    org = _org_of(s, run)
+    new = payroll_mail.request_approval(s, _settings_of(runtime), org, payroll)
+    _log_step(s, run, node, "OK", f"Queued the approval request for payroll run {payroll.id} to the deciders "
+              f"({new} new, repeats skipped).", output={"template": "approval_requested", "run_id": str(payroll.id)})
+    return True
 
 
 def _act_create_exception(s: Session, run: WorkflowRun, node: dict, data: dict, *, runtime, facts: dict) -> None:
@@ -1120,6 +1178,30 @@ def _as_utc(moment):
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
+def _mail_missed_occurrence(s: Session, workflow, data: dict, now) -> None:
+    """An occurrence older than the 24h catch up window that never ran (for example the server was down) is
+    reported to the owners once, instead of vanishing silently."""
+    from datetime import timedelta
+
+    from . import workflow_schedule as sched
+
+    try:
+        if not data.get("time") and not data.get("timezone"):
+            return  # legacy schedules have no exact slots
+        now = _as_utc(now)
+        earliest = max(now - timedelta(days=3), _as_utc(workflow.updated_at) if workflow.updated_at else now)
+        for moment in sched.occurrences(data, earliest, now - sched.CATCH_UP_WINDOW)[-1:]:
+            key = sched.occurrence_key(moment)
+            ran = s.scalar(select(WorkflowRun.id).where(
+                WorkflowRun.dedupe_key.like(f"{workflow.id}:trigger.schedule:%:{key}")).limit(1))
+            if ran is None:
+                _mail_owners(s, workflow.organization_id, "schedule_skipped", f"schedmiss:{workflow.id}:{key}",
+                             {"workflow_name": workflow.name, "when": moment.date().isoformat(),
+                              "reason": "The scheduled time passed while PaySilo could not run it."})
+    except Exception:  # noqa: BLE001
+        logger.exception("Checking missed schedule occurrences failed for workflow %s (ignored)", workflow.id)
+
+
 def run_due_schedules(s: Session, *, now, runtime=None,
                       organization_id: uuid.UUID | None = None) -> list[WorkflowRun]:
     """Fire enabled schedule workflows that have an occurrence due at ``now`` (see ``workflow_schedule``).
@@ -1150,8 +1232,13 @@ def run_due_schedules(s: Session, *, now, runtime=None,
             occurrence = sched.due_occurrence(data, _as_utc(now))
         except sched.ScheduleConfigError:
             logger.warning("Workflow %s has an invalid schedule; skipped", workflow.id)
+            _mail_owners(s, workflow.organization_id, "schedule_skipped",
+                         f"schedskip:{workflow.id}:{_as_utc(now).date().isoformat()}",
+                         {"workflow_name": workflow.name, "when": _as_utc(now).date().isoformat(),
+                          "reason": "The schedule settings are not valid."})
             continue
         if occurrence is None:
+            _mail_missed_occurrence(s, workflow, data, now)
             continue
         legacy = not data.get("time") and not data.get("timezone")
         if not legacy and workflow.updated_at is not None and occurrence < _as_utc(workflow.updated_at):
@@ -1161,6 +1248,10 @@ def run_due_schedules(s: Session, *, now, runtime=None,
             employer = s.get(Employer, _parse_uuid(data["employer_id"]))
             if employer is None or employer.organization_id != workflow.organization_id:
                 logger.warning("Workflow %s schedules an employer outside its organisation; skipped", workflow.id)
+                _mail_owners(s, workflow.organization_id, "schedule_skipped",
+                             f"schedskip:{workflow.id}:{_as_utc(now).date().isoformat()}",
+                             {"workflow_name": workflow.name, "when": _as_utc(now).date().isoformat(),
+                              "reason": "The employer in the schedule no longer exists."})
                 continue
             employers = [employer]
         elif data.get("fan_out", "org") == "employers":

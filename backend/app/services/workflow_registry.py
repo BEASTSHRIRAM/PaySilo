@@ -76,8 +76,16 @@ def _fields(node_type: str) -> list[dict]:
         return [{"key": "entity", "kind": "select", "options": _opts(GATE_ENTITIES),
                  "help": "what the human decides on; use 'run' after Prepare payroll run"}]
     if node_type == "action.send_email":
+        from .email_custom import MAX_BODY, MAX_SUBJECT, VARIABLES
+
         return [{"key": "template", "kind": "select", "required": True, "options": _opts(_email_templates())},
-                {"key": "recipient", "kind": "select", "options": _opts(EMAIL_RECIPIENTS)}]
+                {"key": "recipient", "kind": "select", "options": _opts(EMAIL_RECIPIENTS)},
+                {"key": "subject", "kind": "text",
+                 "help": f"custom_message only: up to {MAX_SUBJECT} characters. Variables: "
+                         + ", ".join("{" + v + "}" for v in VARIABLES)},
+                {"key": "body", "kind": "textarea",
+                 "help": f"custom_message only: plain text, up to {MAX_BODY} characters. No links; the mail "
+                         "gets one button to the right page in PaySilo."}]
     if node_type == "action.create_exception":
         return [{"key": "title", "kind": "text", "required": True}, {"key": "detail", "kind": "textarea"}]
     if node_type == "action.post_chat_notice":

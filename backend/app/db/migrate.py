@@ -148,6 +148,10 @@ def ensure_settlement_mode_check(conn: Connection) -> None:
 
 def migrate(engine: Engine) -> list[str]:
     added = add_missing_columns(engine)
+    if "users.email_verified_at" in added:
+        # Accounts that existed before email verification are trusted as verified (new signups are not).
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL"))
     if engine.dialect.name == "postgresql":
         with engine.begin() as conn:
             widen_run_status_check(conn)

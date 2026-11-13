@@ -207,8 +207,8 @@ def test_new_kinds_are_registered_and_templates_render():
     from app.services import email_templates as tpl
     from app.services.spend_mail import TEMPLATE_NAMES
 
-    assert set(TEMPLATE_NAMES) == {"approval_requested", "kit_completed", "trip_itinerary", "purchase_receipt",
-                                   "employer_welcome", "payslip_receipt", "payroll_held_alert"}
+    assert set(TEMPLATE_NAMES) >= {"approval_requested", "kit_completed", "trip_itinerary", "purchase_receipt",
+                                   "employer_welcome", "payslip_receipt", "payroll_held_alert"}  # + custom_message etc.
     for _template, (_fn, kind, _sensitive) in tpl.SPEND_TEMPLATES.items():
         assert kind in NOTIFICATION_KINDS  # the Postgres CHECK widening reads the same tuple
     subject, text, html = tpl.employer_welcome({"employer_name": "Acme"})
@@ -216,7 +216,7 @@ def test_new_kinds_are_registered_and_templates_render():
     subject, text, _html = tpl.payslip_receipt({
         "contractor_name": "Lena Fischer", "employer_name": "Acme", "amount": "3400.00", "currency": "EUR",
         "receipt_link": "https://app.example/receipt/abc?token=x"})
-    assert "3400.00" in subject and "/receipt/abc" in text
+    assert "3,400.00" in subject and "/receipt/abc" in text
     assert tpl.SPEND_TEMPLATES["payslip_receipt"][2] is True  # carries a private link -> SENSITIVE
 
 

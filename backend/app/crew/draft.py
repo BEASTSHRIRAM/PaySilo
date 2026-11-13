@@ -13,13 +13,20 @@ import re
 from datetime import date
 from decimal import Decimal
 
+from ..services.email_style import text_problems as _text_problems
+
 logger = logging.getLogger(__name__)
+
+
+def style_problems(text: str) -> list[str]:
+    """House style breaches in reworded text: dashes, hyphens as punctuation, exclamation marks, emojis."""
+    return _text_problems(text, full=False)
 
 _AMOUNT = re.compile(r"\b[A-Z]{3} [\d,]+\.\d{2}\b")
 _DATE = re.compile(r"\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2} [A-Z][a-z]{2} \d{4}\b")
 
 POLISH_SYSTEM = (
-    "You edit a payroll funding email for clarity and warmth. Keep it short and professional. "
+    "You edit a payroll funding email for clarity and warmth. Keep it short and professional. Never use dashes, hyphens, exclamation marks or emojis. "
     "Do NOT change, round, reorder or drop any amount, date, account number, routing number or name. "
     "Do not add new figures, promises or links. Return only the email body text."
 )
@@ -38,7 +45,7 @@ def fmt_date(value: str | date | None) -> str:
 
 def _wire_block(wire: dict | None) -> str:
     if not wire or wire.get("status") != "READY":
-        return "Wire details: we will share the account details separately (the bank is still issuing them)."
+        return "Account details: we will share them separately, because the bank is still issuing them."
     rows = [("Account name", wire.get("account_name")), ("Account number", wire.get("account_number")),
             ("Bank", wire.get("bank_name")), ("SWIFT/BIC", wire.get("swift_code"))]
     rows += [(r["label"], r["value"]) for r in wire.get("routing", []) if r.get("type") != "swift"]
@@ -63,33 +70,38 @@ def _breakdown(plan: dict) -> str:
 
 
 def draft_funding_email(kind: str, plan: dict, organization_name: str) -> tuple[str, str]:
-    """(subject, body) for FUNDING_REMINDER, FUNDING_OVERDUE or FUNDING_STATEMENT. Pure and deterministic."""
-    greet = f"Hello {plan.get('contact_name') or 'there'}," if plan.get("contact_name") else "Hello,"
+    """(subject, body) for FUNDING_REMINDER, FUNDING_OVERDUE or FUNDING_STATEMENT. Pure and deterministic.
+
+    House style (see ``services/email_style``): short, no dashes or hyphens as punctuation, greeting and closing.
+    """
+    from ..services.email_layout import clamp_subject
+
+    greet = f"Hello {plan.get('contact_name')}," if plan.get("contact_name") else "Hello,"
     employer, rec = plan["employer_name"], fmt_usd(plan["recommended_transfer_usd"])
     fund_by, pay_date = fmt_date(plan.get("fund_by")), fmt_date(plan.get("pay_date"))
     sign = f"Thank you,\n{organization_name}"
     if kind == "FUNDING_STATEMENT":
-        subject = f"Funding statement for {employer}: next payroll {pay_date}"
-        intro = (f"Here is the funding statement for the next {employer} payroll, paid on {pay_date}. "
+        subject = f"Funding statement: {employer}, {pay_date}"
+        intro = (f"This is the funding statement for the next {employer} payroll, paid on {pay_date}. "
                  f"Funds should be in the wallet by {fund_by}.")
-        ask = (f"To keep everyone paid in full, please send {rec}." if Decimal(plan["gap_usd"]) > 0
+        ask = (f"To pay everyone in full, please send {rec}." if Decimal(plan["gap_usd"]) > 0
                else "The wallet already covers this payroll. No transfer is needed.")
     elif kind == "FUNDING_OVERDUE":
-        subject = f"Action needed: funding for {employer} was due {fund_by}"
-        intro = (f"The funding for the {employer} payroll due on {pay_date} should have arrived by {fund_by} "
-                 "and has not been received in full.")
-        ask = (f"Please send exactly {rec} now so everyone is paid in full. "
+        subject = f"Funding for {employer} was due {fund_by}"
+        intro = (f"The funding for the {employer} payroll due on {pay_date} was expected by {fund_by} "
+                 "and has not arrived in full.")
+        ask = (f"Please send exactly {rec} now so that everyone is paid in full. "
                "If the money is already on its way, you can ignore this message.")
     else:
-        subject = f"Please fund the {employer} payroll by {fund_by}"
-        intro = (f"The next {employer} payroll is paid on {pay_date}. To pay everyone in full, the wallet "
-                 f"needs to be funded by {fund_by}.")
-        ask = f"Please send exactly {rec} so everyone is paid in full."
+        subject = f"Funding needed for {employer} by {fund_by}"
+        intro = (f"The next {employer} payroll is paid on {pay_date}. "
+                 f"The wallet needs to be funded by {fund_by}.")
+        ask = f"Please send exactly {rec} so that everyone is paid in full."
     body = "\n\n".join(x for x in (
         greet, intro, ask, "How this adds up:\n" + _breakdown(plan), _lines_block(plan), _wire_block(plan.get("wire")),
-        "Transfers can take one to two business days to arrive, so please allow for that. "
-        "Reply to this email if anything looks wrong.", sign) if x)
-    return subject, body
+        "Transfers can take one to two business days to arrive. Reply to this email if anything looks wrong.",
+        sign) if x)
+    return clamp_subject(subject), body
 
 
 def required_tokens(text: str, plan: dict | None = None) -> set[str]:
@@ -139,6 +151,10 @@ def polish_body(body: str, plan: dict | None = None, *, llm=None, settings=None)
         candidate = _text(getattr(reply, "content", reply)).strip()
     except Exception as exc:  # noqa: BLE001
         logger.info("Email polish failed (%s); using the template.", type(exc).__name__)
+        return body, False
+    problems = style_problems(candidate)
+    if problems:
+        logger.info("Email polish rejected (house style: %s); using the template.", problems[0])
         return body, False
     if accept_polish(body, candidate, plan):
         return candidate, True
