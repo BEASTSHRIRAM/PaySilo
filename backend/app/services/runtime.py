@@ -162,7 +162,8 @@ class PlatformRuntime:
             logger.info("Visa VIC: VIC_MODE=simulated — benefits run in SIMULATED mode (%s).",
                         self.vic.credential_ref)
         self.services = Services(airwallex=self.recorder, ledger=self.ledger, chain=self.chain,
-                                 usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer)
+                                 usd_rates=usd_rates, rate_provider=rate_provider, tap=self.signer,
+                                 cloud_planner=self._build_cloud_planner(settings))
         self.checkpointer = build_checkpointer(database_url=settings.database_url,
                                                checkpoint_path=settings.checkpoint_path)
         self.graph = build_graph(self.services, checkpointer=self.checkpointer)
@@ -171,6 +172,23 @@ class PlatformRuntime:
         self._calls_synced = 0
 
     # ------------------------------------------------------------------ boot
+    @staticmethod
+    def _build_cloud_planner(settings: Settings):
+        """The Bedrock AgentCore plan cross check, or ``None`` when no runtime ARN is configured."""
+        if not settings.bedrock_agent_runtime_arn:
+            logger.info("Bedrock AgentCore: no BEDROCK_AGENT_RUNTIME_ARN, plan cross check is off.")
+            return None
+        try:
+            from ..partners.bedrock_planner import BedrockPlanner
+
+            planner = BedrockPlanner(settings.bedrock_agent_runtime_arn,
+                                     timeout_s=settings.bedrock_plan_timeout_seconds)
+        except Exception as exc:  # noqa: BLE001 - boto3 missing or a malformed ARN must not stop the backend
+            logger.warning("Bedrock AgentCore: plan cross check is off (%s).", type(exc).__name__)
+            return None
+        logger.info("Bedrock AgentCore: plan cross check on (runtime %s, %s).", planner.runtime_id, planner.region)
+        return planner
+
     def startup(self) -> None:
         with self.db.sessionmaker() as s:
             # Register the active public key (retiring any previous one), then

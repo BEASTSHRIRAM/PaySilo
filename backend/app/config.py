@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     vic_merchant_country: str = "US"
     vic_test_card: bool = True
 
+    # Amazon Bedrock AgentCore: when the runtime ARN is set, every payroll run's pricing plan is also
+    # re computed by the PaySilo agent deployed there and compared with the backend plan.
+    # AWS credentials come from the standard chain (EC2 instance role, or `aws configure` locally).
+    bedrock_agent_runtime_arn: str | None = None
+    bedrock_plan_timeout_seconds: float = 20.0
+
     # Email via Brevo SMTP (stdlib smtplib, STARTTLS). Without BREVO_SMTP_USER + BREVO_SMTP_KEY the outbox
     # only queues messages ("not configured"); nothing is sent. The key is a secret: never logged.
     brevo_smtp_host: str = "smtp-relay.brevo.com"

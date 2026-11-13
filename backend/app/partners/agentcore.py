@@ -30,7 +30,12 @@ def agentcore_handler(payload: dict | None = None) -> dict[str, Any]:
     action = payload.get("action", "demo")
     if action == "demo":
         return {"action": "demo", "report": run_demo()}
-    return {"action": action, "error": f"Unknown action {action!r}; supported: 'demo'"}
+    if action == "plan":
+        # One real payroll run's pricing plan, re computed here from the facts the backend sent.
+        from ..agents.cloud_plan import run_plan
+
+        return {"action": "plan", "runtime": "bedrock-agentcore", **run_plan(payload.get("plan") or {})}
+    return {"action": action, "error": f"Unknown action {action!r}; supported: 'demo', 'plan'"}
 
 
 try:  # Register as the AgentCore Runtime entrypoint when the SDK exists.

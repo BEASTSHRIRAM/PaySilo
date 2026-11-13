@@ -108,6 +108,9 @@ class Services:
     # policy refusal, never a fallback to the demo table above.
     rate_provider: object | None = None
     tap: TapSigner = field(default_factory=TapSigner)
+    # Optional: re computes each run's pricing plan on Bedrock AgentCore (partners/bedrock_planner.py).
+    # A disagreement refuses the run; an unreachable runtime is logged and the run continues.
+    cloud_planner: object | None = None
 
 
 def _normalise_line(line: dict) -> dict:
@@ -244,6 +247,39 @@ def _waived(state: PayrollRunState) -> bool:
     return bool(state.get("run_fee_waived"))
 
 
+def _cross_check_on_bedrock(planner, state: PayrollRunState, assessment: PayrollAssessment, rates: dict,
+                            balances: dict, audit: list[str], events: list[dict]) -> str | None:
+    """Re compute this run's pricing plan on Bedrock AgentCore and compare it with the backend plan.
+
+    Returns a refusal message when the two disagree, otherwise ``None``. An unreachable runtime is a
+    warning in the timeline, never a blocked payroll: the backend's own plan is the one that counts.
+    """
+    from .cloud_plan import plan_payload
+
+    def event(level: str, message: str) -> None:
+        events.append({"agent": "bedrock", "agent_name": "Bedrock AgentCore", "level": level, "message": message})
+
+    try:
+        remote = planner.plan(plan_payload(_pay_lines(state), rates, balances, _waived(state)))
+    except Exception as exc:  # noqa: BLE001 - any transport/agent failure is handled the same way
+        note = ("Bedrock AgentCore could not be reached, so this plan was not cross checked "
+                f"({type(exc).__name__}). The backend plan stands.")
+        audit.append(f"[{state['employer_name']}] {note}")
+        event("warning", note)
+        return None
+    where = f"{remote.get('region', 'AWS')}, session {str(remote.get('session_id', ''))[-8:]}"
+    if remote.get("assessment") != assessment_dict(assessment):
+        msg = ("The pricing plan re computed on Bedrock AgentCore does not match the backend plan. "
+               "Refusing to continue until both agree.")
+        audit.append(f"[{state['employer_name']}] POLICY REFUSAL: {msg}")
+        event("error", f"{msg} ({where})")
+        return msg
+    audit.append(f"[{state['employer_name']}] Pricing plan re computed on Bedrock AgentCore: match.")
+    event("info", "This run's pricing plan was re computed by the PaySilo LangGraph agent on Amazon Bedrock "
+                  f"AgentCore ({where}, {remote.get('ms', '?')} ms) and matches the backend figures to the cent.")
+    return None
+
+
 def build_graph(services: Services, checkpointer=None):
     awx = services.airwallex
     ledger = services.ledger
@@ -336,11 +372,17 @@ def build_graph(services: Services, checkpointer=None):
             return {"route": "refused", "status": "REFUSED", "error": msg, "audit": audit, "events": events}
         balances = awx.get_balances(account_id=state["account_id"])
         try:
-            assessment = assess_payroll(_pay_lines(state), _rates_for(state, balances), balances,
+            rates = _rates_for(state, balances)
+            assessment = assess_payroll(_pay_lines(state), rates, balances,
                                         waive_run_fee=_waived(state))
         except RefusalError as exc:
             _log(state, "price", f"POLICY REFUSAL: {exc}", "error", audit, events)
             return {"route": "refused", "status": "REFUSED", "error": str(exc), "audit": audit, "events": events}
+        if services.cloud_planner is not None:
+            refusal = _cross_check_on_bedrock(services.cloud_planner, state, assessment, rates, balances,
+                                              audit, events)
+            if refusal is not None:
+                return {"route": "refused", "status": "REFUSED", "error": refusal, "audit": audit, "events": events}
         for r in assessment.by_currency:
             _log(state, "price",
                  f"Priced {r.currency}: salaries {money_str(r.payroll)} + payout fees {money_str(r.fees)} "

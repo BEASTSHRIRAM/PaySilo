@@ -26,6 +26,7 @@ import { isMoneyMoved, TERMINAL_RUN_STATUSES } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
 
 const AGENT_NAMES: Record<string, string> = {
+  bedrock: "Bedrock AgentCore",
   intake: "Intake", price: "Pricing", assess: "Balance & Policy", approval: "Approval Gate",
   escalate: "Escalation", execute: "FX & Payout", fee: "Fee", reconcile: "Reconciliation", attest: "Attestation",
 };

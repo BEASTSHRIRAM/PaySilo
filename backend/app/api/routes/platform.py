@@ -35,6 +35,8 @@ def health(settings: Settings = Depends(get_settings), runtime: PlatformRuntime 
             "visa_tap": f"signing ({runtime.signer.key.key_id})",
             "metal": "mock-chain" if not (settings.metal_rpc_url and settings.metal_private_key
                                           and settings.metal_registry_address) else "configured",
+            "bedrock_agentcore": (f"plan cross check ({runtime.services.cloud_planner.region})"
+                                  if runtime.services.cloud_planner is not None else "off"),
         },
     }
 

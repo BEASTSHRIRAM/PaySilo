@@ -23,6 +23,19 @@ The deployed action is `{"action": "demo"}`: the Starter Kit 6 scenario on the b
 It needs no Airwallex keys and moves no money. Expected result: Acme SETTLED, Borealis
 HELD_SHORTFALL with a USD 2,642.88 shortfall, platform fees USD 149.00.
 
+## Used on every payroll run
+
+`{"action": "plan", "plan": {...}}` re computes one real run's pricing plan. When the backend has
+`BEDROCK_AGENT_RUNTIME_ARN` set, its Pricing Agent sends each run's facts (amounts, currencies, payout
+methods, FX rates, that employer's wallet; no names or bank details) to this agent, which runs the
+`paysilo.plan` LangGraph graph (`backend/app/agents/cloud_plan.py`) and returns the assessment.
+
+1. Match: the run's Agent Timeline shows a "Bedrock AgentCore" line with the region and session.
+2. Mismatch: the run is refused before approval.
+3. Runtime unreachable: a warning in the timeline; the backend plan stands and payroll is not blocked.
+
+The backend plan is always the one that is approved and paid. Approval and payouts never run on AgentCore.
+
 ## Deploy
 
 ```bash
