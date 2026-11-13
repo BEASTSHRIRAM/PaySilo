@@ -13,6 +13,7 @@ import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboa
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
@@ -161,6 +162,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
   const [editing, setEditing] = useState(false);
   const [amount, setAmount] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const linesPager = usePagination(plan.lines, 5, { syncUrl: false, resetKey: plan.employer_id });
   const priced = plan.status !== "RATE_UNAVAILABLE";
   const hasLines = plan.lines.length > 0;
   const wallet = Object.entries(plan.wallet);
@@ -268,7 +270,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
                     </tr>
                   </thead>
                   <tbody className="divide-y-2 divide-ink-700">
-                    {plan.lines.map((l) => (
+                    {linesPager.pageItems.map((l) => (
                       <tr key={l.contractor_id} className="bg-ink-900/40">
                         <td className="px-3 py-2 font-bold text-sand-100">{l.name}</td>
                         <td className="px-3 py-2 text-right tabular-nums text-sand-200">{formatMoney(l.amount, l.currency)}</td>
@@ -277,7 +279,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
                         <td className="px-3 py-2 text-right tabular-nums text-sand-100">{formatMoney(l.amount_usd)}</td>
                       </tr>
                     ))}
-                    {plan.needs_amount.map((l) => (
+                    {linesPager.page === linesPager.pageCount && plan.needs_amount.map((l) => (
                       <tr key={l.contractor_id} className="bg-ink-900/40">
                         <td className="px-3 py-2 font-bold text-sand-100">{l.name}</td>
                         <td colSpan={4} className="px-3 py-2 text-sm font-bold text-coral-300">
@@ -300,6 +302,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
                     ))}
                   </dl>
                 )}
+                <div className="border-t-2 border-ink-700 bg-ink-900/40 px-3 pb-3"><Pagination state={linesPager} label="Contractors" /></div>
               </div>
             )}
           </div>
@@ -370,6 +373,7 @@ export default function FundingPage() {
   const [toast, setToast] = useState<{ message: string; error: boolean } | null>(null);
   const [sweep, setSweep] = useState<SweepResponse | null>(null);
   const [sweeping, setSweeping] = useState(false);
+  const plansPager = usePagination(data?.plans ?? [], 5, { key: "plansPage" });
 
   const load = useCallback(async (initial = false) => {
     setError(null);
@@ -492,14 +496,15 @@ export default function FundingPage() {
             {data.plans.length === 0 ? (
               <SectionEmpty title="No employers yet" body="Add an employer to plan its funding." />
             ) : (
-              <div className="grid gap-6">
-                {data.plans.map((p) => (
+              <div ref={plansPager.listRef} className="grid scroll-mt-24 gap-6">
+                {plansPager.pageItems.map((p) => (
                   <PlanCard key={p.employer_id} plan={p} canEdit={canEdit}
                     notify={(message, isError = false) => setToast({ message, error: isError })}
                     onChanged={() => void load()} />
                 ))}
               </div>
             )}
+            <Pagination state={plansPager} label="Funding plans" className="-mt-2" />
             <div className="grid gap-2 rounded-3xl border-2 border-ink-700 bg-ink-850/60 p-4 text-sm font-semibold leading-relaxed text-sage-300">
               <p className="font-extrabold text-sand-100">How automatic continuation works</p>
               <p>

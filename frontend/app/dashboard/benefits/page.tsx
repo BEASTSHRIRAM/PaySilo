@@ -13,6 +13,7 @@ import { num } from "@/components/feb/accessors";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import {
@@ -396,6 +397,9 @@ export default function BenefitsPage() {
     setRefreshing(false);
   }
 
+  const budgetsPager = usePagination(budgets ?? [], 6, { key: "budgetsPage" });
+  const requestsPager = usePagination(requests ?? [], 5, { key: "requestsPage", resetKey: statusFilter });
+  const purchasesPager = usePagination(purchases ?? [], 10, { key: "purchasesPage" });
   const requestById = new Map((requests ?? []).map((r) => [r.id, r]));
   const employerNameById = new Map((employers ?? []).map((e) => [e.id, e.name]));
 
@@ -555,12 +559,15 @@ export default function BenefitsPage() {
           />
         )}
         {budgets && budgets.length > 0 && (
+          <div ref={budgetsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-5 lg:grid-cols-2">
-            {budgets.map((b) => (
+            {budgetsPager.pageItems.map((b) => (
               <BudgetCard key={`${b.employer_id}-${b.currency}`} budget={b} status={status} canEdit={canEdit} onSaved={() => void loadCore()} />
             ))}
           </Stagger>
+          </div>
         )}
+        <Pagination state={budgetsPager} label="Budgets" sizes={[6, 12, 24]} />
         {budgets && !canEdit && (
           <p className="text-sm font-semibold text-sage-400">Budget editing is available to owners and admins.</p>
         )}
@@ -658,8 +665,9 @@ export default function BenefitsPage() {
         )}
 
         {requests && requests.length > 0 && (
+          <div ref={requestsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-4">
-            {requests.map((req) => (
+            {requestsPager.pageItems.map((req) => (
               <Card key={req.id} className="grid gap-3 p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -789,7 +797,9 @@ export default function BenefitsPage() {
               </Card>
             ))}
           </Stagger>
+          </div>
         )}
+        <Pagination state={requestsPager} label="Requests" />
       </section>
 
       {/* ------------------------------------------------ purchase confirmation */}
@@ -846,7 +856,7 @@ export default function BenefitsPage() {
           <SectionEmpty title="No purchases yet" body="Completed and failed purchase attempts will be listed here, with the mode and credential used for each one." />
         )}
         {purchases && purchases.length > 0 && (
-          <Card className="overflow-hidden">
+          <Card ref={purchasesPager.listRef} className="scroll-mt-24 overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full min-w-[860px] text-left text-sm">
                 <thead>
@@ -863,7 +873,7 @@ export default function BenefitsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-ink-700/70">
-                  {purchases.map((p) => {
+                  {purchasesPager.pageItems.map((p) => {
                     const req = requestById.get(p.request_id);
                     return (
                       <tr key={p.id} className="bg-ink-900/30 align-top">
@@ -894,6 +904,7 @@ export default function BenefitsPage() {
             </div>
           </Card>
         )}
+        <Pagination state={purchasesPager} label="Purchases" />
       </section>
     </FebShell>
   );

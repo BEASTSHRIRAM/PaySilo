@@ -10,6 +10,7 @@ import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboa
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination } from "@/components/ui/pagination";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import { api, apiFunding, ApiError, type AppNotification, type EmailStatus, type Session } from "@/lib/api";
@@ -141,12 +142,18 @@ export default function NotificationsPage() {
                   </li>
                 ))}
               </ul>
-              <div className="flex items-center justify-between gap-3 border-t-2 border-ink-800 px-4 py-3 text-sm font-semibold text-sage-400">
-                <span>{offset + 1}-{Math.min(offset + PAGE, total)} of {total}</span>
-                <span className="flex gap-2">
-                  <Button size="sm" variant="outline" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Newer</Button>
-                  <Button size="sm" variant="outline" disabled={offset + PAGE >= total} onClick={() => setOffset(offset + PAGE)}>Older</Button>
-                </span>
+              <div className="border-t-2 border-ink-800 px-4 pb-4">
+                <Pagination
+                  label="Messages"
+                  sizes={[PAGE]}
+                  state={{
+                    page: Math.floor(offset / PAGE) + 1,
+                    pageCount: Math.max(1, Math.ceil(total / PAGE)),
+                    total, pageSize: PAGE, from: offset + 1, to: Math.min(offset + PAGE, total),
+                    setPage: (p) => setOffset((p - 1) * PAGE),
+                    setPageSize: () => undefined,
+                  }}
+                />
               </div>
             </Card>
 

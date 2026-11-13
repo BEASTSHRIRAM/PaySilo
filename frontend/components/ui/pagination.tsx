@@ -45,9 +45,9 @@ export interface PaginationState<T> {
 export function usePagination<T>(
   items: T[],
   pageSize = 10,
-  opts: { key?: string; resetKey?: unknown } = {},
+  opts: { key?: string; resetKey?: unknown; syncUrl?: boolean } = {},
 ): PaginationState<T> {
-  const { key = "page", resetKey } = opts;
+  const { key = "page", resetKey, syncUrl = true } = opts;
   const [size, setSize] = React.useState(pageSize);
   const [page, setPageState] = React.useState(1);
   const listRef = React.useRef<HTMLElement>(null);
@@ -58,9 +58,9 @@ export function usePagination<T>(
 
   // Hydrate from the URL once, after mount.
   React.useEffect(() => {
-    setPageState(readParam(key));
+    if (syncUrl) setPageState(readParam(key));
     hydrated.current = true;
-  }, [key]);
+  }, [key, syncUrl]);
 
   // Filter/search changed: back to page 1.
   React.useEffect(() => {
@@ -80,8 +80,8 @@ export function usePagination<T>(
 
   React.useEffect(() => {
     if (!hydrated.current) return;
-    writeParam(key, current);
-  }, [key, current]);
+    if (syncUrl) writeParam(key, current);
+  }, [key, current, syncUrl]);
 
   const scrollTop = () => {
     const el = listRef.current;
@@ -165,6 +165,7 @@ export function Pagination({
       </p>
 
       <div className="flex items-center gap-2">
+        {sizes.length > 1 && (
         <label className="flex items-center gap-2 text-xs font-semibold text-sage-300">
           <span className="sr-only sm:not-sr-only">Per page</span>
           <select
@@ -180,6 +181,7 @@ export function Pagination({
             ))}
           </select>
         </label>
+        )}
 
         {!fitsOnePage && (
           <div className="flex items-center gap-1.5">

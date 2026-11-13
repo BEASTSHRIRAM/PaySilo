@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import { api, ApiError, type NotificationTemplate, type NotificationTemplates } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -61,6 +62,13 @@ export function TemplatesPanel({ userEmail }: { userEmail: string }) {
     });
   }, [data]);
 
+  const flat = useMemo(() => groups.flatMap(([, items]) => items), [groups]);
+  const pager = usePagination(flat, 10, { key: "templatesPage" });
+  const pageGroups = useMemo(
+    () => groups.map(([g, items]) => [g, items.filter((t) => pager.pageItems.includes(t))] as const).filter(([, items]) => items.length > 0),
+    [groups, pager.pageItems],
+  );
+
   const selected = data?.items.find((t) => t.key === selectedKey) ?? null;
 
   function select(key: string) {
@@ -102,8 +110,8 @@ export function TemplatesPanel({ userEmail }: { userEmail: string }) {
       </div>
 
       <Card className="hidden overflow-hidden p-0 lg:block">
-        <nav aria-label="Email templates" className="max-h-[44rem] overflow-y-auto">
-          {groups.map(([group, items]) => (
+        <nav ref={pager.listRef} aria-label="Email templates" className="scroll-mt-24">
+          {pageGroups.map(([group, items]) => (
             <div key={group}>
               <p className="border-b-2 border-ink-800 bg-ink-900/60 px-4 py-2 text-xs font-extrabold uppercase tracking-widest text-sage-500">{group}</p>
               <ul className="divide-y divide-ink-800">
@@ -120,6 +128,7 @@ export function TemplatesPanel({ userEmail }: { userEmail: string }) {
               </ul>
             </div>
           ))}
+          <div className="px-4 pb-4"><Pagination state={pager} label="Templates" sizes={[5, 10, 25]} /></div>
         </nav>
       </Card>
 
