@@ -11,6 +11,7 @@ import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboa
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { api, apiV3, apiWorkflows, ApiError, type CalendarEvent, type Employer, type ScheduleOccurrence, type Session } from "@/lib/api";
 import { EDITOR_ROLES } from "@/lib/status";
 import { cn } from "@/lib/utils";
@@ -163,6 +164,7 @@ export default function CalendarPage() {
       return d.getFullYear() === cursor.getFullYear() && d.getMonth() === cursor.getMonth();
     });
   }, [visible, selectedDay, cursor]);
+  const agendaPager = usePagination(agenda, 5, { key: "agendaPage", resetKey: `${filter}|${selectedDay}|${cursor.getFullYear()}-${cursor.getMonth()}` });
 
   function shiftMonth(delta: number) {
     setCursor((c) => new Date(c.getFullYear(), c.getMonth() + delta, 1));
@@ -341,8 +343,8 @@ export default function CalendarPage() {
                     </p>
                   </Card>
                 ) : (
-                  <ol className="grid gap-2">
-                    {agenda.map((ev, i) => (
+                  <ol ref={agendaPager.listRef} className="grid scroll-mt-24 gap-2">
+                    {agendaPager.pageItems.map((ev, i) => (
                       <li key={`${ev.date}-${ev.kind}-${ev.run_id ?? ""}-${i}`}>
                         <Card className="p-4">
                           <div className="flex items-start justify-between gap-3">
@@ -376,6 +378,7 @@ export default function CalendarPage() {
                     ))}
                   </ol>
                 )}
+                <Pagination state={agendaPager} label="Agenda" />
                 <p className="mt-4 flex gap-2 text-xs font-semibold leading-relaxed text-sage-500">
                   <Info className="size-4 shrink-0" />
                   Pay dates are stored on each run. Cut-off, funding-due and period-start dates are derived from the pay date by the server and labelled as derived.

@@ -14,6 +14,7 @@ import { errMsg, useSession } from "@/components/feb/use-session";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import {
   ApiError, apiWorkflows,
@@ -85,6 +86,8 @@ export default function WorkflowsPage() {
   const [runsError, setRunsError] = useState<string | null>(null);
   const [runStatusFilter, setRunStatusFilter] = useState("");
   const [runWorkflowFilter, setRunWorkflowFilter] = useState("");
+  const workflowsPager = usePagination(workflows ?? [], 5, { key: "workflowsPage" });
+  const runsPager = usePagination(runs ?? [], 10, { key: "runsPage", resetKey: `${runStatusFilter}|${runWorkflowFilter}` });
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const [runDetail, setRunDetail] = useState<WorkflowRunDetail | null>(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
@@ -241,8 +244,8 @@ export default function WorkflowsPage() {
           />
         )}
         {workflows && workflows.length > 0 && (
-          <div className="grid gap-4">
-            {workflows.map((wf) => (
+          <div ref={workflowsPager.listRef} className="grid scroll-mt-24 gap-4">
+            {workflowsPager.pageItems.map((wf) => (
               <Card key={wf.id} data-tour="workflow-card" className="grid gap-3 p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -291,6 +294,7 @@ export default function WorkflowsPage() {
             ))}
           </div>
         )}
+        <Pagination state={workflowsPager} label="Workflows" />
       </section>
 
       {/* ------------------------------------------------ executions */}
@@ -334,7 +338,7 @@ export default function WorkflowsPage() {
           />
         )}
         {runs && runs.length > 0 && (
-          <Card className="overflow-hidden">
+          <Card ref={runsPager.listRef} className="scroll-mt-24 overflow-hidden">
             <div className="relative overflow-x-auto">
               <table className="w-full min-w-[820px] text-left text-sm">
                 <thead>
@@ -349,7 +353,7 @@ export default function WorkflowsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-ink-700/70">
-                  {runs.map((run) => {
+                  {runsPager.pageItems.map((run) => {
                     const expanded = expandedRunId === run.id;
                     return [
                       <tr
@@ -448,6 +452,7 @@ export default function WorkflowsPage() {
             </div>
           </Card>
         )}
+        <Pagination state={runsPager} label="Executions" />
       </section>
 
       {/* ------------------------------------------------ delete confirmation */}

@@ -8,6 +8,7 @@ import { Check, CornerDownRight, Loader2, PauseCircle, RotateCw, ShieldAlert, Wa
 import { AgentFlow } from "@/components/dashboard/agent-flow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { api, ApiError, type RunDetail } from "@/lib/api";
 import { notifyDataChanged } from "@/lib/events";
 import { explainRunError, HOLD_REASON_TEXT } from "@/lib/run-errors";
@@ -22,6 +23,7 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
   const [error, setError] = useState<string | null>(null);
   const a = run.assessment;
   const info = runStatusInfo(run);
+  const linesPager = usePagination(run.pay_lines, 10, { key: "linesPage", resetKey: run.id });
   const heldLines = run.pay_lines.filter((l) => l.status === "HELD");
   // "Held until funded" is only true for a real shortfall; a refused or rejected
   // run simply paid nothing, and the error card explains why.
@@ -198,8 +200,9 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
       )}
 
       {run.pay_lines.length > 0 && (
+        <div ref={linesPager.listRef} className="scroll-mt-24">
         <ul className="divide-y-2 divide-ink-700 overflow-hidden rounded-3xl border-2 border-ink-700">
-          {run.pay_lines.map((l) => (
+          {linesPager.pageItems.map((l) => (
             <li key={l.position} className={cn("flex items-center justify-between gap-3 px-4 py-3", l.status === "HELD" ? "bg-sand-300/10" : "bg-ink-900/40")}>
               <div>
                 <p className="font-bold text-sand-100">{l.beneficiary_name}</p>
@@ -215,6 +218,8 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
             </li>
           ))}
         </ul>
+        <Pagination state={linesPager} label="Pay lines" />
+        </div>
       )}
 
       {run.pending && (

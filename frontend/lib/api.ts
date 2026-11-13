@@ -293,7 +293,7 @@ export const api = {
   deactivateContractor: (employerId: string, contractorId: string) =>
     request<void>(`/employers/${employerId}/contractors/${contractorId}`, { method: "DELETE" }),
   runs: (employerId?: string) =>
-    request<RunSummary[]>(employerId ? `/runs?employer_id=${encodeURIComponent(employerId)}&limit=100` : "/runs"),
+    request<RunSummary[]>(employerId ? `/runs?employer_id=${encodeURIComponent(employerId)}&limit=200` : "/runs?limit=200"),
   run: (id: string) => request<RunDetail>(`/runs/${id}`),
   startRun: (employerId: string, lines: { contractor_id: string; amount?: string }[]) =>
     post<RunDetail>("/runs", { employer_id: employerId, lines }),

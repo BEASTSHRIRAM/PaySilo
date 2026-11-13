@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import { PageError } from "@/components/dashboard/states";
 import {
@@ -392,6 +393,8 @@ export function OnboardingLinkPanel({ employerId, contractor, onClose }: { emplo
 export function HistoryPanel({ employerId, contractor, onClose }: { employerId: string; contractor: Contractor; onClose: () => void }) {
   const [data, setData] = useState<ContractorHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const changesPager = usePagination(data?.changes ?? [], 5, { syncUrl: false });
+  const paymentsPager = usePagination(data?.payments ?? [], 5, { syncUrl: false });
   useEffect(() => {
     apiTrust.history(employerId, contractor.id).then(setData).catch((e) => setError(errMsg(e)));
   }, [employerId, contractor.id]);
@@ -410,7 +413,7 @@ export function HistoryPanel({ employerId, contractor, onClose }: { employerId: 
             <p className="mb-2 text-xs font-extrabold uppercase tracking-widest text-sage-500">Changes</p>
             {data.changes.length === 0 ? <p className="text-sm text-sage-400">No changes recorded yet.</p> : (
               <ul className="grid gap-2">
-                {data.changes.map((ch) => (
+                {changesPager.pageItems.map((ch) => (
                   <li key={ch.id} className="rounded-2xl bg-ink-950/40 px-4 py-3">
                     <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-sand-100">
                       <Badge tone={ch.group === "bank" ? "warning" : "neutral"}>{ch.group}</Badge>
@@ -421,12 +424,13 @@ export function HistoryPanel({ employerId, contractor, onClose }: { employerId: 
                 ))}
               </ul>
             )}
+            <Pagination state={changesPager} label="Changes" sizes={[5, 10]} />
           </div>
           <div>
             <p className="mb-2 text-xs font-extrabold uppercase tracking-widest text-sage-500">Payments</p>
             {data.payments.length === 0 ? <p className="text-sm text-sage-400">No payments yet.</p> : (
               <ul className="grid gap-2">
-                {data.payments.map((p, i) => (
+                {paymentsPager.pageItems.map((p, i) => (
                   <li key={`${p.run_id}-${i}`} className="flex items-baseline justify-between gap-3 rounded-2xl bg-ink-950/40 px-4 py-3">
                     <span className="min-w-0 text-sm font-semibold text-sage-300">
                       <span className="block truncate">{p.period_label ?? "Payroll run"}</span>
@@ -437,6 +441,7 @@ export function HistoryPanel({ employerId, contractor, onClose }: { employerId: 
                 ))}
               </ul>
             )}
+            <Pagination state={paymentsPager} label="Payments" sizes={[5, 10]} />
           </div>
         </div>
       )}
