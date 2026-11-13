@@ -17,6 +17,7 @@ import { pickBool, pickStr, rec } from "@/components/feb/accessors";
 import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import {
   api, apiV3, ApiError, proofDownloads,
@@ -214,6 +215,7 @@ export default function ExecutionPage() {
     };
   }, [detail]);
 
+  const linesPager = usePagination(detail?.pay_lines ?? [], 10, { key: "linesPage", resetKey: runId });
   const runSummary = runs?.find((r) => r.id === runId) ?? null;
 
   return (
@@ -294,8 +296,10 @@ export default function ExecutionPage() {
                   {detail.pay_lines.length === 0 ? (
                     <p className="p-5 font-semibold text-sage-400">This run has no pay lines yet.</p>
                   ) : (
-                    <ul className="divide-y-2 divide-ink-700">
-                      {detail.pay_lines.map((l, i) => {
+                    <>
+                    <ul ref={linesPager.listRef} className="scroll-mt-24 divide-y-2 divide-ink-700">
+                      {linesPager.pageItems.map((l, idx) => {
+                        const i = linesPager.from - 1 + idx;
                         const lc = lifecycleFor(l.status, detail.status);
                         const active = i === selected;
                         return (
@@ -321,6 +325,8 @@ export default function ExecutionPage() {
                         );
                       })}
                     </ul>
+                    <div className="px-5 pb-4"><Pagination state={linesPager} label="Payments" /></div>
+                    </>
                   )}
                 </Card>
 

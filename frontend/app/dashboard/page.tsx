@@ -16,6 +16,7 @@ import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import { api, ApiError, type Employer, type Overview, type RunDetail, type RunSummary, type Session } from "@/lib/api";
 import { useDataChanged } from "@/lib/events";
@@ -287,6 +288,10 @@ export default function DashboardPage() {
     });
   }, [runs, query, statusFilter]);
 
+  const runsPager = usePagination(visibleRuns, 10, { key: "runsPage", resetKey: `${query}|${statusFilter}` });
+
+  const employersPager = usePagination(overview?.employers ?? [], 10, { key: "employersPage" });
+
   const fees = overview ? Object.entries(overview.platform_fees) : [];
   const feeText = fees.length === 0 ? formatMoney(0) : fees.map(([c, a]) => formatMoney(a, c)).join(" + ");
   const canDecide = !!session && DECIDER_ROLES.includes(session.role);
@@ -420,7 +425,7 @@ export default function DashboardPage() {
                   <Button variant="ghost" className="mt-2" onClick={() => { setQuery(""); setStatusFilter("ALL"); }}>Clear search and filter</Button>
                 </Card>
               ) : (
-                <div className="overflow-x-auto rounded-4xl border-2 border-ink-700">
+                <div ref={runsPager.listRef} className="scroll-mt-24 overflow-x-auto rounded-4xl border-2 border-ink-700">
                   <table className="w-full min-w-[760px] border-collapse text-left">
                     <thead>
                       <tr className="bg-ink-900/70 text-xs font-extrabold uppercase tracking-widest text-sage-500">
@@ -434,7 +439,7 @@ export default function DashboardPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y-2 divide-ink-700">
-                      {visibleRuns.map((r) => (
+                      {runsPager.pageItems.map((r) => (
                         <tr key={r.id} className={cn("bg-ink-850/80 transition-colors hover:bg-ink-800", selected?.id === r.id && "bg-ink-800")}>
                           <td className="px-5 py-3.5">
                             <button type="button" onClick={() => void openRun(r.id)} className="font-bold text-sand-100 hover:underline hover:underline-offset-4">
@@ -472,6 +477,7 @@ export default function DashboardPage() {
                   </table>
                 </div>
               )}
+              <Pagination state={runsPager} label="Payroll runs" />
 
               <p className="mt-2 text-xs font-semibold text-sage-500">
                 Required and shortfall are USD figures stored on each run by the pricing engine. Select a run name to inspect its assessment below.
@@ -503,12 +509,15 @@ export default function DashboardPage() {
                   </Button>
                 </Card>
               ) : (
-                <Stagger className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {overview.employers.map((e) => (
-                    <EmployerCard key={e.id} employer={e} busy={startingId === e.id} onRun={(x) => void startRun(x)} onFund={fund} />
-                  ))}
-                </Stagger>
+                <div ref={employersPager.listRef} className="scroll-mt-24">
+                  <Stagger className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    {employersPager.pageItems.map((e) => (
+                      <EmployerCard key={e.id} employer={e} busy={startingId === e.id} onRun={(x) => void startRun(x)} onFund={fund} />
+                    ))}
+                  </Stagger>
+                </div>
               )}
+              <Pagination state={employersPager} label="Employers" />
             </section>
           </>
         )}
