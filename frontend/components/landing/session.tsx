@@ -111,21 +111,21 @@ export function HeroActions() {
   const s = useLandingSession();
   return (
     <>
-      <div className="rise mt-9 flex min-h-14 flex-wrap items-center gap-4 [animation-delay:240ms]">
+      <div className="rise mt-6 flex min-h-12 items-center gap-3 sm:mt-9 sm:min-h-14 sm:gap-4 [animation-delay:240ms]">
         {s.status === "unknown" ? (
-          <span aria-hidden className="h-14 w-[210px]" />
+          <span aria-hidden className="h-12 w-[150px] sm:h-14 sm:w-[210px]" />
         ) : (
-          <Button asChild size="lg">
+          <Button asChild size="lg" className="h-12 px-5 text-sm sm:h-14 sm:px-8 sm:text-base">
             <Link href={s.status === "in" ? "/dashboard" : "/signup"}>
               {s.status === "in" ? "Go to dashboard" : "Start free"} <ArrowRight />
             </Link>
           </Button>
         )}
-        <Button asChild size="lg" variant="outline">
+        <Button asChild size="lg" variant="outline" className="h-12 px-5 text-sm sm:h-14 sm:px-8 sm:text-base">
           <a href="#pipeline">See it run</a>
         </Button>
       </div>
-      <p className="rise mt-6 min-h-5 text-sm font-semibold text-sage-500 [animation-delay:320ms]">
+      <p className="rise mt-4 min-h-5 text-sm sm:mt-6 font-semibold text-sage-500 [animation-delay:320ms]">
         {s.status === "out" && (
           <>
             No card needed.{" "}

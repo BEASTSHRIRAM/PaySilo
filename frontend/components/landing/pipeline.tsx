@@ -69,6 +69,14 @@ function Fork() {
   );
 }
 
+function safeLen(p: SVGPathElement, fallback: number) {
+  try {
+    return p.getTotalLength() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function Pipeline() {
   const section = useRef<HTMLElement>(null);
   const pin = useRef<HTMLDivElement>(null);
@@ -90,19 +98,25 @@ export function Pipeline() {
       const cards = q<HTMLElement>(".stage-card");
       const fill = q<HTMLElement>("[data-railfill]")[0];
       const forkEl = q<HTMLElement>("[data-fork]")[0];
+      const railName = q<HTMLElement>("[data-railname]")[0];
+      const swipe = q<HTMLElement>("[data-swipe]")[0];
 
-      // Mini animations shared by both layouts. Under reduced motion nothing is built: final state shows.
+      // Mini animations. Under reduced motion nothing is built: the final state shows.
       const sig = q<SVGPathElement>("[data-sig]")[0];
       const sigLen = sig.getTotalLength();
       const branch = q<SVGPathElement>("[data-branch]")[0];
-      const branchLen = branch.getTotalLength();
+      const branchLen = safeLen(branch, 900);
+      const branchM = q<SVGPathElement>("[data-branch-m]")[0];
+      const branchMLen = safeLen(branchM, 260);
       let sigTl: gsap.core.Timeline | null = null;
       let forkTl: gsap.core.Timeline | null = null;
+      let forkMTl: gsap.core.Timeline | null = null;
       if (!reduced) {
         gsap.set(branch, { strokeDasharray: branchLen });
-        sigTl = gsap.timeline({ paused: true, onComplete: () => apply() });
+        gsap.set(branchM, { strokeDasharray: branchMLen });
         gsap.set(q("[data-wait]"), { opacity: 1 });
         gsap.set(q("[data-signed]"), { opacity: 0 });
+        sigTl = gsap.timeline({ paused: true, onComplete: () => refresh() });
         sigTl
           .fromTo(sig, { strokeDasharray: sigLen, strokeDashoffset: sigLen }, { strokeDashoffset: 0, duration: 1.4, ease: "power1.inOut" }, 0.2)
           .fromTo(q("[data-arm]"), { rotation: 0 }, { rotation: 86, duration: 0.6, ease: "back.out(1.6)" }, 1.7)
@@ -113,37 +127,60 @@ export function Pipeline() {
           .fromTo(branch, { strokeDashoffset: branchLen }, { strokeDashoffset: 0, duration: 1.1, ease: "power2.inOut" }, 0)
           .fromTo(q("[data-node]"), { scale: 0.6, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.5, ease: "back.out(1.7)" }, 0.5)
           .fromTo(q("[data-match]"), { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.4 }, 1.1);
+        forkMTl = gsap.timeline({ paused: true });
+        forkMTl
+          .fromTo(branchM, { strokeDashoffset: branchMLen }, { strokeDashoffset: 0, duration: 1, ease: "power2.inOut" }, 0)
+          .fromTo(q("[data-node-m]"), { opacity: 0, y: 6 }, { opacity: 1, y: 0, duration: 0.4 }, 0.5)
+          .fromTo(q("[data-match-m]"), { opacity: 0, scale: 0.8 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)" }, 1);
       }
       const signed = () => reduced || !sigTl || sigTl.progress() === 1;
 
+      let refresh: () => void = () => {};
       let last = { idx: -2, fork: false, signed: !sigTl };
       let line = 0;
+      let cidx = 0;
+
+      const paint = (idx: number, locked: boolean) => {
+        lis.forEach((li, i) => (li.dataset.reached = String(i <= idx)));
+        cards.forEach((c, i) => {
+          c.dataset.active = String(i === idx);
+          c.dataset.locked = String(locked && i > GATE);
+        });
+        dots.forEach((d, i) => (d.dataset.reached = String(i <= idx)));
+        if (fill) fill.style.transform = `scaleX(${Math.max(idx, 0) / (STAGES.length - 1)})`;
+        if (railName && idx >= 0) railName.textContent = `${idx + 1} of ${STAGES.length}: ${STAGES[idx].name}`;
+      };
+
+      // Desktop (pinned) state from the scroll position.
       const apply = () => {
         let idx = -1;
         let fork = false;
-        if (pinEl.dataset.mode === "h") {
-          lis.forEach((li, i) => {
-            if (li.offsetLeft + li.offsetWidth / 2 <= line) idx = i;
-          });
-          fork = forkEl.offsetLeft + forkEl.offsetWidth / 2 <= line;
-          if (!signed()) idx = Math.min(idx, GATE);
-        }
+        lis.forEach((li, i) => {
+          if (li.offsetLeft + li.offsetWidth / 2 <= line) idx = i;
+        });
+        fork = forkEl.offsetLeft + forkEl.offsetWidth / 2 <= line;
+        if (!signed()) idx = Math.min(idx, GATE);
         const sg = signed();
         if (idx === last.idx && fork === last.fork && sg === last.signed) return;
         last = { idx, fork, signed: sg };
-        lis.forEach((li, i) => (li.dataset.reached = String(i <= idx)));
-        cards.forEach((c, i) => (c.dataset.active = String(i === idx)));
-        dots.forEach((d, i) => (d.dataset.reached = String(i <= idx)));
+        paint(idx, false);
         forkEl.dataset.reached = String(fork);
-        if (fill) fill.style.transform = `scaleX(${Math.max(idx, 0) / (STAGES.length - 1)})`;
         if (forkTl) fork ? forkTl.play() : forkTl.progress() > 0 && forkTl.reverse();
+      };
+
+      // Carousel state from the active card.
+      const applyC = () => {
+        paint(cidx, !signed());
+        if (cidx >= FORK_AFTER) forkMTl?.play();
+        if (cidx >= GATE && sigTl && sigTl.progress() < 1 && !sigTl.isActive()) sigTl.play();
       };
 
       // Horizontal, pinned (desktop, motion allowed).
       mm.add("(min-width: 1024px) and (prefers-reduced-motion: no-preference)", () => {
         pinEl.dataset.mode = "h";
+        refresh = apply;
         const dist = () => Math.max(0, trackEl.scrollWidth - window.innerWidth);
-        const scrollLen = () => dist() * 0.6;
+        const scrollLen = () => dist() * 0.4;
         const tween = gsap.to(trackEl, {
           x: () => -dist(),
           ease: "none",
@@ -189,27 +226,49 @@ export function Pipeline() {
         };
       });
 
-      // Vertical stepper (mobile, tablet, reduced motion): everything readable; mini animations play on enter.
+      // Snap carousel (phones, tablets, reduced motion). No pin: native touch scrolling.
       mm.add("(max-width: 1023px), (prefers-reduced-motion: reduce)", () => {
-        apply();
-        const triggers: ScrollTrigger[] = [];
-        if (!reduced) {
-          cards.forEach((c) => {
-            gsap.from(c, { opacity: 0, y: 28, duration: 0.6, ease: "power2.out", scrollTrigger: { trigger: c, start: "top 88%", once: true } });
+        pinEl.dataset.mode = "c";
+        refresh = applyC;
+        let raf = 0;
+        const measure = () => {
+          raf = 0;
+          const c = trackEl.scrollLeft + trackEl.clientWidth / 2;
+          let best = 0;
+          let bd = Infinity;
+          lis.forEach((li, i) => {
+            const d = Math.abs(li.offsetLeft + li.offsetWidth / 2 - c);
+            if (d < bd) {
+              bd = d;
+              best = i;
+            }
           });
-          triggers.push(
-            ScrollTrigger.create({ trigger: lis[GATE], start: "top 70%", once: true, onEnter: () => sigTl?.play() }),
-            ScrollTrigger.create({ trigger: q("[data-fork-m]")[0], start: "top 75%", once: true, onEnter: () => forkTl?.play() }),
-          );
-        }
-        const jump = dots.map((d, i) => {
-          const h = () => lis[i].scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "center" });
+          if (best !== cidx) {
+            cidx = best;
+            applyC();
+          }
+          if (swipe && trackEl.scrollLeft > 24) swipe.style.opacity = "0";
+        };
+        const onScroll = () => {
+          if (!raf) raf = requestAnimationFrame(measure);
+        };
+        trackEl.addEventListener("scroll", onScroll, { passive: true });
+        cidx = 0;
+        applyC();
+        const go = dots.map((d, i) => {
+          const h = () => {
+            const li = lis[i];
+            trackEl.scrollTo({ left: li.offsetLeft + li.offsetWidth / 2 - trackEl.clientWidth / 2, behavior: reduced ? "auto" : "smooth" });
+          };
           d.addEventListener("click", h);
           return () => d.removeEventListener("click", h);
         });
         return () => {
-          jump.forEach((off) => off());
-          triggers.forEach((t) => t.kill());
+          trackEl.removeEventListener("scroll", onScroll);
+          cancelAnimationFrame(raf);
+          go.forEach((off) => off());
+          delete pinEl.dataset.mode;
+          if (swipe) swipe.style.opacity = "";
         };
       });
     }, root);
@@ -218,23 +277,23 @@ export function Pipeline() {
   }, []);
 
   return (
-    <section id="pipeline" ref={section} className="relative border-y border-sand-200/5 bg-ink-900">
-      <div ref={pin} className="relative flex flex-col justify-center py-20 motion-safe:lg:h-screen motion-safe:lg:overflow-hidden motion-safe:lg:pb-8 motion-safe:lg:pt-24">
+    <section id="pipeline" ref={section} className="relative scroll-mt-20 border-y border-sand-200/5 bg-ink-900 motion-safe:lg:scroll-mt-0">
+      <div ref={pin} className="relative flex flex-col justify-center py-10 sm:py-14 motion-safe:lg:h-screen motion-safe:lg:overflow-hidden motion-safe:lg:pb-8 motion-safe:lg:pt-24">
         <div className="container">
           <p className="text-sm font-extrabold uppercase tracking-widest text-coral-400">The agent pipeline</p>
-          <div className="mt-3 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
-            <h2 className="font-display text-4xl font-semibold leading-tight text-sand-100 text-balance sm:text-5xl">
+          <div className="mt-2 grid gap-3 lg:grid-cols-[1fr_auto] lg:items-end">
+            <h2 className="font-display text-3xl font-semibold leading-tight text-sand-100 text-balance sm:text-5xl">
               Eight agents. One signature.
             </h2>
-            <p className="max-w-md text-base leading-relaxed text-sage-300">
+            <p className="max-w-md text-sm leading-relaxed text-sage-300 sm:text-base">
               Follow one payroll line from the sheet to the receipt. LangGraph runs the steps. Code decides every amount.
             </p>
           </div>
 
-          <div className="mb-2 mt-6 hidden items-center gap-3 motion-safe:lg:flex" aria-label="Pipeline progress">
-            <div className="relative flex flex-1 items-center justify-between">
-              <div className="absolute inset-x-3 top-1/2 h-0.5 -translate-y-1/2 bg-ink-600" />
-              <div className="absolute inset-x-3 top-1/2 h-0.5 -translate-y-1/2">
+          <div className="mt-5 lg:mb-2 lg:mt-6" aria-label="Pipeline progress">
+            <div className="relative flex items-center justify-between">
+              <div className="absolute inset-x-5 top-1/2 h-0.5 -translate-y-1/2 bg-ink-600 lg:inset-x-3" />
+              <div className="absolute inset-x-5 top-1/2 h-0.5 -translate-y-1/2 lg:inset-x-3">
                 <div data-railfill className="h-full origin-left bg-coral-500 transition-transform duration-500" style={{ transform: "scaleX(0)" }} />
               </div>
               {STAGES.map((s, i) => (
@@ -243,21 +302,25 @@ export function Pipeline() {
                   data-dot
                   type="button"
                   aria-label={`Go to ${s.name}`}
-                  className="group relative grid size-6 place-items-center rounded-full outline-none focus-visible:ring-4 focus-visible:ring-sage-400/60"
+                  className="group relative grid h-11 w-10 place-items-center rounded-full outline-none focus-visible:ring-4 focus-visible:ring-sage-400/60 lg:size-6"
                 >
                   <span className="size-3 rounded-full border-2 border-ink-600 bg-ink-900 transition-colors duration-300 group-data-[reached=true]:border-coral-500 group-data-[reached=true]:bg-coral-500" />
-                  <span className="pointer-events-none absolute left-1/2 top-7 -translate-x-1/2 whitespace-nowrap text-[11px] font-bold text-sage-500 transition-colors group-hover:text-sand-100 group-data-[reached=true]:text-sand-200">
+                  <span className="pointer-events-none absolute left-1/2 top-7 hidden -translate-x-1/2 whitespace-nowrap text-[11px] font-bold text-sage-500 transition-colors group-hover:text-sand-100 group-data-[reached=true]:text-sand-200 lg:block">
                     {s.short}
                   </span>
                 </button>
               ))}
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-3 lg:hidden">
+              <p data-railname aria-live="polite" className="text-xs font-extrabold text-sand-200">1 of 8: Intake</p>
+              <p data-swipe className="swipe-hint text-xs font-bold text-sage-300 transition-opacity duration-300">Swipe</p>
             </div>
           </div>
         </div>
 
         <ol
           ref={track}
-          className="relative mt-10 flex flex-col gap-4 px-5 motion-safe:lg:mt-12 motion-safe:lg:w-max motion-safe:lg:flex-row motion-safe:lg:items-start motion-safe:lg:gap-12 motion-safe:lg:pl-[max(1.25rem,calc((100vw-1200px)/2+1.25rem))] motion-safe:lg:pr-[max(1.25rem,calc((100vw-1200px)/2+1.25rem))] sm:mx-auto sm:max-w-2xl motion-safe:lg:mx-0 motion-safe:lg:max-w-none will-change-transform"
+          className="relative mt-4 flex snap-x snap-mandatory items-start gap-3 overflow-x-auto overscroll-x-contain px-[calc(50vw-min(42vw,170px))] pb-3 [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden motion-safe:lg:mt-12 motion-safe:lg:w-max motion-safe:lg:snap-none motion-safe:lg:items-start motion-safe:lg:gap-12 motion-safe:lg:overflow-visible motion-safe:lg:px-[max(1.25rem,calc((100vw-1200px)/2+1.25rem))] motion-safe:lg:pb-0 will-change-transform"
         >
           {STAGES.map((s, i) => (
             <StageItem key={s.name} s={s} i={i} />
@@ -268,15 +331,31 @@ export function Pipeline() {
   );
 }
 
+function MiniFork() {
+  return (
+    <div className="mt-3 rounded-2xl border border-sand-200/10 bg-ink-950/50 p-3 motion-safe:lg:hidden">
+      <svg viewBox="0 0 240 40" className="h-10 w-full" fill="none" aria-hidden>
+        <path d="M0 8 H240" className="stroke-coral-500" strokeWidth="2" />
+        <path data-branch-m d="M16 8 C30 8 34 32 56 32 H184 C206 32 210 8 224 8" className="stroke-sage-400" strokeWidth="2" />
+      </svg>
+      <p data-node-m className="text-center text-xs font-extrabold text-sand-100">Amazon Bedrock AgentCore</p>
+      <p className="mt-0.5 text-center text-xs text-sage-300">Same plan, re-computed on AWS. Must match to the cent.</p>
+      <p data-match-m className="mx-auto mt-2 flex w-fit items-center gap-1.5 rounded-full bg-mint-500/15 px-2.5 py-1 text-[11px] font-extrabold text-mint-400">
+        <Check className="size-3" strokeWidth={4} /> EUR 6,025.70 = EUR 6,025.70
+      </p>
+    </div>
+  );
+}
+
 function StageItem({ s, i }: { s: (typeof STAGES)[number]; i: number }) {
   const isGate = i === GATE;
   return (
     <>
-      <li data-stage className="relative motion-safe:lg:w-[290px] motion-safe:lg:shrink-0">
+      <li data-stage className="relative w-[min(84vw,340px)] shrink-0 snap-center motion-safe:lg:w-[290px]">
         {i > 0 && (
-          <span className="conn absolute -top-4 left-[2.1rem] h-4 w-0.5 bg-ink-600 motion-safe:lg:right-full motion-safe:lg:left-auto motion-safe:lg:top-[2.2rem] motion-safe:lg:h-0.5 motion-safe:lg:w-12">
-          <i className="block size-full origin-top bg-coral-500 motion-safe:lg:origin-left" />
-        </span>
+          <span className="conn absolute hidden bg-ink-600 motion-safe:lg:right-full motion-safe:lg:top-[2.2rem] motion-safe:lg:block motion-safe:lg:h-0.5 motion-safe:lg:w-12">
+            <i className="block size-full origin-left bg-coral-500" />
+          </span>
         )}
         <article
           className={cn(
@@ -298,25 +377,14 @@ function StageItem({ s, i }: { s: (typeof STAGES)[number]; i: number }) {
           </h3>
           <p className="mt-2 text-sm leading-relaxed text-sage-300">{s.body}</p>
           {isGate && <Gate />}
+          {i === FORK_AFTER && <MiniFork />}
           <div className="stage-detail mt-auto pt-4">
             <p className="text-[10px] font-extrabold uppercase tracking-widest text-sage-500">Example</p>
             <p className="mt-1 rounded-xl bg-ink-950/60 px-3 py-2 text-sm font-semibold leading-snug text-sand-200">{s.example}</p>
           </div>
         </article>
       </li>
-      {i === FORK_AFTER && (
-        <>
-          <Fork />
-          <li data-fork-m aria-label="Bedrock cross check" className="rounded-3xl border border-sage-400/40 bg-ink-800 p-5 motion-safe:lg:hidden">
-            <p className="text-[11px] font-extrabold uppercase tracking-wider text-sage-300">Branch</p>
-            <h3 className="mt-1 font-display text-xl font-semibold text-sand-100">Amazon Bedrock AgentCore</h3>
-            <p className="mt-1 text-sm text-sage-300">Same plan, re-computed on AWS. Must match to the cent, or the run stops.</p>
-            <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-mint-500/15 px-3 py-1.5 text-xs font-extrabold text-mint-400">
-              <Check className="size-3.5" strokeWidth={4} /> EUR 6,025.70 = EUR 6,025.70
-            </div>
-          </li>
-        </>
-      )}
+      {i === FORK_AFTER && <Fork />}
     </>
   );
 }

@@ -64,7 +64,7 @@ function RunCard() {
 
   return (
     <div ref={root} className="relative">
-      <div className="rounded-[2rem] border border-sand-200/10 bg-ink-850/90 p-5 shadow-[0_40px_80px_-40px_rgba(0,0,0,0.9)] sm:p-6">
+      <div className="rounded-[2rem] border border-sand-200/10 bg-ink-850/90 p-4 shadow-[0_40px_80px_-40px_rgba(0,0,0,0.9)] sm:p-6">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-extrabold uppercase tracking-widest text-sage-500">Payroll run</p>
@@ -73,12 +73,12 @@ function RunCard() {
               {SAYS[stage]}
             </p>
           </div>
-          <div className="relative -mr-2 -mt-3 size-28 shrink-0 sm:size-36">
+          <div className="relative -mr-1 -mt-2 size-24 shrink-0 sm:-mr-2 sm:-mt-3 sm:size-36">
             <LottieAnimation name={MASCOT[stage]} className="absolute inset-0" label="Silo, the PaySilo mascot" />
           </div>
         </div>
 
-        <ol className="mt-5 grid grid-cols-4 gap-2" aria-label="Agent steps">
+        <ol className="mt-4 grid grid-cols-4 gap-1.5 sm:mt-5 sm:gap-2" aria-label="Agent steps">
           {AGENTS.map((a, i) => {
             const done = i < stage;
             const on = i === stage;
@@ -87,7 +87,7 @@ function RunCard() {
                 key={a}
                 data-state={on ? "on" : done ? "done" : "idle"}
                 className={cn(
-                  "flex min-w-0 flex-col gap-1 rounded-xl border px-2 py-2 text-[11px] font-extrabold leading-none transition-colors duration-300 sm:text-xs",
+                  "flex min-w-0 flex-col gap-1 rounded-xl border px-1.5 py-2 text-[10px] font-extrabold leading-none sm:px-2 transition-colors duration-300 sm:text-xs",
                   on && "border-coral-500 bg-coral-500 text-sand-50",
                   done && "border-mint-500/40 bg-mint-500/10 text-mint-400",
                   !on && !done && "border-sand-200/10 text-sage-500",
@@ -103,10 +103,10 @@ function RunCard() {
           })}
         </ol>
 
-        <div className="mt-5 grid grid-cols-3 gap-3 sm:gap-4">
+        <div className="mt-4 grid grid-cols-3 gap-3 sm:mt-5 sm:gap-4">
           {SILOS.map((s) => (
             <div key={s.id} className="min-w-0">
-              <div data-tank={s.id} className="relative h-28 overflow-hidden rounded-2xl border-2 border-sand-200/15 bg-ink-950/60 sm:h-32">
+              <div data-tank={s.id} className="relative h-24 overflow-hidden rounded-2xl border-2 border-sand-200/15 bg-ink-950/60 sm:h-32">
                 <div
                   data-fill={s.id}
                   className={cn("absolute inset-0 origin-bottom will-change-transform", s.id === "borealis" ? "bg-clay-500" : "bg-sage-500")}
@@ -129,7 +129,7 @@ function RunCard() {
             </div>
           ))}
         </div>
-        <p className="mt-4 text-xs font-semibold text-sage-500">Three wallets. Money never crosses between them.</p>
+        <p className="mt-3 text-xs font-semibold text-sage-500">Three wallets. Money never crosses between them.</p>
       </div>
     </div>
   );
@@ -159,17 +159,17 @@ export function Hero() {
   }, []);
 
   return (
-    <section ref={section} className="relative overflow-hidden pb-16 pt-32 sm:pt-36 lg:pb-20">
+    <section ref={section} className="relative overflow-hidden pb-12 pt-28 sm:pt-36 lg:pb-14">
       <div className="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_at_top,black_30%,transparent_75%)]" />
       <div data-par="slow" aria-hidden className="pointer-events-none absolute -right-48 top-16 size-[560px] rounded-full border border-sand-200/[0.06]" />
       <div data-par="fast" aria-hidden className="pointer-events-none absolute -left-32 top-72 size-[360px] rounded-full border border-coral-500/20" />
 
-      <div className="container relative grid items-center gap-14 lg:grid-cols-[1.05fr_0.95fr]">
+      <div className="container relative grid items-center gap-8 sm:gap-14 lg:grid-cols-[1.05fr_0.95fr]">
         <div>
-          <h1 className="rise font-display text-5xl font-semibold leading-[1.02] tracking-tight text-sand-100 text-balance sm:text-6xl lg:text-7xl">
+          <h1 className="rise font-display text-[2.5rem] font-semibold leading-[1.04] tracking-tight text-sand-100 text-balance sm:text-6xl lg:text-7xl">
             Payroll for every client. <span className="text-coral-400">Never a mixed penny.</span>
           </h1>
-          <p className="rise mt-6 max-w-xl text-lg leading-relaxed text-sage-300 [animation-delay:120ms]">
+          <p className="rise mt-4 max-w-xl text-base leading-relaxed sm:mt-6 sm:text-lg text-sage-300 [animation-delay:120ms]">
             A crew of agents prepares, prices and pays contractor payroll for each client from that client&apos;s own wallet.
             You sign every run.
           </p>

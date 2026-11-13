@@ -67,12 +67,24 @@ export function usePlayOnView(build: (root: HTMLElement, q: gsap.utils.SelectorF
     const ctx = gsap.context(() => {
       const q = gsap.utils.selector(root);
       const tl = build(root, q).pause();
-      ScrollTrigger.create({ trigger: root, start, once: true, onEnter: () => tl.play(0) });
+      // IntersectionObserver so tiles inside horizontal carousels play when they scroll into view sideways too.
+      const io = new IntersectionObserver(
+        ([e]) => {
+          if (e.isIntersecting) {
+            tl.play(0);
+            io.disconnect();
+          }
+        },
+        { threshold: 0.35 },
+      );
+      io.observe(root);
+      void start;
       const replay = () => {
         if (tl.progress() === 1) tl.restart();
       };
       root.addEventListener("pointerenter", replay);
       root.addEventListener("focusin", replay);
+      return () => io.disconnect();
     }, root);
     return () => ctx.revert();
     // eslint-disable-next-line react-hooks/exhaustive-deps

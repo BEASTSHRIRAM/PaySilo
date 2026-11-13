@@ -8,9 +8,9 @@ const SIG = "M6 42 C16 8 28 6 26 36 S38 54 52 24 S70 6 72 34 S92 48 110 20 C120 
 
 function Statement({ n, title, body, children, tileRef }: { n: string; title: string; body: string; children: React.ReactNode; tileRef: React.RefObject<HTMLElement | null> }) {
   return (
-    <article ref={tileRef as React.RefObject<HTMLElement>} className="flex flex-col rounded-3xl border border-ink-800/15 bg-sand-100 p-6">
-      <div className="relative grid h-32 place-items-center rounded-2xl bg-ink-800">{children}</div>
-      <p className="mt-5 text-xs font-extrabold uppercase tracking-widest text-coral-600">{n}</p>
+    <article ref={tileRef as React.RefObject<HTMLElement>} className="flex w-[78vw] max-w-[300px] shrink-0 snap-start flex-col rounded-3xl border border-ink-800/15 bg-sand-100 p-4 sm:p-6 md:w-auto md:max-w-none md:shrink">
+      <div className="relative grid h-28 place-items-center md:h-32 rounded-2xl bg-ink-800">{children}</div>
+      <p className="mt-4 text-xs font-extrabold uppercase tracking-widest text-coral-600">{n}</p>
       <h3 className="mt-1 font-display text-2xl font-semibold leading-tight text-ink-800">{title}</h3>
       <p className="mt-2 text-sm leading-relaxed text-clay-600">{body}</p>
     </article>
@@ -99,27 +99,27 @@ const PARTNERS = [
 
 export function Trust() {
   return (
-    <section id="trust" className="relative scroll-mt-20 py-14 lg:py-20">
+    <section id="trust" className="relative scroll-mt-20 py-10 lg:py-12">
       <div className="container">
-        <div className="rounded-[2.5rem] bg-sand-200 p-6 text-ink-800 sm:p-10 lg:p-14">
+        <div className="rounded-[2rem] bg-sand-200 p-5 text-ink-800 sm:rounded-[2.5rem] sm:p-10 lg:p-10">
           <p className="text-sm font-extrabold uppercase tracking-widest text-coral-600">Trust</p>
-          <h2 className="mt-3 max-w-3xl font-display text-4xl font-semibold leading-[1.05] text-ink-800 text-balance sm:text-6xl">
+          <h2 className="mt-2 max-w-3xl font-display text-3xl font-semibold leading-[1.05] text-ink-800 text-balance sm:text-5xl">
             The agent never holds the pen.
           </h2>
-          <div className="mt-10 grid gap-4 md:grid-cols-3">
+          <div className="-mx-5 mt-6 flex scroll-px-5 snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain px-5 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:-mx-10 sm:scroll-px-10 sm:px-10 md:mx-0 md:mt-7 md:grid md:grid-cols-3 md:gap-4 md:overflow-visible md:px-0">
             <CodeDecides />
             <HumanSigns />
             <AgentDrafts />
           </div>
         </div>
 
-        <div id="partners" className="mt-16 scroll-mt-24">
+        <div id="partners" className="mt-10 scroll-mt-24 lg:mt-14">
           <p className="text-sm font-extrabold uppercase tracking-widest text-sage-500">Built with</p>
-          <ul className="mt-5 grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
+          <ul className="mt-4 grid grid-cols-2 gap-x-4 gap-y-5 sm:gap-x-8 sm:gap-y-6 lg:grid-cols-3">
             {PARTNERS.map((p) => (
-              <li key={p.name} className="border-t border-sand-200/10 pt-4">
-                <p className="font-display text-2xl font-semibold tracking-tight text-sand-100">{p.name}</p>
-                <p className="mt-1 text-sm text-sage-300">{p.line}</p>
+              <li key={p.name} className="border-t border-sand-200/10 pt-3">
+                <p className="font-display text-lg font-semibold leading-tight tracking-tight text-sand-100 sm:text-2xl">{p.name}</p>
+                <p className="mt-1 text-xs leading-snug text-sage-300 sm:text-sm">{p.line}</p>
               </li>
             ))}
           </ul>

@@ -24,41 +24,42 @@ export function Month() {
       const q = gsap.utils.selector(el);
       const rows = q("[data-row]");
       const tl = gsap.timeline({
-        scrollTrigger: { trigger: q("[data-list]")[0], start: "top 70%", end: "bottom 60%", scrub: 0.6 },
+        scrollTrigger: { trigger: q("[data-list]")[0], start: "top 85%", end: "bottom 70%", scrub: 0.6 },
       });
-      tl.from(q("[data-fillline]"), { scaleY: 0, transformOrigin: "top", ease: "none", duration: rows.length });
       rows.forEach((r, i) => {
-        tl.from(r, { opacity: 0.25, x: 16, duration: 0.6, ease: "power2.out" }, i);
-        tl.from(r.querySelector("[data-pt]"), { scale: 0.4, backgroundColor: "#15303A", duration: 0.4 }, i);
+        tl.from(r, { opacity: 0.25, y: 12, duration: 0.6, ease: "power2.out" }, i * 0.7);
+        tl.from(r.querySelector("[data-pt]"), { scale: 0.3, opacity: 0.3, duration: 0.4 }, i * 0.7);
       });
     }, el);
     return () => ctx.revert();
   }, []);
 
   return (
-    <section id="month" ref={root} className="relative scroll-mt-20 py-14 lg:py-20">
-      <div className="container grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
-        <div className="lg:sticky lg:top-28 lg:self-start">
-          <p className="text-sm font-extrabold uppercase tracking-widest text-coral-400">How a month looks</p>
-          <h2 className="mt-3 font-display text-4xl font-semibold leading-tight text-sand-100 text-balance sm:text-5xl">
-            Acme on the 3rd. Harborview on the 4th.
-          </h2>
-          <p className="mt-4 max-w-md text-base leading-relaxed text-sage-300">
-            Each client runs on its own schedule. Silo prepares, holds what does not fit, and waits for you. You approve.
+    <section id="month" ref={root} className="relative scroll-mt-20 py-10 lg:py-14">
+      <div className="container">
+        <div className="grid gap-2 lg:grid-cols-[1fr_auto] lg:items-end lg:gap-10">
+          <div>
+            <p className="text-sm font-extrabold uppercase tracking-widest text-coral-400">How a month looks</p>
+            <h2 className="mt-2 font-display text-3xl font-semibold leading-tight text-sand-100 text-balance sm:text-4xl">
+              Acme on the 3rd. Harborview on the 4th.
+            </h2>
+          </div>
+          <p className="max-w-md text-sm leading-relaxed text-sage-300">
+            Each client runs on its own schedule. Silo prepares, holds what does not fit, and waits for you.
           </p>
         </div>
-        <ol data-list className="relative space-y-4 pl-10">
-          <span className="absolute bottom-3 left-[11px] top-3 w-0.5 bg-ink-600" />
-          <span data-fillline className="absolute bottom-3 left-[11px] top-3 w-0.5 bg-coral-500" />
+        <ol data-list className="mt-5 grid gap-2 lg:grid-cols-5 lg:gap-3">
           {STEPS.map((s, i) => (
-            <li key={i} data-row className="relative flex items-center gap-4 rounded-2xl border border-sand-200/10 bg-ink-850 px-4 py-4">
-              <span data-pt className="absolute -left-[37px] top-1/2 size-[14px] -translate-y-1/2 rounded-full border-2 border-coral-500 bg-coral-500" />
-              <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-ink-700 font-display text-lg font-semibold text-sand-100">{s.day}</span>
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-extrabold uppercase tracking-wider text-sage-500">{s.who}</p>
-                <p className="text-base font-bold text-sand-100">{s.text}</p>
+            <li key={i} data-row className="flex items-center gap-3 rounded-2xl border border-sand-200/10 bg-ink-850 px-3 py-2.5 lg:flex-col lg:items-start lg:gap-2 lg:p-4">
+              <div className="flex items-center gap-2 lg:w-full lg:justify-between">
+                <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-ink-700 font-display text-sm font-semibold text-sand-100">{s.day}</span>
+                <span data-pt className={cn("hidden rounded-full px-2.5 py-0.5 text-[11px] font-extrabold uppercase lg:inline-block", s.tone)}>{s.tag}</span>
               </div>
-              <span className={cn("hidden shrink-0 rounded-full px-3 py-1 text-xs font-extrabold uppercase sm:inline-block", s.tone)}>{s.tag}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-sage-500">{s.who}</p>
+                <p className="text-sm font-bold leading-snug text-sand-100">{s.text}</p>
+              </div>
+              <span className={cn("shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-extrabold uppercase lg:hidden", s.tone)}>{s.tag}</span>
             </li>
           ))}
         </ol>

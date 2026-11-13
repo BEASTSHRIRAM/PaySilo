@@ -7,18 +7,19 @@ import { SiloMark } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 import { gsap, usePlayOnView } from "./motion";
 
-function Shell({ title, body, className, tileRef, children, center }: { title: string; body: string; className?: string; center?: boolean; tileRef: RefObject<HTMLElement | null>; children: ReactNode }) {
+function Shell({ title, body, className, tileRef, children, center, solo }: { title: string; body: string; className?: string; center?: boolean; solo?: boolean; tileRef: RefObject<HTMLElement | null>; children: ReactNode }) {
   return (
     <article
       ref={tileRef as RefObject<HTMLElement>}
       className={cn(
-        "group relative flex min-h-[240px] flex-col overflow-hidden rounded-[1.75rem] border border-sand-200/10 bg-ink-850 p-5 transition-colors duration-300 hover:border-sand-200/25 sm:p-6",
+        "group relative flex flex-col overflow-hidden rounded-[1.75rem] border border-sand-200/10 bg-ink-850 p-5 transition-colors duration-300 hover:border-sand-200/25 md:min-h-[215px] sm:p-6",
+        !solo && "max-md:w-[84vw] max-md:max-w-[340px] max-md:shrink-0 max-md:snap-start",
         className,
       )}
     >
       <h3 className="font-display text-xl font-semibold text-sand-100">{title}</h3>
       <p className="mt-1 max-w-sm text-sm leading-relaxed text-sage-300">{body}</p>
-      <div className={cn("relative mt-4 flex min-h-0 flex-1 flex-col", center ? "justify-center" : "justify-end")}>{children}</div>
+      <div className={cn("relative mt-4 flex min-h-0 flex-1 flex-col", center ? "justify-center" : "justify-end max-md:justify-center")}>{children}</div>
     </article>
   );
 }
@@ -45,13 +46,14 @@ function SilosTile() {
     { id: "cobalt", name: "Cobalt", amt: "USD 10,000", lvl: 0.88 },
   ];
   return (
-    <Shell tileRef={ref} title="Silos never mix" body="Every client has its own wallet. A transfer between two silos is refused in code, not by policy." className="md:col-span-2 lg:row-span-2">
-      <div className="relative flex h-full min-h-[200px] items-stretch gap-4 pt-10">
+    <Shell tileRef={ref} title="Silos never mix" body="Every client has its own wallet. A transfer between two silos is refused in code, not by policy." className="md:col-span-2 lg:row-span-2" solo>
+      <div className="relative flex h-full min-h-[150px] items-stretch gap-4 pt-10 md:min-h-[200px]">
         {wallets.map((w) => (
           <div key={w.id} data-col3={w.id === "cobalt" ? "" : undefined} className="relative flex min-w-0 flex-1 flex-col">
             <div className="relative flex-1 overflow-hidden rounded-2xl border-2 border-sand-200/15 bg-ink-950/60">
               <div data-sfill={w.id} className={cn("absolute inset-0 origin-bottom", w.id === "borealis" ? "bg-clay-500" : "bg-sage-500")} style={{ transform: `scaleY(${w.lvl})` }} />
               <Lock className="absolute right-2 top-2 size-4 text-sand-100/80" />
+              {w.id === "cobalt" && <span data-dep className="absolute inset-x-0 bottom-2 text-center text-[11px] font-extrabold text-ink-950">+USD 10,000</span>}
             </div>
             <p className="mt-2 truncate text-sm font-extrabold text-sand-100">{w.name}</p>
             <p className="truncate text-xs font-semibold text-sage-500">{w.amt}</p>
@@ -59,7 +61,7 @@ function SilosTile() {
               <>
                 <span data-wall className="absolute -left-[10px] top-1/3 h-16 w-1.5 -translate-x-1/2 rounded-full bg-sand-200/40" />
                 <span data-coin className="absolute -top-8 left-1/2 grid size-8 -translate-x-1/2 place-items-center rounded-full bg-coral-500 text-xs font-extrabold text-sand-50 shadow-[0_3px_0_0_theme(colors.coral.700)]">$</span>
-                <span data-dep className="absolute -top-8 right-0 text-xs font-extrabold text-mint-400">+USD 10,000</span>
+                
               </>
             )}
           </div>
@@ -94,15 +96,15 @@ function HeldTile() {
     return tl;
   });
   return (
-    <Shell tileRef={ref} title="Held lines continue by themselves" body="Short of funds? Silo pays what fits and holds the rest. When money lands, the held lines resume." className="md:col-span-2">
-      <div className="relative grid gap-2 sm:grid-cols-2">
+    <Shell tileRef={ref} title="Held lines continue by themselves" body="Short of funds? Silo pays what fits and holds the rest. When money lands, the held lines resume." className="md:col-span-2" solo>
+      <div className="relative grid grid-cols-2 gap-2">
         {LINES.map((l) => (
           <div key={l.who} data-line className="flex items-center justify-between gap-2 rounded-xl border border-sand-200/10 bg-ink-950/50 px-3 py-2.5">
             <div className="min-w-0">
               <p className="truncate text-sm font-extrabold text-sand-100">{l.who}</p>
               <p className="text-xs font-semibold text-sage-500">{l.amt}</p>
             </div>
-            <div className="relative h-7 w-[68px] shrink-0">
+            <div className="relative h-7 w-14 shrink-0 sm:w-[68px]">
               {l.held ? (
                 <>
                   <span data-held-pill className="absolute inset-0 grid place-items-center rounded-full bg-clay-500 text-[11px] font-extrabold uppercase text-sand-100">Held</span>
@@ -114,9 +116,9 @@ function HeldTile() {
             </div>
           </div>
         ))}
-        <div data-toast className="flex items-center justify-between gap-3 rounded-xl bg-sand-200 px-3 py-2 text-sm font-extrabold text-ink-800 sm:col-span-2">
-          <span>Funds arrive: USD 2,740</span>
-          <span data-approve className="inline-flex items-center gap-1.5 rounded-full bg-ink-800 px-2.5 py-1 text-[11px] uppercase tracking-wide text-sand-100">
+        <div data-toast className="flex items-center justify-between gap-2 rounded-xl bg-sand-200 px-2.5 py-2 text-[12px] font-extrabold text-ink-800 sm:text-sm col-span-2">
+          <span className="whitespace-nowrap">Funds arrive: USD 2,740</span>
+          <span data-approve className="inline-flex shrink-0 items-center whitespace-nowrap gap-1 rounded-full bg-ink-800 px-2 py-1 text-[10px] uppercase tracking-wide text-sand-100">
             You approve
             <span data-tick className="grid size-4 place-items-center rounded-full bg-mint-500 text-ink-950">
               <Check className="size-3" strokeWidth={4} />
@@ -220,17 +222,17 @@ function WorkflowTile() {
       <div className="rounded-2xl border border-sand-200/10 bg-ink-950/50 p-4">
         <div className="flex items-center">
           {nodes.map((n, i) => (
-            <div key={n} className="flex min-w-0 flex-1 items-center last:flex-none">
+            <div key={n} className="flex min-w-0 flex-[1_1_auto] items-center last:flex-none">
               <span
                 data-node
                 className={cn(
-                  "shrink-0 rounded-xl border px-2.5 py-2 text-xs font-extrabold sm:px-3",
+                  "shrink-0 rounded-lg border px-1.5 py-1.5 text-[11px] font-extrabold sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs",
                   n === "Approve" ? "border-coral-500 bg-coral-500 text-sand-50" : "border-sage-400/40 bg-ink-800 text-sand-100",
                 )}
               >
                 {n}
               </span>
-              {i < nodes.length - 1 && <span data-wire className="mx-1 h-0.5 min-w-2 flex-1 bg-sage-500" />}
+              {i < nodes.length - 1 && <span data-wire className="mx-0.5 h-0.5 min-w-1 flex-1 sm:mx-1 bg-sage-500" />}
             </div>
           ))}
         </div>
@@ -290,7 +292,7 @@ function BenefitsTile() {
   });
   return (
     <Shell tileRef={ref} title="Benefits on a Visa card" body="Kits, benefits and travel with a cap on every purchase." className="md:col-span-1 lg:col-span-2">
-      <div className="grid items-center gap-4 sm:grid-cols-[170px_1fr]">
+      <div className="grid items-center gap-3 min-[480px]:grid-cols-[150px_1fr] md:grid-cols-[170px_1fr]">
         <div data-vcard className="relative flex h-[112px] flex-col justify-between rounded-2xl bg-ink-600 p-3 ring-1 ring-sand-200/15">
           <div className="flex items-center justify-between">
             <span className="font-display text-lg font-semibold italic text-sand-100">Visa</span>
@@ -361,21 +363,23 @@ function AskTile() {
 
 export function Bento() {
   return (
-    <section id="features" className="relative scroll-mt-20 py-16 lg:py-24">
+    <section id="features" className="relative scroll-mt-20 py-12 lg:py-14">
       <div className="container">
         <p className="text-sm font-extrabold uppercase tracking-widest text-coral-400">Around the run</p>
-        <h2 className="mt-3 max-w-3xl font-display text-4xl font-semibold leading-tight text-sand-100 text-balance sm:text-5xl">
+        <h2 className="mt-2 max-w-3xl font-display text-3xl font-semibold leading-tight text-sand-100 text-balance sm:text-5xl">
           Everything a payroll month needs, each with its own guard.
         </h2>
-        <div className="mt-12 grid gap-4 md:grid-cols-2 lg:auto-rows-[minmax(240px,auto)] lg:grid-cols-4">
+        <div className="mt-8 grid gap-3 md:mt-8 md:gap-4 md:grid-cols-2 lg:auto-rows-[minmax(215px,auto)] lg:grid-cols-4">
           <SilosTile />
           <HeldTile />
-          <RiskTile />
-          <ProofTile />
-          <WorkflowTile />
-          <FundingTile />
-          <BenefitsTile />
-          <AskTile />
+          <div className="-mx-5 flex scroll-px-5 snap-x snap-mandatory gap-3 overflow-x-auto overscroll-x-contain px-5 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden md:contents">
+            <RiskTile />
+            <ProofTile />
+            <WorkflowTile />
+            <FundingTile />
+            <BenefitsTile />
+            <AskTile />
+          </div>
         </div>
       </div>
     </section>

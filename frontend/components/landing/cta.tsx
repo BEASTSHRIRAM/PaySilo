@@ -7,16 +7,16 @@ import { CtaActions, FooterAuth } from "./session";
 
 export function FinalCta() {
   return (
-    <section className="py-16 lg:py-24">
+    <section className="py-10 lg:py-12">
       <div className="container">
-        <div className="relative overflow-hidden rounded-[2.75rem] bg-coral-500 px-6 py-14 text-center shadow-[0_8px_0_0_theme(colors.coral.700)] sm:px-12">
+        <div className="relative overflow-hidden rounded-[2.75rem] bg-coral-500 px-5 py-10 text-center shadow-[0_8px_0_0_theme(colors.coral.700)] sm:px-12">
           <div className="bg-grain pointer-events-none absolute inset-0 opacity-20 mix-blend-overlay" />
-          <div className="relative mx-auto size-44">
+          <div className="relative mx-auto size-32 sm:size-44">
             <InView className="absolute inset-0">
               <LottieAnimation name="silo-cheer" className="size-full" label="Silo cheering" />
             </InView>
           </div>
-          <h2 className="relative mx-auto mt-2 max-w-2xl font-display text-4xl font-semibold text-sand-50 text-balance sm:text-5xl">
+          <h2 className="relative mx-auto mt-2 max-w-2xl font-display text-3xl font-semibold text-sand-50 text-balance sm:text-5xl">
             Run your next payroll with Silo.
           </h2>
           <p className="relative mx-auto mt-4 max-w-xl text-lg font-semibold text-sand-100/90">
