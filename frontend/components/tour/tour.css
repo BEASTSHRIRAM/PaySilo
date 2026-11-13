@@ -1,0 +1,45 @@
+/* Product tour skin. Layered over driver.js: the library only does the spotlight, positioning and
+   scroll; every pixel of the bubble is ours. Palette tokens: ink, coral, clay, sage, sand, mint. */
+
+body[data-tour-active] button[aria-label="Open Silo chat"] { opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+body[data-tour-step="ask-silo"] button[aria-label="Open Silo chat"] { opacity: 1; }
+
+.driver-popover.paysilo-tour {
+  all: unset;
+  box-sizing: border-box;
+  position: fixed;
+  z-index: 1000000000;
+  width: min(360px, calc(100vw - 24px));
+  min-width: 0;
+  max-width: none;
+  padding: 0;
+  border-radius: 2rem;
+  color: #fbe9d0;
+  font-family: var(--font-nunito), ui-rounded, system-ui, sans-serif;
+  background: linear-gradient(180deg, rgba(36, 72, 85, 0.96), rgba(21, 48, 58, 0.96));
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 2px solid rgba(251, 233, 208, 0.14);
+  box-shadow: 0 24px 60px -12px rgba(0, 0, 0, 0.65), 0 5px 0 0 #0c1d23;
+}
+.driver-popover.paysilo-tour > :not([data-tour-card]):not(.driver-popover-arrow) { display: none !important; }
+.driver-popover.paysilo-tour .driver-popover-arrow { border-width: 9px; }
+.driver-popover.paysilo-tour .driver-popover-arrow-side-top { border-top-color: #15303a; }
+.driver-popover.paysilo-tour .driver-popover-arrow-side-bottom { border-bottom-color: #15303a; }
+.driver-popover.paysilo-tour .driver-popover-arrow-side-left { border-left-color: #15303a; }
+.driver-popover.paysilo-tour .driver-popover-arrow-side-right { border-right-color: #15303a; }
+
+/* Phones: the bubble becomes a bottom (or top) sheet with Silo peeking above it. */
+@media (max-width: 639px) {
+  .driver-popover.paysilo-tour {
+    left: 8px !important; right: 8px !important; width: auto;
+    top: auto !important; bottom: 8px !important;
+    transform: none !important;
+    border-radius: 1.75rem;
+    max-height: calc(100dvh - 16px);
+  }
+  .driver-popover.paysilo-tour.tour-sheet-top { top: 8px !important; bottom: auto !important; }
+  .driver-popover.paysilo-tour .driver-popover-arrow { display: none; }
+}
+
+.tour-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { SiloChatPanel } from "@/components/chat/silo-chat-panel";
+import { TourProvider } from "@/components/tour/tour-provider";
 import { SideBar } from "@/components/dashboard/side-bar";
 import { cn } from "@/lib/utils";
 
@@ -42,7 +43,7 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
   }
 
   return (
-    <>
+    <TourProvider>
       <SideBar collapsed={collapsed} onToggle={toggle} />
       <div
         className={cn(
@@ -56,6 +57,6 @@ export default function DashboardLayout({ children }: { children: ReactNode }) {
         {children}
       </div>
       <SiloChatPanel open={chatOpen} onOpenChange={setChatOpen} />
-    </>
+    </TourProvider>
   );
 }

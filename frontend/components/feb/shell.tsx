@@ -38,7 +38,7 @@ export function FebShell({
           </Link>
           {actions}
         </div>
-        <section>
+        <section data-tour="page-header">
           <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">{title}</h1>
           <p className="mt-1 max-w-2xl text-sage-300">{subtitle}</p>
         </section>

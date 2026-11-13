@@ -243,7 +243,7 @@ export default function WorkflowsPage() {
         {workflows && workflows.length > 0 && (
           <div className="grid gap-4">
             {workflows.map((wf) => (
-              <Card key={wf.id} className="grid gap-3 p-5">
+              <Card key={wf.id} data-tour="workflow-card" className="grid gap-3 p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="font-display text-lg font-semibold text-sand-100">{wf.name}</p>

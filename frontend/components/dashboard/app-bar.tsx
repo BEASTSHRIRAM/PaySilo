@@ -10,6 +10,7 @@ import {
   Workflow, X, Users,
 } from "lucide-react";
 
+import { useTour } from "@/components/tour/tour-provider";
 import { api, type Session } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -71,7 +72,7 @@ export function isActive(pathname: string, href: string): boolean {
 export function DashboardNav() {
   const pathname = usePathname() ?? "/dashboard";
   return (
-    <nav aria-label="Dashboard sections" className="glass mt-2 overflow-x-auto rounded-full border border-sand-200/10 px-2 py-1.5 lg:hidden">
+    <nav aria-label="Dashboard sections" data-tour="nav-pill" className="glass mt-2 overflow-x-auto rounded-full border border-sand-200/10 px-2 py-1.5 lg:hidden">
       <ul className="flex min-w-max items-center gap-1">
         {NAV_GROUPS.map((group, gi) => (
           <li key={group.label} className="flex items-center gap-1">
@@ -107,6 +108,7 @@ export function DashboardNav() {
 /** Fixed account control; mobile keeps the pill navigation without a desktop bar. */
 export function AppBar({ session }: { session: Session }) {
   const router = useRouter();
+  const tour = useTour();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -151,6 +153,8 @@ export function AppBar({ session }: { session: Session }) {
               </div>
               <Link href="/dashboard/profile" onClick={() => setOpen(false)} className="mt-2 block rounded-3xl px-4 py-3 font-bold text-sand-100 hover:bg-sand-200/10">Profile</Link>
               <Link href="/dashboard/team" onClick={() => setOpen(false)} className="block rounded-3xl px-4 py-3 font-bold text-sand-100 hover:bg-sand-200/10">Team</Link>
+              <button type="button" onClick={() => { setOpen(false); tour.start({ kind: "full" }); }}
+                      className="block w-full rounded-3xl px-4 py-3 text-left font-bold text-sand-100 hover:bg-sand-200/10">Replay tour</button>
               <button type="button" onClick={() => void logout()}
                       className="mt-2 flex w-full items-center gap-3 rounded-3xl px-4 py-3 text-left font-bold text-sand-100 hover:bg-sand-200/10">
                 <LogOut className="size-5 text-sage-400" /> Log out
@@ -160,7 +164,7 @@ export function AppBar({ session }: { session: Session }) {
         </AnimatePresence>
         </div>
       </div>
-      <div className="px-3 pt-3 pr-14 sm:px-5 sm:pr-16 lg:hidden"><div className="mx-auto max-w-6xl"><DashboardNav /></div></div>
+      <div className="px-3 pt-3 pr-24 sm:px-5 sm:pr-28 lg:hidden"><div className="mx-auto max-w-6xl"><DashboardNav /></div></div>
     </>
   );
 }

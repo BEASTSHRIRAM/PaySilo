@@ -21,6 +21,7 @@ export function SideBar({ collapsed, onToggle }: { collapsed: boolean; onToggle:
   return (
     <aside
       aria-label="Dashboard sidebar"
+      data-tour="sidebar"
       className={cn(
         "fixed inset-y-0 left-0 z-40 hidden flex-col border-r border-sand-200/10 bg-ink-950/90 backdrop-blur transition-[width] duration-300 ease-out lg:flex",
         collapsed ? "w-[76px]" : "w-60",

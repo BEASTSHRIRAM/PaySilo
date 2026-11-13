@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { LottieAnimation } from "@/components/brand/lottie";
+import { GetStartedCard } from "@/components/tour/get-started-card";
 import { AppBar } from "@/components/dashboard/app-bar";
 import { RunPanel } from "@/components/dashboard/run-panel";
 import { Badge, toneForStatus } from "@/components/ui/badge";
@@ -311,6 +312,8 @@ export default function DashboardPage() {
 
         {overview && (
           <>
+            <GetStartedCard />
+
             <section>
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
@@ -324,7 +327,7 @@ export default function DashboardPage() {
                   <Button variant="outline" asChild>
                     <Link href="/dashboard/imports"><FileUp /> Import payroll</Link>
                   </Button>
-                  <Button onClick={onRunPayroll} disabled={overview.employers.length === 0 || !!startingId}>
+                  <Button data-tour="run-payroll" onClick={onRunPayroll} disabled={overview.employers.length === 0 || !!startingId}>
                     {startingId ? <Loader2 className="animate-spin" /> : <Play />} Run Payroll
                   </Button>
                 </div>
@@ -355,6 +358,7 @@ export default function DashboardPage() {
                 </Card>
               )}
 
+              <div data-tour="stats">
               <Stagger className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
                 <StatCard icon={ClipboardList} label="Total Runs" accent="bg-ink-600" sub="All runs in this organization">
                   <AnimatedNumber value={stats.total} />
@@ -375,6 +379,7 @@ export default function DashboardPage() {
                   {formatMoney(stats.finalized.toFixed(2))}
                 </StatCard>
               </Stagger>
+              </div>
             </section>
 
             <section aria-label="Payroll runs">
@@ -481,11 +486,11 @@ export default function DashboardPage() {
               </Card>
             </section>
 
-            <section>
+            <section data-tour="employers">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <h2 className="font-display text-2xl font-semibold text-sand-100">Employers</h2>
                 <Button variant="outline" size="sm" asChild>
-                  <Link href="/dashboard/employers/new"><Plus /> Add employer</Link>
+                  <Link data-tour="add-employer" href="/dashboard/employers/new"><Plus /> Add employer</Link>
                 </Button>
               </div>
               {overview.employers.length === 0 ? (

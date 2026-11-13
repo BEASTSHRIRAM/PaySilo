@@ -1418,3 +1418,20 @@ export const apiTravel = {
   purchases: (params?: SpendListParams) =>
     request<SpendPurchase[]>(`/travel/purchases${spendQuery(params)}`),
 };
+
+// ------------------------------------------------------------------ onboarding guide
+export type TourStatus = "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
+export interface TourState {
+  status: TourStatus; tour_version: number; current_tour_version: number; last_step: string | null;
+  completed_chapters: string[]; checklist_dismissed: boolean; auto_start: boolean; outdated: boolean;
+  role: string; is_demo: boolean; first_name: string; organization_name: string;
+}
+export interface ChecklistItem { key: string; label: string; hint: string; href: string; done: boolean; optional: boolean }
+export interface TourChecklist { visible: boolean; dismissed: boolean; items: ChecklistItem[]; done_count: number; total: number; all_done: boolean }
+export interface TourPatch { status?: TourStatus; last_step?: string; completed_chapters?: string[]; checklist_dismissed?: boolean }
+
+export const apiTour = {
+  state: () => request<TourState>("/me/onboarding"),
+  save: (patch: TourPatch) => request<TourState>("/me/onboarding", { method: "PUT", body: JSON.stringify(patch) }),
+  checklist: () => request<TourChecklist>("/me/onboarding/checklist"),
+};

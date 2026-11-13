@@ -196,7 +196,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
   }
 
   return (
-    <Card className="grid gap-5 p-5 sm:p-6">
+    <Card data-tour="funding-plan" className="grid gap-5 p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="font-display text-2xl font-semibold text-sand-100">
@@ -415,7 +415,7 @@ export default function FundingPage() {
       {session ? <AppBar session={session} /> : <div className="h-[76px]" />}
 
       <main className="mx-auto mt-8 grid max-w-6xl gap-6 px-4 sm:px-6">
-        <section className="flex flex-wrap items-end justify-between gap-4">
+        <section data-tour="page-header" className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">Funding planner</h1>
             <p className="mt-1 max-w-2xl text-sage-300">
@@ -427,7 +427,7 @@ export default function FundingPage() {
             <Button variant="outline" onClick={() => void refresh()} disabled={refreshing || loading}>
               <RefreshCw className={refreshing ? "animate-spin" : undefined} /> Refresh
             </Button>
-            <Button onClick={() => void runSweep()} disabled={!canEdit || sweeping || loading}
+            <Button data-tour="funding-sweep" onClick={() => void runSweep()} disabled={!canEdit || sweeping || loading}
               title={canEdit ? undefined : ROLE_NOTE}>
               {sweeping ? <Loader2 className="animate-spin" /> : <Send />} Run reminder sweep
             </Button>

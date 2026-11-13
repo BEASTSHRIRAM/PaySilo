@@ -324,6 +324,7 @@ export default function EmployerPage() {
             <PayrollScheduleDialog open={scheduleOpen} onClose={() => setScheduleOpen(false)}
               employers={[{ id: employer.id, name: employer.name }]} employerId={employer.id} />
 
+            <div data-tour="contractors">
             <ContractorsSection
               employer={employer} canEdit={canEdit} session={session}
               onAdded={(c) => void onContractorAdded(c)} onDeactivate={(c) => void deactivate(c)}
@@ -332,6 +333,7 @@ export default function EmployerPage() {
                 setNotice(note);
               }}
             />
+            </div>
 
             <section>
               <h2 className="mb-4 font-display text-2xl font-semibold text-sand-100">Run history</h2>
