@@ -256,7 +256,7 @@ def run_partial(ctx: dict, org: str = "PaySilo") -> tuple[str, str, str]:
     rows += [("Paid so far", _v(ctx, "paid_total")), ("Still needed", _v(ctx, "fund_amount"))]
     m = Mail(f"Part of the payroll is held: {_v(ctx, 'employer_name')}", org, REASON_RUN,
              paras=[f"{_v(ctx, 'employer_name')} paid part of {_v(ctx, 'run_label')}. "
-                    f"{_plural(len(held), 'payment')} below are held because the wallet was short by "
+                    f"{_plural(len(held), 'payment')} below {'is' if len(held) == 1 else 'are'} held because the wallet was short by "
                     f"{_v(ctx, 'shortfall')}.",
                     "Add funds to this employer's own wallet, then use Pay held lines. An approver signs again."],
              rows=rows, button=("Open the run", _v(ctx, "url")))
