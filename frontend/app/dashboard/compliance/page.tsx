@@ -11,6 +11,7 @@ import { errMsg, useSession } from "@/components/feb/use-session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { apiTrust, ApiError, trustDownloads, type ComplianceOverview } from "@/lib/api";
 import { formatMoney } from "@/lib/utils";
 
@@ -63,6 +64,10 @@ export default function CompliancePage() {
   const [data, setData] = useState<ComplianceOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const bankPager = usePagination(data?.bank_pending ?? [], 5, { key: "bankPage" });
+  const taxPager = usePagination(data?.tax_forms ?? [], 10, { key: "taxPage" });
+  const watchPager = usePagination(data?.watch_1099 ?? [], 10, { key: "watchPage" });
+  const ytdPager = usePagination(data?.ytd ?? [], 10, { key: "ytdPage" });
 
   const load = useCallback(async () => {
     setError(null);
@@ -108,8 +113,10 @@ export default function CompliancePage() {
             {data.bank_pending.length === 0 ? (
               <SectionEmpty title="No pending bank changes" body="When a contractor's payout details change, they show up here until verified." lottie={false} />
             ) : (
+              <>
+              <div ref={bankPager.listRef} className="scroll-mt-24">
               <List>
-                {data.bank_pending.map((r) => (
+                {bankPager.pageItems.map((r) => (
                   <Row key={r.contractor_id} href={link(r.employer_id)}>
                     <Who name={r.full_name} employer={r.employer_name} />
                     <span className="text-sm font-semibold text-sage-300">
@@ -119,6 +126,9 @@ export default function CompliancePage() {
                   </Row>
                 ))}
               </List>
+              </div>
+              <Pagination state={bankPager} label="bank_pending" />
+              </>
             )}
           </section>
 
@@ -128,8 +138,10 @@ export default function CompliancePage() {
             {data.tax_forms.length === 0 ? (
               <SectionEmpty title="Every contractor's tax form is in order" body="Missing, expired or soon-to-expire forms will appear here." lottie={false} />
             ) : (
+              <>
+              <div ref={taxPager.listRef} className="scroll-mt-24">
               <List>
-                {data.tax_forms.map((r) => {
+                {taxPager.pageItems.map((r) => {
                   const info = ISSUE_LABEL[r.issue];
                   return (
                     <Row key={r.contractor_id} href={link(r.employer_id)}>
@@ -145,6 +157,9 @@ export default function CompliancePage() {
                   );
                 })}
               </List>
+              </div>
+              <Pagination state={taxPager} label="tax_forms" />
+              </>
             )}
           </section>
 
@@ -157,8 +172,10 @@ export default function CompliancePage() {
             {data.watch_1099.length === 0 ? (
               <SectionEmpty title="No one is at the threshold yet" body="US-person contractors appear here once their year-to-date payments reach it." lottie={false} />
             ) : (
+              <>
+              <div ref={watchPager.listRef} className="scroll-mt-24">
               <List>
-                {data.watch_1099.map((r) => (
+                {watchPager.pageItems.map((r) => (
                   <Row key={r.contractor_id} href={link(r.employer_id)}>
                     <Who name={r.full_name} employer={r.employer_name} />
                     <span className="font-display font-semibold tabular-nums text-sand-100">{formatMoney(r.paid_ytd_usd, "USD")} <span className="text-xs font-semibold text-sage-500">· {r.payments} payments</span></span>
@@ -166,6 +183,9 @@ export default function CompliancePage() {
                   </Row>
                 ))}
               </List>
+              </div>
+              <Pagination state={watchPager} label="watch_1099" />
+              </>
             )}
           </section>
 
@@ -175,8 +195,10 @@ export default function CompliancePage() {
             {data.ytd.length === 0 ? (
               <SectionEmpty title="No contractors yet" body="Add contractors to an employer to see their year-to-date payments." lottie={false} />
             ) : (
+              <>
+              <div ref={ytdPager.listRef} className="scroll-mt-24">
               <List>
-                {data.ytd.map((r) => (
+                {ytdPager.pageItems.map((r) => (
                   <Row key={r.contractor_id} href={link(r.employer_id)}>
                     <Who name={r.full_name} employer={r.employer_name} />
                     <span className="text-sm font-semibold text-sage-300">
@@ -187,6 +209,9 @@ export default function CompliancePage() {
                   </Row>
                 ))}
               </List>
+              </div>
+              <Pagination state={ytdPager} label="ytd" />
+              </>
             )}
           </section>
 

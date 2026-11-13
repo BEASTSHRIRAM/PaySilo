@@ -16,6 +16,7 @@ import {
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import {
@@ -335,6 +336,8 @@ export default function TravelPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const budgetsPager = usePagination(budgets ?? [], 6, { key: "budgetsPage" });
+  const tripsPager = usePagination(trips ?? [], 5, { key: "tripsPage" });
   const [denyFor, setDenyFor] = useState<string | null>(null);
   const [denyReason, setDenyReason] = useState("");
 
@@ -675,12 +678,15 @@ export default function TravelPage() {
           />
         )}
         {budgets && budgets.length > 0 && (
+          <div ref={budgetsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-5 lg:grid-cols-2">
-            {budgets.map((b) => (
+            {budgetsPager.pageItems.map((b) => (
               <BudgetCard key={b.id} budget={b} status={status} canEdit={canEdit} onSaved={() => void loadCore()} />
             ))}
           </Stagger>
+          </div>
         )}
+        <Pagination state={budgetsPager} label="Budgets" sizes={[6, 12, 24]} />
         {budgets && !canEdit && (
           <p className="text-sm font-semibold text-sage-400">Budget editing is available to owners and admins.</p>
         )}
@@ -793,8 +799,9 @@ export default function TravelPage() {
         )}
 
         {trips && trips.length > 0 && (
+          <div ref={tripsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-4">
-            {trips.map((trip) => {
+            {tripsPager.pageItems.map((trip) => {
               const purchasable = trip.components.filter((c) => isPurchasable(trip, c));
               const anyTxBlocked = trip.components.some((c) => c.tx_limit_blocked);
               return (
@@ -957,7 +964,9 @@ export default function TravelPage() {
               );
             })}
           </Stagger>
+          </div>
         )}
+        <Pagination state={tripsPager} label="Trips" />
       </section>
 
       {/* ------------------------------------------------ approve confirmation (cap override) */}

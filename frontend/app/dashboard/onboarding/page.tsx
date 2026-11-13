@@ -16,6 +16,7 @@ import {
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/select";
 import {
@@ -275,6 +276,8 @@ export default function OnboardingPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
+  const budgetsPager = usePagination(budgets ?? [], 6, { key: "budgetsPage" });
+  const kitsPager = usePagination(kits ?? [], 5, { key: "kitsPage" });
   const [denyFor, setDenyFor] = useState<string | null>(null);
   const [denyReason, setDenyReason] = useState("");
 
@@ -586,12 +589,15 @@ export default function OnboardingPage() {
           />
         )}
         {budgets && budgets.length > 0 && (
+          <div ref={budgetsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-5 lg:grid-cols-2">
-            {budgets.map((b) => (
+            {budgetsPager.pageItems.map((b) => (
               <BudgetCard key={b.id} budget={b} status={status} canEdit={canEdit} onSaved={() => void loadCore()} />
             ))}
           </Stagger>
+          </div>
         )}
+        <Pagination state={budgetsPager} label="Budgets" sizes={[6, 12, 24]} />
         {budgets && !canEdit && (
           <p className="text-sm font-semibold text-sage-400">Budget editing is available to owners and admins.</p>
         )}
@@ -723,8 +729,9 @@ export default function OnboardingPage() {
         )}
 
         {kits && kits.length > 0 && (
+          <div ref={kitsPager.listRef} className="scroll-mt-24">
           <Stagger className="grid gap-4">
-            {kits.map((kit) => {
+            {kitsPager.pageItems.map((kit) => {
               const purchasable = kit.items.filter((it) => isPurchasable(kit, it));
               return (
                 <Card key={kit.id} className="grid gap-3 p-5">
@@ -876,7 +883,9 @@ export default function OnboardingPage() {
               );
             })}
           </Stagger>
+          </div>
         )}
+        <Pagination state={kitsPager} label="Kits" />
       </section>
 
       {/* ------------------------------------------------ purchase confirmation */}
