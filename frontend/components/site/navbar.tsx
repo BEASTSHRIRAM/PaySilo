@@ -6,6 +6,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowRight, Menu, X } from "lucide-react";
 
 import { Logo, SiloMark } from "@/components/brand/logo";
+import { MenuActions, NavActions } from "@/components/landing/session";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
@@ -56,18 +57,7 @@ export function Navbar() {
         <Logo />
 
         <div className="flex items-center gap-2">
-          <Link
-            href="/login"
-            className="hidden h-10 items-center rounded-full border-2 border-sand-200/25 px-5 text-sm font-bold text-sand-100 transition-colors hover:border-sand-200/60 hover:bg-sand-200/5 sm:inline-flex"
-          >
-            Log in
-          </Link>
-          <Link
-            href="/signup"
-            className="hidden h-10 items-center rounded-full bg-coral-500 px-5 text-sm font-extrabold text-sand-50 shadow-[0_3px_0_0_theme(colors.coral.700)] transition-[transform,box-shadow] hover:brightness-110 active:translate-y-[3px] active:shadow-none sm:inline-flex"
-          >
-            Get started
-          </Link>
+          <NavActions />
           <button
             ref={buttonRef}
             type="button"
@@ -117,16 +107,7 @@ export function Navbar() {
                 Hi, I&apos;m <span className="font-bold text-sand-100">Silo</span>. I never mix one company&apos;s money with another&apos;s.
               </p>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-2 sm:hidden">
-              <Link href="/login" onClick={() => setOpen(false)}
-                className="flex h-11 items-center justify-center rounded-full border-2 border-sand-200/25 text-sm font-bold text-sand-100">
-                Log in
-              </Link>
-              <Link href="/signup" onClick={() => setOpen(false)}
-                className="flex h-11 items-center justify-center rounded-full bg-coral-500 text-sm font-extrabold text-sand-50">
-                Get started
-              </Link>
-            </div>
+            <MenuActions onNavigate={() => setOpen(false)} />
           </motion.div>
         )}
       </AnimatePresence>

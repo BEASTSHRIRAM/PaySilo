@@ -1,10 +1,9 @@
 import Link from "next/link";
-import { ArrowRight } from "lucide-react";
 
 import { LottieAnimation } from "@/components/brand/lottie";
 import { Logo } from "@/components/brand/logo";
-import { Button } from "@/components/ui/button";
 import { InView } from "./motion";
+import { CtaActions, FooterAuth } from "./session";
 
 export function FinalCta() {
   return (
@@ -23,16 +22,7 @@ export function FinalCta() {
           <p className="relative mx-auto mt-4 max-w-xl text-lg font-semibold text-sand-100/90">
             Set up your agency in a minute, or open the demo with three clients already in it.
           </p>
-          <div className="relative mt-8 flex flex-wrap justify-center gap-4">
-            <Button asChild size="lg" variant="sand">
-              <Link href="/signup">
-                Start free <ArrowRight />
-              </Link>
-            </Button>
-            <Button asChild size="lg" className="bg-ink-800 text-sand-100 [--duo-edge:theme(colors.ink.950)]">
-              <Link href="/login?demo=1">Try the demo</Link>
-            </Button>
-          </div>
+          <CtaActions />
         </div>
       </div>
     </section>
@@ -47,8 +37,7 @@ export function Footer() {
         <nav aria-label="Footer" className="flex flex-wrap justify-center gap-x-6 gap-y-2 font-bold text-sage-300">
           <a className="hover:text-sand-100" href="https://github.com/BEASTSHRIRAM/PaySilo" target="_blank" rel="noreferrer">GitHub</a>
           <a className="hover:text-sand-100" href="https://github.com/BEASTSHRIRAM/PaySilo#readme" target="_blank" rel="noreferrer">Docs</a>
-          <Link className="hover:text-sand-100" href="/login">Log in</Link>
-          <Link className="hover:text-sand-100" href="/signup">Sign up</Link>
+          <FooterAuth />
         </nav>
         <p className="text-center text-xs md:text-right">
           Team STATIC · Airwallex Agentic Banking Hackathon

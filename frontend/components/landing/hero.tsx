@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, Check, Lock } from "lucide-react";
+import { Check, Lock } from "lucide-react";
 
 import { LottieAnimation, type LottieName } from "@/components/brand/lottie";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { HeroActions } from "./session";
 import { gsap, prefersReducedMotion, ScrollTrigger } from "./motion";
 
 const AGENTS = ["Intake", "Risk Gate", "Pricing", "Policy", "Approval", "Payout", "Reconcile", "Receipt"];
@@ -174,23 +173,7 @@ export function Hero() {
             A crew of agents prepares, prices and pays contractor payroll for each client from that client&apos;s own wallet.
             You sign every run.
           </p>
-          <div className="rise mt-9 flex flex-wrap items-center gap-4 [animation-delay:240ms]">
-            <Button asChild size="lg">
-              <Link href="/signup">
-                Start free <ArrowRight />
-              </Link>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <a href="#pipeline">See it run</a>
-            </Button>
-          </div>
-          <p className="rise mt-6 text-sm font-semibold text-sage-500 [animation-delay:320ms]">
-            No card needed.{" "}
-            <Link href="/login?demo=1" className="font-bold text-sand-200 underline decoration-coral-500 decoration-2 underline-offset-4 hover:text-sand-50">
-              Open the demo
-            </Link>{" "}
-            on the Airwallex simulator.
-          </p>
+          <HeroActions />
         </div>
 
         <div className="rise mx-auto w-full max-w-[500px] [animation-delay:200ms] [perspective:1200px]">

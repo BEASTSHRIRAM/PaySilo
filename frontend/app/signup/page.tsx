@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AnimatePresence, motion } from "framer-motion";
@@ -83,6 +83,10 @@ function Tile({ selected, onClick, children }: { selected: boolean; onClick: () 
 
 export default function SignupPage() {
   const router = useRouter();
+  // Already signed in? Skip the form.
+  useEffect(() => {
+    api.me().then(() => router.replace("/dashboard")).catch(() => undefined);
+  }, [router]);
   const [step, setStep] = useState(0);
   const [org, setOrg] = useState<Org>({ name: "", legal_name: "", country: "IN", base_currency: "USD", industry: "", size_band: "", website: "" });
   const [admin, setAdmin] = useState<Admin>({ full_name: "", email: "", password: "", confirm: "" });
