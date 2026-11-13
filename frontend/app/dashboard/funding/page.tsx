@@ -258,7 +258,7 @@ function PlanCard({ plan, canEdit, onChanged, notify }: {
               {plan.needs_amount.length > 0 ? `, ${plan.needs_amount.length} need an amount` : ""})
             </button>
             {open && (
-              <div className="mt-3 overflow-x-auto rounded-3xl border-2 border-ink-700">
+              <div className="relative mt-3 overflow-x-auto rounded-3xl border-2 border-ink-700">
                 <table className="w-full min-w-[520px] border-collapse text-left text-sm">
                   <thead>
                     <tr className="bg-ink-900/70 text-xs font-extrabold uppercase tracking-widest text-sage-500">

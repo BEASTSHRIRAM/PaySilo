@@ -61,7 +61,7 @@ function JournalCard({ txn }: { txn: JournalTxn }) {
           <Badge tone="danger"><Scale className="size-3.5" /> Out of balance</Badge>
         )}
       </div>
-      <div className="overflow-x-auto">
+      <div className="relative overflow-x-auto">
         <table className="w-full min-w-[520px] text-left text-sm">
           <thead>
             <tr className="border-b-2 border-ink-700 text-sage-400">

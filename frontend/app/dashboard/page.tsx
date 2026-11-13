@@ -425,7 +425,7 @@ export default function DashboardPage() {
                   <Button variant="ghost" className="mt-2" onClick={() => { setQuery(""); setStatusFilter("ALL"); }}>Clear search and filter</Button>
                 </Card>
               ) : (
-                <div ref={runsPager.listRef} className="scroll-mt-24 overflow-x-auto rounded-4xl border-2 border-ink-700">
+                <div ref={runsPager.listRef} className="relative scroll-mt-24 overflow-x-auto rounded-4xl border-2 border-ink-700">
                   <table className="w-full min-w-[760px] border-collapse text-left">
                     <thead>
                       <tr className="bg-ink-900/70 text-xs font-extrabold uppercase tracking-widest text-sage-500">

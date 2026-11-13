@@ -308,7 +308,7 @@ export default function ReconciliationPage() {
                         <Card className="p-5"><p className="font-semibold text-sage-400">No settlements in this report yet.</p></Card>
                       ) : (
                         <>
-                        <Card ref={settlementsPager.listRef} className="scroll-mt-24 overflow-x-auto">
+                        <Card ref={settlementsPager.listRef} className="relative scroll-mt-24 overflow-x-auto">
                           <table className="w-full min-w-[640px] text-left text-sm">
                             <thead>
                               <tr className="border-b-2 border-ink-700 text-sage-400">

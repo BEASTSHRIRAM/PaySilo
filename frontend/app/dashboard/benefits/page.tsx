@@ -857,7 +857,7 @@ export default function BenefitsPage() {
         )}
         {purchases && purchases.length > 0 && (
           <Card ref={purchasesPager.listRef} className="scroll-mt-24 overflow-hidden">
-            <div className="overflow-x-auto">
+            <div className="relative overflow-x-auto">
               <table className="w-full min-w-[860px] text-left text-sm">
                 <thead>
                   <tr className="border-b-2 border-ink-700 text-sage-400">
