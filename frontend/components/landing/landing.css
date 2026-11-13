@@ -1,0 +1,37 @@
+/* Landing only. Stage dimming applies only while the horizontal pipeline is active (data-mode="h"). */
+[data-mode="h"] .stage-card {
+  transition: opacity 0.35s ease, transform 0.35s ease, border-color 0.35s ease;
+  opacity: 0.4;
+  transform: scale(0.96);
+}
+[data-mode="h"] .stage-card[data-active="true"] {
+  opacity: 1;
+  transform: scale(1);
+}
+.stage-card[data-active="true"] .stage-detail {
+  opacity: 1;
+  transform: none;
+}
+[data-mode="h"] .stage-card:not([data-active="true"]) .stage-detail {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.stage-detail {
+  transition: opacity 0.4s ease 0.1s, transform 0.4s ease 0.1s;
+}
+.hatch {
+  background-image: repeating-linear-gradient(135deg, rgba(135, 79, 65, 0.55) 0 5px, transparent 5px 10px);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-mode="h"] .stage-card { transition: none; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: none; }
+}
+.rise { animation: rise 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) { .rise { animation: none; } }
+[data-mode="h"] .conn i { transform: scaleX(0); transition: transform 0.5s ease; }
+[data-mode="h"] [data-reached="true"] > .conn i { transform: scaleX(1); }
+[data-mode="h"] [data-fork] .fork-main { opacity: 0; transition: opacity 0.4s ease; }
+[data-mode="h"] [data-fork][data-reached="true"] .fork-main { opacity: 1; }

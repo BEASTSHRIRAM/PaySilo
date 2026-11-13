@@ -1,94 +1,202 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
-import { ArrowRight, Check, Lock, PauseCircle } from "lucide-react";
+import { ArrowRight, Check, Lock } from "lucide-react";
 
-import { LottieAnimation } from "@/components/brand/lottie";
+import { LottieAnimation, type LottieName } from "@/components/brand/lottie";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { gsap, prefersReducedMotion, ScrollTrigger } from "./motion";
 
-const chips = [
-  { icon: Check, title: "Acme Manufacturing", body: "Settled · EUR 6,025.70", tone: "bg-mint-500 text-ink-950", pos: "left-0 top-10 sm:-left-6", delay: 0.5 },
-  { icon: PauseCircle, title: "Borealis Labs", body: "Held · short $2,642.88", tone: "bg-sand-300 text-ink-900", pos: "right-0 top-1/3 sm:-right-8", delay: 0.8 },
-  { icon: Lock, title: "Cobalt deposit $10,000", body: "Stays in Cobalt's silo", tone: "bg-coral-500 text-sand-50", pos: "bottom-6 left-4 sm:-left-2", delay: 1.1 },
+const AGENTS = ["Intake", "Risk Gate", "Pricing", "Policy", "Approval", "Payout", "Reconcile", "Receipt"];
+
+const SAYS = [
+  "Reading the sheet.",
+  "No odd bank changes.",
+  "Fees first.",
+  "Borealis is short. Holding 2.",
+  "Over to you to sign.",
+  "Paying from each silo.",
+  "Matching the books.",
+  "Done. Receipt saved.",
 ];
 
-export function Hero() {
+const MASCOT: LottieName[] = ["silo-idle", "silo-idle", "silo-idle", "silo-shy", "silo-wave", "silo-idle", "silo-idle", "silo-cheer"];
+
+const SILOS = [
+  { id: "acme", name: "Acme", amount: "EUR 12,400", start: 0.62, end: 0.36 },
+  { id: "borealis", name: "Borealis", amount: "USD 1,150", start: 0.24, end: 0.24 },
+  { id: "cobalt", name: "Cobalt", amount: "USD 10,000", start: 0.82, end: 0.5 },
+];
+
+const STEP = 1.25;
+
+function RunCard() {
+  const [stage, setStage] = useState(7);
+  const root = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = root.current;
+    if (!el || prefersReducedMotion()) return;
+    const ctx = gsap.context(() => {
+      const q = gsap.utils.selector(el);
+      const at = (i: number) => 0.15 + i * STEP;
+      const tl = gsap.timeline({ repeat: -1, repeatDelay: 0.6, paused: true });
+      SILOS.forEach((s) => tl.set(q(`[data-fill=${s.id}]`), { scaleY: s.start }, 0));
+      AGENTS.forEach((_, i) => tl.call(() => setStage(i), undefined, at(i)));
+      tl.fromTo(q("[data-fee]"), { opacity: 0, y: 6 }, { opacity: 1, y: 0, duration: 0.4 }, at(2));
+      tl.fromTo(q("[data-held]"), { opacity: 0, y: 6 }, { opacity: 1, y: 0, duration: 0.4 }, at(3));
+      tl.to(q("[data-tank=borealis]"), { x: 3, duration: 0.07, yoyo: true, repeat: 5 }, at(3) + 0.3);
+      tl.to(q("[data-fill=acme]"), { scaleY: SILOS[0].end, duration: 0.9, ease: "power2.inOut" }, at(5));
+      tl.to(q("[data-fill=cobalt]"), { scaleY: SILOS[2].end, duration: 0.9, ease: "power2.inOut" }, at(5));
+      tl.to(q("[data-fee],[data-held]"), { opacity: 0, duration: 0.3 }, at(8) + 0.6);
+      SILOS.forEach((s) => tl.to(q(`[data-fill=${s.id}]`), { scaleY: s.start, duration: 0.5 }, at(8) + 0.6));
+      const st = ScrollTrigger.create({
+        trigger: el,
+        start: "top bottom",
+        end: "bottom top",
+        onToggle: (self) => (self.isActive ? tl.play() : tl.pause()),
+      });
+      return () => st.kill();
+    }, el);
+    return () => ctx.revert();
+  }, []);
+
   return (
-    <section className="relative overflow-hidden pb-20 pt-32 sm:pt-40">
+    <div ref={root} className="relative">
+      <div className="rounded-[2rem] border border-sand-200/10 bg-ink-850/90 p-5 shadow-[0_40px_80px_-40px_rgba(0,0,0,0.9)] sm:p-6">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-extrabold uppercase tracking-widest text-sage-500">Payroll run</p>
+            <p className="font-display text-lg font-semibold text-sand-100">Vertex Payroll Services</p>
+            <p aria-live="polite" className="mt-3 inline-block rounded-2xl rounded-tl-sm bg-sand-200 px-3.5 py-2 text-sm font-bold text-ink-800">
+              {SAYS[stage]}
+            </p>
+          </div>
+          <div className="relative -mr-2 -mt-3 size-28 shrink-0 sm:size-36">
+            <LottieAnimation name={MASCOT[stage]} className="absolute inset-0" label="Silo, the PaySilo mascot" />
+          </div>
+        </div>
+
+        <ol className="mt-5 grid grid-cols-4 gap-2" aria-label="Agent steps">
+          {AGENTS.map((a, i) => {
+            const done = i < stage;
+            const on = i === stage;
+            return (
+              <li
+                key={a}
+                data-state={on ? "on" : done ? "done" : "idle"}
+                className={cn(
+                  "flex min-w-0 flex-col gap-1 rounded-xl border px-2 py-2 text-[11px] font-extrabold leading-none transition-colors duration-300 sm:text-xs",
+                  on && "border-coral-500 bg-coral-500 text-sand-50",
+                  done && "border-mint-500/40 bg-mint-500/10 text-mint-400",
+                  !on && !done && "border-sand-200/10 text-sage-500",
+                )}
+              >
+                <span className="flex items-center justify-between opacity-80">
+                  {String(i + 1).padStart(2, "0")}
+                  {done && <Check className="size-3" strokeWidth={4} />}
+                </span>
+                <span className="truncate">{a}</span>
+              </li>
+            );
+          })}
+        </ol>
+
+        <div className="mt-5 grid grid-cols-3 gap-3 sm:gap-4">
+          {SILOS.map((s) => (
+            <div key={s.id} className="min-w-0">
+              <div data-tank={s.id} className="relative h-28 overflow-hidden rounded-2xl border-2 border-sand-200/15 bg-ink-950/60 sm:h-32">
+                <div
+                  data-fill={s.id}
+                  className={cn("absolute inset-0 origin-bottom will-change-transform", s.id === "borealis" ? "bg-clay-500" : "bg-sage-500")}
+                  style={{ transform: `scaleY(${s.end})` }}
+                />
+                {s.id === "borealis" && (
+                  <span data-held className="absolute inset-x-1.5 top-2 rounded-lg bg-sand-200 px-1.5 py-1 text-center text-[10px] font-extrabold uppercase text-clay-600">
+                    2 held
+                  </span>
+                )}
+                {s.id === "acme" && (
+                  <span data-fee className="absolute inset-x-1.5 top-2 rounded-lg bg-ink-950/80 px-1.5 py-1 text-center text-[10px] font-extrabold text-sand-200">
+                    fees 25.70
+                  </span>
+                )}
+                <Lock className="absolute bottom-1.5 right-1.5 size-3 text-ink-950/70" />
+              </div>
+              <p className="mt-2 truncate text-sm font-extrabold text-sand-100">{s.name}</p>
+              <p className="truncate text-xs font-semibold text-sage-500">{s.amount}</p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-4 text-xs font-semibold text-sage-500">Three wallets. Money never crosses between them.</p>
+      </div>
+    </div>
+  );
+}
+
+export function Hero() {
+  const section = useRef<HTMLElement>(null);
+  const card = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = section.current;
+    if (!el || prefersReducedMotion()) return;
+    const ctx = gsap.context(() => {
+      const scrub = { trigger: el, start: "top top", end: "bottom top", scrub: true };
+      gsap.to("[data-par='slow']", { yPercent: 18, ease: "none", scrollTrigger: scrub });
+      gsap.to("[data-par='fast']", { yPercent: -10, ease: "none", scrollTrigger: scrub });
+      const rx = gsap.quickTo(card.current, "rotationY", { duration: 0.8, ease: "power3" });
+      const ry = gsap.quickTo(card.current, "rotationX", { duration: 0.8, ease: "power3" });
+      const move = (e: PointerEvent) => {
+        rx((e.clientX / window.innerWidth - 0.5) * 6);
+        ry(-(e.clientY / window.innerHeight - 0.5) * 5);
+      };
+      el.addEventListener("pointermove", move);
+      return () => el.removeEventListener("pointermove", move);
+    }, el);
+    return () => ctx.revert();
+  }, []);
+
+  return (
+    <section ref={section} className="relative overflow-hidden pb-16 pt-32 sm:pt-36 lg:pb-20">
       <div className="bg-grid pointer-events-none absolute inset-0 [mask-image:radial-gradient(ellipse_at_top,black_30%,transparent_75%)]" />
-      <div className="pointer-events-none absolute -right-40 top-10 size-[520px] rounded-full bg-coral-500/20 blur-[120px]" />
-      <div className="pointer-events-none absolute -left-40 top-60 size-[420px] rounded-full bg-sage-500/15 blur-[120px]" />
+      <div data-par="slow" aria-hidden className="pointer-events-none absolute -right-48 top-16 size-[560px] rounded-full border border-sand-200/[0.06]" />
+      <div data-par="fast" aria-hidden className="pointer-events-none absolute -left-32 top-72 size-[360px] rounded-full border border-coral-500/20" />
 
-      <div className="container relative grid items-center gap-14 lg:grid-cols-[1.1fr_0.9fr]">
+      <div className="container relative grid items-center gap-14 lg:grid-cols-[1.05fr_0.95fr]">
         <div>
-
-          <motion.h1
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.08 }}
-            className="font-display text-5xl font-semibold leading-[1.02] tracking-tight text-sand-100 text-balance sm:text-6xl lg:text-7xl"
-          >
-            Payroll for every client.{" "}
-            <span className="text-gradient">Never a mixed penny.</span>
-          </motion.h1>
-
-          <motion.p
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.16 }}
-            className="mt-6 max-w-xl text-lg leading-relaxed text-sage-300"
-          >
-            PaySilo is the payroll agent for agencies that pay contractors for many employers. Silo prices fees
-            first, pays each employer&apos;s people <em className="font-bold not-italic text-sand-100">only</em> from
-            that employer&apos;s own wallet, and stops to ask you when money is short.
-          </motion.p>
-
-          <motion.div
-            initial={{ opacity: 0, y: 16 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.24 }}
-            className="mt-9 flex flex-wrap items-center gap-4"
-          >
+          <h1 className="rise font-display text-5xl font-semibold leading-[1.02] tracking-tight text-sand-100 text-balance sm:text-6xl lg:text-7xl">
+            Payroll for every client. <span className="text-coral-400">Never a mixed penny.</span>
+          </h1>
+          <p className="rise mt-6 max-w-xl text-lg leading-relaxed text-sage-300 [animation-delay:120ms]">
+            A crew of agents prepares, prices and pays contractor payroll for each client from that client&apos;s own wallet.
+            You sign every run.
+          </p>
+          <div className="rise mt-9 flex flex-wrap items-center gap-4 [animation-delay:240ms]">
             <Button asChild size="lg">
               <Link href="/signup">
-                Start for free <ArrowRight />
+                Start free <ArrowRight />
               </Link>
             </Button>
             <Button asChild size="lg" variant="outline">
-              <Link href="/login?demo=1">Try the live demo</Link>
+              <a href="#pipeline">See it run</a>
             </Button>
-          </motion.div>
-
-          <p className="mt-6 text-sm font-semibold text-sage-500">
-            No card, no keys — the demo runs on the Airwallex simulator.
+          </div>
+          <p className="rise mt-6 text-sm font-semibold text-sage-500 [animation-delay:320ms]">
+            No card needed.{" "}
+            <Link href="/login?demo=1" className="font-bold text-sand-200 underline decoration-coral-500 decoration-2 underline-offset-4 hover:text-sand-50">
+              Open the demo
+            </Link>{" "}
+            on the Airwallex simulator.
           </p>
         </div>
 
-        <div className="relative mx-auto w-full max-w-[460px]">
-          <div className="absolute inset-8 rounded-full bg-gradient-to-br from-coral-500/30 via-clay-500/20 to-sage-500/20 blur-2xl" />
-          <div className="relative aspect-square rounded-full border border-sand-200/10 bg-ink-800/40">
-            <LottieAnimation name="silo-idle" className="absolute inset-4" label="Silo the squirrel, PaySilo's payroll agent" />
+        <div className="rise mx-auto w-full max-w-[500px] [animation-delay:200ms] [perspective:1200px]">
+          <div ref={card} className="[transform-style:preserve-3d]">
+            <RunCard />
           </div>
-          {chips.map(({ icon: Icon, title, body, tone, pos, delay }) => (
-            <motion.div
-              key={title}
-              initial={{ opacity: 0, scale: 0.8, y: 10 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              transition={{ delay, type: "spring", stiffness: 260, damping: 18 }}
-              className={`absolute ${pos}`}
-            >
-              <div className="glass flex animate-float items-center gap-3 rounded-2xl border border-sand-200/10 px-3.5 py-2.5 shadow-xl">
-                <span className={`grid size-8 place-items-center rounded-xl ${tone}`}>
-                  <Icon className="size-4" strokeWidth={3} />
-                </span>
-                <span className="leading-tight">
-                  <span className="block text-sm font-extrabold text-sand-100">{title}</span>
-                  <span className="block text-xs font-semibold text-sage-300">{body}</span>
-                </span>
-              </div>
-            </motion.div>
-          ))}
         </div>
       </div>
     </section>

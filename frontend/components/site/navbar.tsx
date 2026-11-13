@@ -9,11 +9,10 @@ import { Logo, SiloMark } from "@/components/brand/logo";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
-  { href: "/#problem", label: "The problem", hint: "Why pooled balances break trust" },
-  { href: "/#how", label: "How it works", hint: "Seven steps, fees first" },
-  { href: "/#crew", label: "Meet the crew", hint: "Silo and the agents" },
-  { href: "/#safety", label: "Safety", hint: "Signed approvals, sealed silos" },
-  { href: "/#partners", label: "Partners", hint: "Airwallex, Visa, Metal, Claude, AWS" },
+  { href: "/#pipeline", label: "How it runs", hint: "Eight agents, one signature" },
+  { href: "/#features", label: "What you get", hint: "Silos, held lines, proofs, workflows" },
+  { href: "/#trust", label: "Trust", hint: "The agent never holds the pen" },
+  { href: "/#partners", label: "Partners", hint: "Airwallex, Visa, Bedrock, LangGraph, Claude, Metal" },
 ];
 
 /** Floating, fully rounded glass navbar: logo left, pills + hamburger right. */
