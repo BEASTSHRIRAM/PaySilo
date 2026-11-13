@@ -13,6 +13,7 @@ import { errMsg, useSession } from "@/components/feb/use-session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { apiV3, ApiError, type ExceptionItem } from "@/lib/api";
 import { Stagger } from "@/lib/gsap-anim";
 import { cn } from "@/lib/utils";
@@ -92,6 +93,7 @@ export default function ExceptionsPage() {
   }, [items]);
 
   const visible = severityFilter === "all" ? sorted : sorted.filter((i) => i.severity.toLowerCase() === severityFilter);
+  const pager = usePagination(visible, 10, { key: "exceptionsPage", resetKey: severityFilter });
 
   return (
     <FebShell
@@ -148,8 +150,9 @@ export default function ExceptionsPage() {
               <p className="mt-1 text-sm font-semibold text-sage-400">Switch the filter to see the rest of the inbox.</p>
             </Card>
           ) : (
+            <div ref={pager.listRef} className="scroll-mt-24">
             <Stagger className="grid gap-3">
-              {visible.map((item) => {
+              {pager.pageItems.map((item) => {
                 const TypeIcon = iconForType(item.type);
                 const SevIcon = severityIcon(item.severity);
                 const sev = item.severity.toLowerCase();
@@ -218,7 +221,9 @@ export default function ExceptionsPage() {
                 );
               })}
             </Stagger>
+            </div>
           )}
+          <Pagination state={pager} label="Exceptions" />
         </>
       )}
     </FebShell>

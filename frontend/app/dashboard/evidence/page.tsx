@@ -14,6 +14,7 @@ import { asStr, pickBool, pickStr, rec } from "@/components/feb/accessors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import {
   api, apiV3, v3Downloads,
@@ -64,6 +65,11 @@ export default function EvidencePage() {
   const [bundleLoading, setBundleLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const approvalsPager = usePagination(bundle?.approvals ?? [], 5, { key: "approvalsPage", resetKey: runId });
+  const linesPager = usePagination(bundle?.pay_lines ?? [], 10, { key: "linesPage", resetKey: runId });
+  const journalPager = usePagination(bundle?.journal_transaction_ids ?? [], 5, { key: "journalPage", resetKey: runId });
+  const eventsPager = usePagination(bundle?.agent_events ?? [], 5, { key: "eventsPage", resetKey: runId });
+  const exceptionsPager = usePagination(bundle?.exceptions ?? [], 5, { key: "exceptionsPage", resetKey: runId });
 
   const loadRuns = useCallback(async () => {
     setError(null);
@@ -196,8 +202,8 @@ export default function EvidencePage() {
                 {bundle.approvals.length === 0 && !tapRec ? (
                   <Card className="p-5"><p className="font-semibold text-sage-400">No approvals are recorded in this bundle.</p></Card>
                 ) : (
-                  <div className="grid gap-3">
-                    {bundle.approvals.map((a, i) => {
+                  <div ref={approvalsPager.listRef} className="grid scroll-mt-24 gap-3">
+                    {approvalsPager.pageItems.map((a, i) => {
                       const verified = a.verified === true;
                       return (
                         <Card key={i} className="p-5">
@@ -234,6 +240,7 @@ export default function EvidencePage() {
                     )}
                   </div>
                 )}
+                <Pagination state={approvalsPager} label="Approvals" sizes={[5, 10]} />
               </section>
 
               <section>
@@ -252,7 +259,7 @@ export default function EvidencePage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y-2 divide-ink-700">
-                        {bundle.pay_lines.map((p, i) => {
+                        {linesPager.pageItems.map((p, i) => {
                           const amount = asStr(p.amount) ?? (typeof p.amount === "number" ? String(p.amount) : null);
                           const currency = asStr(p.currency) ?? "USD";
                           const ref = pickStr(rec(p), ["provider_ref", "airwallex_transfer_id", "transfer_id", "provider_reference"]);
@@ -269,6 +276,7 @@ export default function EvidencePage() {
                     </table>
                   </Card>
                 )}
+                <Pagination state={linesPager} label="Pay lines" />
               </section>
 
               <div className="grid items-start gap-8 lg:grid-cols-2">
@@ -280,13 +288,14 @@ export default function EvidencePage() {
                     ) : (
                       <>
                         <ul className="grid gap-2">
-                          {bundle.journal_transaction_ids.map((id) => (
+                          {journalPager.pageItems.map((id) => (
                             <li key={id} className="flex items-center justify-between gap-3 rounded-2xl bg-ink-950/40 px-4 py-2.5">
                               <span className="break-all text-sm font-semibold text-sand-200">{id}</span>
                               <BookOpen className="size-4 shrink-0 text-sage-400" />
                             </li>
                           ))}
                         </ul>
+                        <Pagination state={journalPager} label="Journal links" />
                         <Button variant="ghost" size="sm" asChild className="mt-3">
                           <Link href="/dashboard/journals">Open the journals <ArrowUpRight /></Link>
                         </Button>
@@ -341,8 +350,8 @@ export default function EvidencePage() {
                     {bundle.agent_events.length === 0 ? (
                       <p className="font-semibold text-sage-400">No agent events in this bundle.</p>
                     ) : (
-                      <ul className="grid max-h-80 gap-2 overflow-y-auto pr-1">
-                        {bundle.agent_events.map((e, i) => (
+                      <ul ref={eventsPager.listRef} className="grid scroll-mt-24 gap-2">
+                        {eventsPager.pageItems.map((e, i) => (
                           <li key={i} className="rounded-2xl bg-ink-900/50 px-3 py-2.5 text-sm text-sand-200">
                             <span className="font-extrabold text-sand-100">{asStr(e.agent) ?? "agent"}</span>
                             {" — "}{asStr(e.message) ?? asStr(e.detail) ?? "Event recorded"}
@@ -350,6 +359,7 @@ export default function EvidencePage() {
                         ))}
                       </ul>
                     )}
+                    <Pagination state={eventsPager} label="Agent events" sizes={[5, 10]} />
                   </Card>
                   <Card className="p-5">
                     <h3 className="mb-3 font-display text-lg font-semibold text-sand-100">Exceptions ({bundle.exceptions.length})</h3>
@@ -357,13 +367,14 @@ export default function EvidencePage() {
                       <p className="font-semibold text-sage-400">No exceptions are attached to this run.</p>
                     ) : (
                       <ul className="grid gap-2">
-                        {bundle.exceptions.map((x, i) => (
+                        {exceptionsPager.pageItems.map((x, i) => (
                           <li key={i} className="rounded-2xl border-2 border-coral-700/50 bg-coral-500/10 px-3 py-2.5 text-sm font-semibold text-coral-200">
                             {asStr(x.title) ?? asStr(x.type) ?? "Exception"} — {asStr(x.detail) ?? asStr(x.message) ?? "See the exceptions inbox for detail."}
                           </li>
                         ))}
                       </ul>
                     )}
+                    <Pagination state={exceptionsPager} label="Exceptions" sizes={[5, 10]} />
                     <Button variant="ghost" size="sm" asChild className="mt-3">
                       <Link href="/dashboard/exceptions">Open the exceptions inbox <ArrowUpRight /></Link>
                     </Button>

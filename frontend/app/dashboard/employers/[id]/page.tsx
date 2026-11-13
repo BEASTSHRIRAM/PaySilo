@@ -12,6 +12,7 @@ import { Badge, toneForStatus } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/select";
 import {
@@ -159,6 +160,7 @@ export default function EmployerPage() {
   }
 
   const [savingMode, setSavingMode] = useState(false);
+  const runsPager = usePagination(runs ?? [], 5, { key: "runsPage" });
   async function changeMode(mode: SettlementMode) {
     if (!employer) return;
     setSavingMode(true);
@@ -343,12 +345,13 @@ export default function EmployerPage() {
                 <SectionEmpty title="No runs yet" body="Runs for this employer will appear here. Start one with Run payroll above." />
               )}
               {runs !== null && runs.length > 0 && (
-                <div className="overflow-hidden rounded-4xl border-2 border-ink-700">
+                <>
+                <div ref={runsPager.listRef} className="scroll-mt-24 overflow-hidden rounded-4xl border-2 border-ink-700">
                   <div className="hidden grid-cols-[1fr_auto_auto_auto] gap-4 bg-ink-900/70 px-5 py-3 text-xs font-extrabold uppercase tracking-widest text-sage-500 md:grid">
                     <span>Run</span><span>Status</span><span className="text-right">Required</span><span />
                   </div>
                   <ul className="divide-y-2 divide-ink-700">
-                    {runs.map((r) => (
+                    {runsPager.pageItems.map((r) => (
                       <li key={r.id}>
                         <Link
                           href={`/dashboard/runs/${r.id}`}
@@ -371,6 +374,8 @@ export default function EmployerPage() {
                     ))}
                   </ul>
                 </div>
+                <Pagination state={runsPager} label="Runs" />
+                </>
               )}
             </section>
 
@@ -440,6 +445,7 @@ function ContractorsSection({
   const [panel, setPanel] = useState<RowPanel | null>(null);
   const [verifying, setVerifying] = useState<Contractor | null>(null);
   const [watch, setWatch] = useState<Set<string>>(new Set());
+  const contractorsPager = usePagination(employer.contractors, 10, { key: "contractorsPage" });
   const canVerify = !!session && DECIDER_ROLES.includes(session.role);
   useEffect(() => {
     apiTrust.complianceOverview()
@@ -580,12 +586,13 @@ function ContractorsSection({
       {employer.contractors.length === 0 ? (
         <SectionEmpty title="No contractors yet" body="Add the people this employer pays. Each contractor belongs to this silo only." />
       ) : (
-        <div className="overflow-hidden rounded-4xl border-2 border-ink-700">
+        <>
+        <div ref={contractorsPager.listRef} className="scroll-mt-24 overflow-hidden rounded-4xl border-2 border-ink-700">
           <div className="hidden grid-cols-[1.4fr_1fr_auto_auto_auto] gap-4 bg-ink-900/70 px-5 py-3 text-xs font-extrabold uppercase tracking-widest text-sage-500 lg:grid">
             <span>Contractor</span><span>Payout</span><span className="text-right">Default</span><span>Status</span><span />
           </div>
           <ul className="divide-y-2 divide-ink-700">
-            {employer.contractors.map((c) => (
+            {contractorsPager.pageItems.map((c) => (
               <li key={c.id} className="bg-ink-850/80">
                 <div className="grid gap-2 px-5 py-4 lg:grid-cols-[1.4fr_1fr_auto_auto_auto] lg:items-center lg:gap-4">
                   <span className="min-w-0">
@@ -642,6 +649,8 @@ function ContractorsSection({
             ))}
           </ul>
         </div>
+        <Pagination state={contractorsPager} label="Contractors" />
+        </>
       )}
       {verifying && session && (
         <VerifyBankDialog

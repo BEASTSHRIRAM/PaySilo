@@ -10,6 +10,7 @@ import { isNonZero, num } from "@/components/feb/accessors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import {
   api, apiV3, v3Downloads, ApiError,
@@ -121,6 +122,7 @@ export default function JournalsPage() {
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const pager = usePagination(txns ?? [], 10, { key: "journalPage", resetKey: `${book}|${employerId}` });
 
   const loadEmployers = useCallback(async () => {
     try {
@@ -258,10 +260,13 @@ export default function JournalsPage() {
                 : "This employer's book is empty. Entries appear when funds move — deposits, FX, payouts, fees, and charges."}
             />
           ) : (
-            <Stagger className="grid gap-5">
-              {txns.map((txn) => <JournalCard key={txn.id} txn={txn} />)}
-            </Stagger>
+            <div ref={pager.listRef} className="scroll-mt-24">
+              <Stagger className="grid gap-5">
+                {pager.pageItems.map((txn) => <JournalCard key={txn.id} txn={txn} />)}
+              </Stagger>
+            </div>
           )}
+          <Pagination state={pager} label="Journal entries" />
         </>
       )}
     </FebShell>

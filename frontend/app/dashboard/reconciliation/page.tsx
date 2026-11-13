@@ -13,6 +13,7 @@ import { num } from "@/components/feb/accessors";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pagination, usePagination } from "@/components/ui/pagination";
 import { NativeSelect } from "@/components/ui/select";
 import {
   api, apiV3, ApiError,
@@ -105,6 +106,7 @@ export default function ReconciliationPage() {
   const [employers, setEmployers] = useState<Employer[] | null>(null);
   const [employerId, setEmployerId] = useState("");
   const [data, setData] = useState<Reconciliation | null>(null);
+  const settlementsPager = usePagination(data?.settlements ?? [], 10, { key: "settlementsPage", resetKey: employerId });
   const [loading, setLoading] = useState(true);
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -305,7 +307,8 @@ export default function ReconciliationPage() {
                       {data.settlements.length === 0 ? (
                         <Card className="p-5"><p className="font-semibold text-sage-400">No settlements in this report yet.</p></Card>
                       ) : (
-                        <Card className="overflow-x-auto">
+                        <>
+                        <Card ref={settlementsPager.listRef} className="scroll-mt-24 overflow-x-auto">
                           <table className="w-full min-w-[640px] text-left text-sm">
                             <thead>
                               <tr className="border-b-2 border-ink-700 text-sage-400">
@@ -318,7 +321,7 @@ export default function ReconciliationPage() {
                               </tr>
                             </thead>
                             <tbody className="divide-y-2 divide-ink-700">
-                              {data.settlements.map((s) => (
+                              {settlementsPager.pageItems.map((s) => (
                                 <tr key={`${s.run_id}-${s.pay_line_id}`} className="bg-ink-900/30">
                                   <td className="px-5 py-3 font-bold text-sand-100">{s.beneficiary_name}</td>
                                   <td className="px-3 py-3 font-display font-semibold tabular-nums text-sand-100">{formatMoney(s.amount, s.currency)}</td>
@@ -341,6 +344,8 @@ export default function ReconciliationPage() {
                             </tbody>
                           </table>
                         </Card>
+                        <Pagination state={settlementsPager} label="Settlements" />
+                        </>
                       )}
                     </section>
                   </div>
