@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Check, CornerDownRight, Loader2, PauseCircle, RotateCw, ShieldAlert, Wallet } from "lucide-react";
 
+import { AgentFlow } from "@/components/dashboard/agent-flow";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, ApiError, type RunDetail } from "@/lib/api";
@@ -12,16 +13,6 @@ import { notifyDataChanged } from "@/lib/events";
 import { explainRunError, HOLD_REASON_TEXT } from "@/lib/run-errors";
 import { runStatusInfo } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
-
-const AGENT_NAMES: Record<string, string> = {
-  bedrock: "Bedrock AgentCore",
-  intake: "Intake", risk: "Risk Gate", price: "Pricing", assess: "Balance & Policy", approval: "Approval Gate", escalate: "Escalation",
-  execute: "FX & Payout", fee: "Fee", reconcile: "Reconciliation", attest: "Attestation",
-};
-
-const LEVEL_DOT: Record<string, string> = {
-  info: "bg-sage-500", success: "bg-mint-500", warning: "bg-sand-400", error: "bg-coral-500",
-};
 
 export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
   run: RunDetail; canDecide: boolean; canPayHeld?: boolean; onChange: (r: RunDetail) => void;
@@ -227,7 +218,7 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
       )}
 
       {run.pending && (
-        <div className={cn("rounded-3xl border-2 p-4", run.pending.kind === "approval" ? "border-sage-600/60 bg-sage-500/10" : "border-sand-400/50 bg-sand-300/10")}>
+        <div id="approval-controls" className={cn("scroll-mt-24 rounded-3xl border-2 p-4", run.pending.kind === "approval" ? "border-sage-600/60 bg-sage-500/10" : "border-sand-400/50 bg-sand-300/10")}>
           <p className="font-bold text-sand-100">{run.pending.message}</p>
           {run.pending.run_fee_waived && (
             <p className="mt-2 text-sm font-semibold text-sage-300">
@@ -272,16 +263,7 @@ export function RunPanel({ run, canDecide, canPayHeld = false, onChange }: {
 
       <div>
         <p className="mb-3 text-sm font-extrabold uppercase tracking-widest text-sage-500">Agent timeline</p>
-        <ol className="grid gap-2">
-          {run.events.map((e) => (
-            <li key={e.seq} className="flex gap-3 rounded-2xl bg-ink-900/50 px-3 py-2.5">
-              <span className={cn("mt-1.5 size-2.5 shrink-0 rounded-full", LEVEL_DOT[e.level] ?? "bg-sage-500")} />
-              <p className="text-sm leading-relaxed text-sand-200">
-                <span className="font-extrabold text-sand-100">{AGENT_NAMES[e.agent] ?? e.agent}</span> — {e.message}
-              </p>
-            </li>
-          ))}
-        </ol>
+        <AgentFlow events={run.events} status={run.status} pendingKind={run.pending?.kind ?? null} />
       </div>
     </div>
   );

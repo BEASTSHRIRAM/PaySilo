@@ -110,3 +110,19 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Agent flow (run timeline): animated connectors and the active-node pulse. */
+.af-edge { height: 2px; width: 100%; border-radius: 2px; }
+.af-edge-v { width: 2px; border-radius: 2px; }
+.af-edge-done { background: #6F8F8E; }
+.af-edge-idle { background: repeating-linear-gradient(90deg, #2F5A69 0 4px, transparent 4px 8px); }
+.af-edge-v.af-edge-idle { background: repeating-linear-gradient(180deg, #2F5A69 0 4px, transparent 4px 8px); }
+.af-edge-flow { background: repeating-linear-gradient(90deg, #E64833 0 6px, transparent 6px 12px); background-size: 12px 2px; animation: af-flow-x 0.7s linear infinite; }
+.af-edge-v.af-edge-flow { background: repeating-linear-gradient(180deg, #E64833 0 6px, transparent 6px 12px); background-size: 2px 12px; animation: af-flow-y 0.7s linear infinite; }
+.af-pulse { animation: af-pulse 1.8s ease-in-out infinite; }
+@keyframes af-flow-x { to { background-position: 12px 0; } }
+@keyframes af-flow-y { to { background-position: 0 12px; } }
+@keyframes af-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(230, 72, 51, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(230, 72, 51, 0); }
+}
