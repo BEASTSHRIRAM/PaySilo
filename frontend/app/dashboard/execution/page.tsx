@@ -7,6 +7,7 @@ import {
   RefreshCw, ShieldCheck, X,
 } from "lucide-react";
 
+import { AgentFlow } from "@/components/dashboard/agent-flow";
 import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { LifecycleStepper, lifecycleFor } from "@/components/feb/stepper";
 import { PaymentTracePanel } from "@/components/feb/payment-trace";
@@ -21,18 +22,9 @@ import {
   api, apiV3, ApiError, proofDownloads,
   type EvidenceBundle, type RunDetail, type RunSummary,
 } from "@/lib/api";
-import { Stagger, TimelineReveal } from "@/lib/gsap-anim";
+import { Stagger } from "@/lib/gsap-anim";
 import { isMoneyMoved, TERMINAL_RUN_STATUSES } from "@/lib/status";
 import { cn, formatMoney } from "@/lib/utils";
-
-const AGENT_NAMES: Record<string, string> = {
-  bedrock: "Bedrock AgentCore",
-  intake: "Intake", price: "Pricing", assess: "Balance & Policy", approval: "Approval Gate",
-  escalate: "Escalation", execute: "FX & Payout", fee: "Fee", reconcile: "Reconciliation", attest: "Attestation",
-};
-const LEVEL_DOT: Record<string, string> = {
-  info: "bg-sage-500", success: "bg-mint-500", warning: "bg-sand-400", error: "bg-coral-500",
-};
 
 type CheckState = "done" | "missing" | "pending" | "unknown";
 interface CheckItem { label: string; detail: string; state: CheckState }
@@ -375,19 +367,12 @@ export default function ExecutionPage() {
                     {detail.events.length === 0 ? (
                       <p className="font-semibold text-sage-400">No agent events recorded yet.</p>
                     ) : (
-                      <TimelineReveal className="grid gap-2">
-                        {detail.events.map((e) => (
-                          <li key={e.seq} className="flex gap-3 rounded-2xl bg-ink-900/50 px-3 py-2.5">
-                            <span className={cn("mt-1.5 size-2.5 shrink-0 rounded-full", LEVEL_DOT[e.level] ?? "bg-sage-500")} />
-                            <div>
-                              <p className="text-sm leading-relaxed text-sand-200">
-                                <span className="font-extrabold text-sand-100">{AGENT_NAMES[e.agent] ?? e.agent}</span> — {e.message}
-                              </p>
-                              <p className="text-xs font-semibold text-sage-500">{new Date(e.created_at).toLocaleString()}</p>
-                            </div>
-                          </li>
-                        ))}
-                      </TimelineReveal>
+                      <AgentFlow
+                        events={detail.events}
+                        status={detail.status}
+                        pendingKind={detail.pending?.kind ?? null}
+                        approvalHref={`/dashboard/runs/${detail.id}#approval-controls`}
+                      />
                     )}
                   </Card>
                 </div>
