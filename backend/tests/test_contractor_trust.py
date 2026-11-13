@@ -91,11 +91,11 @@ def test_profile_and_tax_edits_do_not_trigger_verification(demo_client):
     eid, cid = _ctx(demo_client, name="Tomas Rivera")
     r = demo_client.patch(f"/employers/{eid}/contractors/{cid}", json={
         "full_name": "Tomas Rivera Ruiz", "tax_status": "NON_US", "tax_form_type": "W8BEN",
-        "tax_form_status": "RECEIVED", "tax_form_expires_at": str(date.today() + timedelta(days=900))})
+        "tax_form_status": "RECEIVED", "tax_form_expires_at": str(datetime.now(UTC).date() + timedelta(days=900))})
     assert r.status_code == 200, r.text
     assert r.json()["bank_change_pending"] is False
     assert r.json()["contractor"]["tax_form_status"] == "RECEIVED"
-    assert r.json()["contractor"]["tax_form_received_at"] == str(date.today())  # defaulted
+    assert r.json()["contractor"]["tax_form_received_at"] == str(datetime.now(UTC).date())  # defaulted
     groups = {c["group"] for c in demo_client.get(f"/employers/{eid}/contractors/{cid}/history").json()["changes"]}
     assert groups == {"profile", "tax"}
 
@@ -292,16 +292,16 @@ def uuid4():
 # ---------------------------------------------------------------- tax form expiry
 def test_tax_form_expiry_is_computed_on_read(demo_client):
     eid, cid = _ctx(demo_client, name="Tomas Rivera")
-    soon = date.today() + timedelta(days=20)
+    soon = datetime.now(UTC).date() + timedelta(days=20)
     r = demo_client.patch(f"/employers/{eid}/contractors/{cid}", json={
         "tax_status": "NON_US", "tax_form_type": "W8BEN", "tax_form_status": "RECEIVED",
-        "tax_form_received_at": str(date.today() - timedelta(days=400)), "tax_form_expires_at": str(soon)})
+        "tax_form_received_at": str(datetime.now(UTC).date() - timedelta(days=400)), "tax_form_expires_at": str(soon)})
     assert r.status_code == 200
     row = next(x for x in demo_client.get("/compliance/overview").json()["tax_forms"] if x["contractor_id"] == cid)
     assert row["issue"] == "expiring_soon" and row["days_to_expiry"] == 20
     with _db(demo_client) as s:  # stored status still RECEIVED; the date passes
         c = s.get(Contractor, __import__("uuid").UUID(cid))
-        c.tax_form_expires_at = date.today() - timedelta(days=1)
+        c.tax_form_expires_at = datetime.now(UTC).date() - timedelta(days=1)
         s.commit()
         assert c.tax_form_status == "RECEIVED"
     view = next(x for x in demo_client.get(f"/employers/{eid}").json()["contractors"] if x["id"] == cid)
@@ -344,7 +344,7 @@ def test_ytd_derivation_and_1099_threshold_edges(demo_client):
     assert [w["contractor_id"] for w in ov["watch_1099"]] == [cid] and ov["watch_1099"][0]["w9_on_file"] is True
     assert ov["counts"]["watch_1099"] == 1
     # a prior-year payment is ignored
-    _add_run(demo_client, eid, lines=[(cid, "9000", "USD", "PAID")], when=datetime(date.today().year - 1, 12, 30, tzinfo=UTC))
+    _add_run(demo_client, eid, lines=[(cid, "9000", "USD", "PAID")], when=datetime(datetime.now(UTC).date().year - 1, 12, 30, tzinfo=UTC))
     row, _ = _ytd(demo_client, cid)
     assert row["paid_ytd_usd"] == "2000.00" and row["payments"] == 2
 
