@@ -36,9 +36,9 @@ body[data-tour-step="ask-silo"] button[aria-label="Open Silo chat"] { opacity: 1
     top: auto !important; bottom: 8px !important;
     transform: none !important;
     border-radius: 1.75rem;
-    max-height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 24px);
   }
-  .driver-popover.paysilo-tour.tour-sheet-top { top: 8px !important; bottom: auto !important; }
+  .driver-popover.paysilo-tour.tour-sheet-top { top: 56px !important; bottom: auto !important; }
   .driver-popover.paysilo-tour .driver-popover-arrow { display: none; }
 }
 

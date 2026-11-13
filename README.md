@@ -458,6 +458,12 @@ frontend/              Next.js: landing, login/signup, dashboard (runs, employer
 deploy/agentcore/      AgentCore wrapping notes + sample config
 ```
 
+## Onboarding guide
+
+First session in an organization (new signups and invited members on first login) opens a full-screen welcome from Silo, then a spotlight tour built on driver.js with a fully custom bubble. The tour is role-aware (owners/admins see all 18 steps, approvers and viewers a shorter story), data-aware (an org with no employers gets "Add your first employer" and sample-state copy instead of empty tables), navigates between pages itself, and becomes a bottom sheet on phones. Keys: Left/Right/Esc. It respects `prefers-reduced-motion`. A "Get started" checklist on the dashboard ticks itself from real data (employer, contractors, funding, first payroll, approver; optional email and schedule). The `?` button and the profile menu replay the tour or a chapter, and the Funding and Workflows pages offer a one-time mini-tour.
+
+All copy is in `frontend/lib/tour/steps.ts` (no LLM calls). Progress is stored per user and organization (`GET/PUT /me/onboarding`, `GET /me/onboarding/checklist`); the demo account is seeded as SKIPPED and shows a "Take the tour" pill. Bump `TOUR_VERSION` (`backend/app/api/routes/tour.py` and `steps.ts`) to re-offer the tour after a major change.
+
 ## Proof of payment
 
 | Feature | What you get | Docs |

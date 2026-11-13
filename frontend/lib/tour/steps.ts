@@ -58,7 +58,7 @@ const DECIDERS: TourRole[] = ["owner", "admin", "approver"];
 
 export const TOUR_STEPS: TourStep[] = [
   {
-    id: "sidebar", chapter: "setup", pose: "wave", route: "/dashboard", target: "sidebar", side: "right",
+    id: "sidebar", chapter: "setup", pose: "wave", route: "/dashboard", target: "sidebar", fallback: ["[data-tour='nav-pill']"], side: "right",
     title: "Your map",
     body: "Everything is grouped the way money moves, from payroll to proof.",
     why: "Any task is two clicks away.",

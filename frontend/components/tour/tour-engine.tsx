@@ -107,7 +107,7 @@ function WelcomeScreen({ state, onStart, onSkip }: { state: TourState; onStart: 
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ type: "spring", stiffness: 220, damping: 22 }}
       >
-        <Mascot pose="wave" size={132} className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2" />
+        <div className="absolute left-1/2 top-0 -ml-[66px] -mt-[66px]"><Mascot pose="wave" size={132} /></div>
         <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">Hi {vars.first}, I&apos;m Silo.</h1>
         <p className="mx-auto mt-3 max-w-sm text-lg font-semibold leading-snug text-sage-300">
           Give me 60 seconds and I&apos;ll show you how <span className="text-sand-100">{vars.org}</span> pays people
@@ -137,7 +137,7 @@ function FinishScreen({ state, onDone }: { state: TourState; onDone: (goto?: str
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ type: "spring", stiffness: 220, damping: 22 }}
       >
-        <Mascot pose="cheer" size={132} className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2" />
+        <div className="absolute left-1/2 top-0 -ml-[66px] -mt-[66px]"><Mascot pose="cheer" size={132} /></div>
         <h1 className="font-display text-3xl font-semibold text-sand-100 sm:text-4xl">You&apos;re all set, {first}.</h1>
         <p className="mx-auto mt-3 max-w-sm text-lg font-semibold leading-snug text-sage-300">
           {setup
@@ -207,7 +207,7 @@ function TourCard({ rs, title, body, why, index, total, tilt, isLast, skipLabel,
         size={72}
         tilt={tilt}
         hopKey={rs.step.id}
-        className="absolute -left-3 -top-11 z-10 sm:-left-4 sm:-top-12"
+        className="absolute -left-0.5 -top-11 z-10 sm:-left-4 sm:-top-12"
       />
       <div className="min-h-[40px] pl-[68px] sm:pl-[72px]">
         <p className="text-[11px] font-extrabold uppercase tracking-widest text-coral-300">
@@ -221,7 +221,7 @@ function TourCard({ rs, title, body, why, index, total, tilt, isLast, skipLabel,
         {why}
       </p>
 
-      <div className="mt-4 flex items-center justify-between gap-3">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-3">
         <div className="flex items-center gap-1" role="presentation" aria-hidden="true">
           {Array.from({ length: total }).map((_, i) => (
             <span
@@ -233,7 +233,7 @@ function TourCard({ rs, title, body, why, index, total, tilt, isLast, skipLabel,
             />
           ))}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-2">
           {index > 0 && (
             <Button size="sm" variant="outline" onClick={onPrev} aria-label="Back">
               <ArrowLeft /> <span className="hidden min-[400px]:inline">Back</span>
@@ -507,7 +507,7 @@ export default function TourEngine({ request, state, onExit }: Props) {
         }
         drv?.refresh();
         const primary = wrapper.querySelector<HTMLElement>("[data-tour-primary]");
-        if (primary && !wrapper.contains(document.activeElement)) primary.focus({ preventScroll: true });
+        if (primary) primary.focus({ preventScroll: true });
       };
       await nextFrames(2);
       if (ac.signal.aborted) return;
