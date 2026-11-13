@@ -93,7 +93,7 @@ export default function ExceptionsPage() {
   }, [items]);
 
   const visible = severityFilter === "all" ? sorted : sorted.filter((i) => i.severity.toLowerCase() === severityFilter);
-  const pager = usePagination(visible, 10, { key: "exceptionsPage", resetKey: severityFilter });
+  const pager = usePagination(visible, 5, { key: "exceptionsPage", resetKey: severityFilter });
 
   return (
     <FebShell

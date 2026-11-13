@@ -122,7 +122,7 @@ export default function JournalsPage() {
   const [dataLoading, setDataLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const pager = usePagination(txns ?? [], 10, { key: "journalPage", resetKey: `${book}|${employerId}` });
+  const pager = usePagination(txns ?? [], 5, { key: "journalPage", resetKey: `${book}|${employerId}` });
 
   const loadEmployers = useCallback(async () => {
     try {
