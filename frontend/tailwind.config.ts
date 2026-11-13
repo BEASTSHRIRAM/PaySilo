@@ -49,11 +49,13 @@ const config: Config = {
       keyframes: {
         float: { "0%, 100%": { transform: "translateY(0)" }, "50%": { transform: "translateY(-10px)" } },
         marquee: { from: { transform: "translateX(0)" }, to: { transform: "translateX(-50%)" } },
+        "otp-shake": { "0%, 100%": { transform: "translateX(0)" }, "20%, 60%": { transform: "translateX(-6px)" }, "40%, 80%": { transform: "translateX(6px)" } },
       },
       animation: {
         float: "float 5s ease-in-out infinite",
         "float-slow": "float 7s ease-in-out infinite",
         marquee: "marquee 30s linear infinite",
+        "otp-shake": "otp-shake 0.4s ease-in-out",
       },
     },
   },

@@ -83,6 +83,16 @@ export interface SignupPayload {
   admin: { full_name: string; email: string; password: string };
 }
 
+export interface VerificationRequired { verification_required: true; email: string; resend_in: number }
+export interface OtpSent { sent: boolean; resend_in: number }
+export interface NotificationTemplate {
+  key: string; label: string; group: string; kind: string; sensitive: boolean; recipient: string; when: string;
+  subject: string; text: string; html: string;
+}
+export interface NotificationTemplates {
+  email: { configured: boolean; message: string | null }; can_send_test: boolean; items: NotificationTemplate[];
+}
+
 export interface Contractor {
   id: string; full_name: string; email: string | null; country: string; currency: string; payout_method: string;
   iban_last4: string | null; account_last4: string | null; swift_code: string | null; default_amount: string | null;
@@ -253,7 +263,13 @@ export const api = {
   updateMe: (full_name: string) => request<Session>("/auth/me", { method: "PATCH", body: JSON.stringify({ full_name }) }),
   changePassword: (current_password: string, new_password: string) => request<void>("/auth/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
   login: (email: string, password: string) => post<Session>("/auth/login", { email, password }),
-  signup: (payload: SignupPayload) => post<Session>("/auth/signup", payload),
+  signup: (payload: SignupPayload) => post<Session | VerificationRequired>("/auth/signup", payload),
+  verifyEmail: (email: string, code: string) => post<Session>("/auth/verify-email", { email, code }),
+  resendOtp: (email: string) => post<OtpSent>("/auth/resend-otp", { email }),
+  forgotPassword: (email: string) => post<OtpSent>("/auth/forgot-password", { email }),
+  resetPassword: (email: string, code: string, new_password: string) => post<{ ok: boolean }>("/auth/reset-password", { email, code, new_password }),
+  notificationTemplates: () => request<NotificationTemplates>("/notifications/templates"),
+  sendTemplateTest: (key: string) => post<{ queued: boolean; recipient: string }>(`/notifications/templates/${encodeURIComponent(key)}/test`),
   logout: () => post<void>("/auth/logout"),
   teamMembers: () => request<TeamMember[]>("/org/members"),
   updateMemberRole: (id: string, role: string) => request<{ id: string; role: string }>(`/org/members/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ role }) }),

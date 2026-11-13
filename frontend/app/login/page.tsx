@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { AuthShell } from "@/components/auth/auth-shell";
+import { VerifyEmailPanel } from "@/components/auth/verify-email-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -26,6 +27,7 @@ function LoginForm() {
   const [busy, setBusy] = useState<"login" | "demo" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [verifyEmail, setVerifyEmail] = useState<string | null>(null);
   const [demoAvailable, setDemoAvailable] = useState(true);
 
   // Already signed in? Skip the form.
@@ -41,6 +43,11 @@ function LoginForm() {
       setSuccess(true);
       setTimeout(() => router.replace(next), 900);
     } catch (err) {
+      if (err instanceof ApiError && err.code === "EMAIL_NOT_VERIFIED") {
+        setVerifyEmail(e.trim());
+        setBusy(null);
+        return;
+      }
       setError(err instanceof ApiError ? err.message : "Something went wrong. Try again.");
       setBusy(null);
     }
@@ -72,6 +79,21 @@ function LoginForm() {
         ? "Hmm, that didn't work. Let's try again."
         : "Hi, I'm Silo! Ready to run some payroll?";
 
+  function onVerified() {
+    setSuccess(true);
+    setVerifyEmail(null);
+    setTimeout(() => router.replace(next), 900);
+  }
+
+  if (verifyEmail && !success) {
+    return (
+      <AuthShell mood="silo-idle" speech="Check your inbox. The code is on its way."
+        footer={<>New to PaySilo? <Link href="/signup" className="font-extrabold text-coral-400 hover:underline">Create your organization</Link></>}>
+        <VerifyEmailPanel email={verifyEmail} onVerified={onVerified} onChangeEmail={() => setVerifyEmail(null)} />
+      </AuthShell>
+    );
+  }
+
   return (
     <AuthShell
       mood={mood}
@@ -94,7 +116,10 @@ function LoginForm() {
                  onChange={(ev) => setEmail(ev.target.value)} placeholder="you@agency.com" aria-invalid={!!error} />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor="password">Password</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label htmlFor="password">Password</Label>
+            <Link href="/forgot-password" className="text-sm font-extrabold text-coral-400 hover:underline">Forgot password?</Link>
+          </div>
           <div className="relative">
             <Input id="password" type={showPassword ? "text" : "password"} autoComplete="current-password" required
                    value={password} onChange={(ev) => setPassword(ev.target.value)} aria-invalid={!!error}

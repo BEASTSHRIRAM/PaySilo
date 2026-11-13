@@ -7,6 +7,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Building2, Check, Eye, EyeOff, Loader2, UserRound, X } from "lucide-react";
 
 import { AuthShell } from "@/components/auth/auth-shell";
+import { VerifyEmailPanel } from "@/components/auth/verify-email-panel";
 import { LottieAnimation } from "@/components/brand/lottie";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -92,6 +93,7 @@ export default function SignupPage() {
   const [busy, setBusy] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [verify, setVerify] = useState<{ email: string; resendIn: number } | null>(null);
 
   const score = useMemo(() => passwordScore(admin.password), [admin.password]);
   const progress = done ? 100 : ((step + (step === 2 && agree ? 0.5 : 0)) / 3) * 100;
@@ -102,11 +104,17 @@ export default function SignupPage() {
     if (Object.keys(e).length === 0) setStep((s) => s + 1);
   }
 
+  function finishSignup() {
+    setVerify(null);
+    setDone(true);
+    setTimeout(() => router.replace("/dashboard"), 2600);
+  }
+
   async function submit() {
     setBusy(true);
     setServerError(null);
     try {
-      await api.signup({
+      const res = await api.signup({
         organization: {
           name: org.name.trim(), legal_name: org.legal_name.trim() || null, country: org.country,
           base_currency: org.base_currency, industry: org.industry || null, size_band: org.size_band || null,
@@ -114,8 +122,11 @@ export default function SignupPage() {
         },
         admin: { full_name: admin.full_name.trim(), email: admin.email.trim(), password: admin.password },
       });
-      setDone(true);
-      setTimeout(() => router.replace("/dashboard"), 2600);
+      if ("verification_required" in res) {
+        setVerify({ email: res.email, resendIn: res.resend_in });
+        return;
+      }
+      finishSignup();
     } catch (err) {
       if (err instanceof ApiError) {
         setErrors(err.fields);
@@ -138,6 +149,16 @@ export default function SignupPage() {
       : step === 0 ? "Let's set up your agency. Each client you add gets its own silo."
         : step === 1 ? "Now, who's in charge? You'll be the owner."
           : "Looks great! One tap and you're in.";
+
+  if (verify && !done) {
+    return (
+      <AuthShell mood="silo-idle" speech="Check your inbox. The code is on its way."
+        footer={<>Already have an account? <Link href="/login" className="font-extrabold text-coral-400 hover:underline">Log in</Link></>}>
+        <VerifyEmailPanel email={verify.email} resendIn={verify.resendIn} onVerified={finishSignup}
+          onChangeEmail={() => { setVerify(null); setServerError(null); setStep(1); }} />
+      </AuthShell>
+    );
+  }
 
   if (done) {
     return (

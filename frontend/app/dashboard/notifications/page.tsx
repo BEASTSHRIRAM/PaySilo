@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Lock, Mail, RefreshCw, X } from "lucide-react";
 
 import { AppBar } from "@/components/dashboard/app-bar";
+import { TemplatesPanel } from "@/components/notifications/templates-panel";
 import { SectionEmpty, SectionError, SectionLoading } from "@/components/dashboard/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ export default function NotificationsPage() {
   const [status, setStatus] = useState("");
   const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<AppNotification | null>(null);
+  const [tab, setTab] = useState<"outbox" | "templates">("outbox");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +58,8 @@ export default function NotificationsPage() {
 
   useEffect(() => { void load(); }, [load]);
 
+  const canSeeTemplates = session?.role === "owner" || session?.role === "admin";
+
   return (
     <div className="min-h-dvh pb-16">
       {session ? <AppBar session={session} /> : <div className="h-[76px]" />}
@@ -68,6 +72,21 @@ export default function NotificationsPage() {
           <Button variant="outline" onClick={() => { setLoading(true); void load(); }}><RefreshCw /> Refresh</Button>
         </section>
 
+        {canSeeTemplates && (
+          <div role="tablist" className="inline-flex w-fit gap-1 rounded-2xl bg-ink-900/80 p-1">
+            {([["outbox", "Outbox"], ["templates", "Templates"]] as const).map(([k, label]) => (
+              <button key={k} type="button" role="tab" aria-selected={tab === k} onClick={() => setTab(k)}
+                      className={cn("rounded-xl px-5 py-2 text-sm font-extrabold transition-colors focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-400/50",
+                        tab === k ? "bg-ink-700 text-sand-100" : "text-sage-400 hover:text-sand-100")}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {canSeeTemplates && tab === "templates" && <TemplatesPanel userEmail={session?.user.email ?? ""} />}
+
+        {tab === "outbox" && (<>
         {email && (
           <p role="status" className={cn("rounded-2xl border-2 px-4 py-3 text-sm font-bold",
             email.configured ? "border-sage-600/60 bg-sage-500/10 text-sage-300" : "border-sand-400/50 bg-sand-200/10 text-sand-300")}>
@@ -168,6 +187,7 @@ export default function NotificationsPage() {
             </Card>
           </div>
         )}
+        </>)}
       </main>
     </div>
   );
