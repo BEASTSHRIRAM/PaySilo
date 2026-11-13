@@ -438,7 +438,7 @@ class AiriLoginOut(BaseModel):
 
 
 class BenefitBudgetOut(BaseModel):
-    id: uuid.UUID
+    id: uuid.UUID | None  # None: no budget set up for this employer yet
     employer_id: uuid.UUID
     employer_name: str
     currency: str

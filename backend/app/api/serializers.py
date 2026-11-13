@@ -91,6 +91,18 @@ def benefit_budget_out(s: Session, b: BenefitBudget, employer: Employer) -> Bene
     )
 
 
+def benefit_budget_placeholder(s: Session, employer: Employer, currency: str = "USD") -> BenefitBudgetOut:
+    """An employer with no benefits budget yet: shown disabled so an owner or admin can set one up."""
+    from ..services.benefits import current_period
+
+    locked, lock_reason = budget_lock(s, employer.id)
+    return BenefitBudgetOut(
+        id=None, employer_id=employer.id, employer_name=employer.name, currency=currency,
+        monthly_cap="0.00", per_tx_limit=None, spent_this_period="0.00", remaining="0.00",
+        period=current_period(), enabled=False, locked=locked, lock_reason=lock_reason,
+    )
+
+
 def benefit_purchase_out(p: BenefitPurchase) -> BenefitPurchaseOut:
     return BenefitPurchaseOut(
         id=p.id, request_id=p.request_id, employer_id=p.employer_id, attempt_no=p.attempt_no,

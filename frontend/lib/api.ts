@@ -624,7 +624,8 @@ export interface AiriLogin {
 
 /** One employer's benefits budget: GET /benefits/budgets[]. */
 export interface BenefitBudget {
-  id: string;
+  /** null: this employer has no budget yet; saving the card creates it. */
+  id: string | null;
   employer_id: string;
   employer_name: string;
   currency: string;

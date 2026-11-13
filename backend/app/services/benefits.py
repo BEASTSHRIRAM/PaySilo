@@ -124,6 +124,12 @@ def decide_request(s: Session, *, request: BenefitRequest, decision: str,
     request.decided_by_email = user.email
     request.decided_at = now
     if decision == "approve":
+        budget = s.scalar(select(BenefitBudget).where(BenefitBudget.employer_id == request.employer_id,
+                                                      BenefitBudget.currency == request.currency))
+        if budget is None or not budget.enabled:
+            raise BenefitError("BUDGET_NOT_ENABLED",
+                               f"This employer has no enabled {request.currency} benefits budget. An owner or admin "
+                               "must set a monthly cap and enable the budget under Budgets by employer first.")
         expires = now + timedelta(days=APPROVAL_TTL_DAYS)
         request.status = "APPROVED"
         request.approval_expires_at = expires

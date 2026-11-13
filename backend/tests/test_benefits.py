@@ -585,7 +585,15 @@ def test_cross_employer_budget_isolation(demo_client):
     req = _create_request(
         demo_client, COBALT, merchant="Coursera", item="Retail skills course",
         amount="50.00", contractor_name="Sam Lee")
+    # The approval itself is refused: without an enabled budget there is nothing to approve against.
+    _assert_policy_refusal(
+        demo_client.post(f"/benefits/requests/{req['id']}/decision", json={"decision": "approve"}),
+        "BUDGET_NOT_ENABLED")
+    # Defence in depth at purchase time: a budget disabled AFTER the approval still blocks the purchase.
+    cobalt_row = next(b for b in demo_client.get("/benefits/budgets").json() if b["employer_name"] == COBALT)
+    _put_budget(demo_client, cobalt_row, enabled=True)
     _approve(demo_client, str(req["id"]))
+    _put_budget(demo_client, cobalt_row, enabled=False)
 
     _assert_policy_refusal(_purchase(demo_client, str(req["id"])), "BUDGET_NOT_ENABLED")
     assert [p for p in _purchases_for(demo_client, str(req["id"]))

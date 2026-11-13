@@ -366,9 +366,12 @@ def test_live_cap_and_unavailable_checked_in_code_first(live_client, fake_dir, m
 
 
 def test_live_requires_merchant_website(live_client):
-    rid = _new_approved(live_client, merchant="Some Bookshop")
-    r = live_client.post(f"/benefits/requests/{rid}/purchase", json={})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "MERCHANT_URL_REQUIRED"
+    # Refused when the request is created, so nobody approves a purchase that Airi cannot make.
+    emp = next(e for e in live_client.get("/employers").json() if e["name"].startswith("Acme"))
+    r = live_client.post("/benefits/requests", json={
+        "employer_id": emp["id"], "merchant": "Some Bookshop", "item": "Python course",
+        "amount": "42.00", "currency": "USD", "contractor_name": "Test Person"})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "MERCHANT_URL_REQUIRED"
 
 
 def test_foreign_org_purchase_is_404(live_client):

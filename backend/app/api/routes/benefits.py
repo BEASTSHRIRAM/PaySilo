@@ -30,7 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db.models import BenefitBudget, BenefitPurchase, BenefitRequest, Employer
-from ...partners.vic import AiriVicAdapter, VicError, VicUnavailable, vic_status
+from ...partners.vic import AiriVicAdapter, VicError, VicUnavailable, merchant_url_for, vic_status
 from ...services.benefits import (
     BenefitError,
     cancel_purchase,
@@ -55,7 +55,7 @@ from ..schemas import (
     BenefitRequestOut,
     VicStatusOut,
 )
-from ..serializers import benefit_budget_out, benefit_purchase_out, benefit_request_out
+from ..serializers import benefit_budget_out, benefit_budget_placeholder, benefit_purchase_out, benefit_request_out
 from . import spend_hooks as hooks
 from .employers import load_employer
 
@@ -191,7 +191,15 @@ def list_budgets(tenant: Tenant = Depends(current_tenant), db: Session = Depends
         .join(Employer, BenefitBudget.employer_id == Employer.id)
         .where(BenefitBudget.organization_id == tenant.organization.id)
         .order_by(Employer.name, BenefitBudget.currency)).all()
-    return [benefit_budget_out(db, b, e) for b, e in rows]
+    out = [benefit_budget_out(db, b, e) for b, e in rows]
+    # Every employer is listed: one without a budget shows a disabled placeholder that an
+    # owner or admin can fill in and enable (saving it creates the budget).
+    have = {b.employer_id for b, _ in rows}
+    missing = db.scalars(select(Employer).where(Employer.organization_id == tenant.organization.id,
+                                                Employer.id.notin_(have) if have else True)
+                         .order_by(Employer.name)).all()
+    out.extend(benefit_budget_placeholder(db, e) for e in missing)
+    return sorted(out, key=lambda b: (b.employer_name.casefold(), b.currency))
 
 
 @router.put("/budgets/{employer_id}", response_model=BenefitBudgetOut)
@@ -233,8 +241,14 @@ def list_requests(employer_id: uuid.UUID | None = None, status_filter: str | Non
 @router.post("/requests", response_model=BenefitRequestOut, status_code=status.HTTP_201_CREATED)
 def create_benefit_request(request: Request, body: BenefitRequestIn,
                            tenant: Tenant = Depends(require_roles(APPROVER_ROLES)),
-                           db: Session = Depends(get_db)) -> BenefitRequestOut:
+                           db: Session = Depends(get_db),
+                           runtime: PlatformRuntime = Depends(get_runtime)) -> BenefitRequestOut:
     employer = load_employer(db, tenant, body.employer_id)
+    # Live Airi needs the merchant as a website. Say so now, not after the approval.
+    if isinstance(runtime.vic, AiriVicAdapter) and merchant_url_for(body.merchant) is None:
+        raise HTTPException(422, detail={
+            "code": "MERCHANT_URL_REQUIRED",
+            "message": "Live Visa purchases need the merchant as a website, for example amazon.com."})
     contractor = None
     if body.contractor_id is not None:
         # Contractor resolution mirrors runs.py: only THIS employer's

@@ -155,7 +155,7 @@ function BudgetCard({
   onSaved: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [cap, setCap] = useState(budget.monthly_cap);
+  const [cap, setCap] = useState(budget.id === null ? "" : budget.monthly_cap);
   const [perTx, setPerTx] = useState(budget.per_tx_limit ?? "");
   const [enabled, setEnabled] = useState(budget.enabled);
   const [saving, setSaving] = useState(false);
@@ -173,7 +173,7 @@ function BudgetCard({
   const effTxIsCred = effTx !== null && credTx !== null && credTx === effTx && (budgetTx === null || credTx <= budgetTx);
 
   function openEdit() {
-    setCap(budget.monthly_cap);
+    setCap(budget.id === null ? "" : budget.monthly_cap);
     setPerTx(budget.per_tx_limit ?? "");
     setEnabled(budget.enabled);
     setSaveError(null);
@@ -211,7 +211,7 @@ function BudgetCard({
           {budget.locked && (
             <Badge tone="danger"><Lock className="size-3.5" /> Locked</Badge>
           )}
-          <Badge tone={budget.enabled ? "sage" : "neutral"}>{budget.enabled ? "Enabled" : "Disabled"}</Badge>
+          <Badge tone={budget.enabled ? "sage" : "neutral"}>{budget.id === null ? "Not set up" : budget.enabled ? "Enabled" : "Disabled"}</Badge>
         </div>
       </div>
 
@@ -245,10 +245,18 @@ function BudgetCard({
         </p>
       </div>
 
+      {budget.id === null && (
+        <p className="text-sm font-semibold text-sage-300">
+          No benefits budget yet for this employer. {canEdit
+            ? "Set a monthly cap, tick Budget enabled and save. Requests can then be approved and purchased."
+            : "An owner or admin needs to set a monthly cap and enable it."}
+        </p>
+      )}
+
       {canEdit && !editing && (
         <div>
-          <Button variant="outline" size="sm" onClick={openEdit}>
-            <Pencil /> Edit budget
+          <Button variant={budget.id === null ? "primary" : "outline"} size="sm" onClick={openEdit}>
+            <Pencil /> {budget.id === null ? "Set up budget" : "Edit budget"}
           </Button>
         </div>
       )}
@@ -511,6 +519,7 @@ export default function BenefitsPage() {
   }
 
   const purchaseBlocked = status?.mode === "VIC_UNAVAILABLE";
+  const liveVic = status ? status.mode !== "SIMULATED" : false;
 
   return (
     <FebShell
@@ -542,13 +551,13 @@ export default function BenefitsPage() {
         {budgets && budgets.length === 0 && (
           <SectionEmpty
             title="No benefit budgets yet"
-            body="A budget appears here for each employer. Once one exists, requests can be approved and purchased against its monthly cap."
+            body="Add an employer first. Each employer then gets a budget card here, where an owner or admin sets the monthly cap and enables it."
           />
         )}
         {budgets && budgets.length > 0 && (
           <Stagger className="grid gap-5 lg:grid-cols-2">
             {budgets.map((b) => (
-              <BudgetCard key={b.id} budget={b} status={status} canEdit={canEdit} onSaved={() => void loadCore()} />
+              <BudgetCard key={`${b.employer_id}-${b.currency}`} budget={b} status={status} canEdit={canEdit} onSaved={() => void loadCore()} />
             ))}
           </Stagger>
         )}
@@ -588,7 +597,10 @@ export default function BenefitsPage() {
             <div className="grid gap-4 md:grid-cols-2">
               <label className="grid gap-1.5">
                 <span className="text-sm font-extrabold text-sage-400">Merchant</span>
-                <Input value={formMerchant} onChange={(e) => setFormMerchant(e.target.value)} placeholder="e.g. Amazon" required aria-label="Merchant" />
+                <Input value={formMerchant} onChange={(e) => setFormMerchant(e.target.value)} placeholder={liveVic ? "e.g. amazon.com" : "e.g. Amazon"} required aria-label="Merchant" />
+                {liveVic && (
+                  <span className="text-xs font-semibold text-sage-500">Live Visa purchases need the merchant website, for example amazon.com.</span>
+                )}
               </label>
               <label className="grid gap-1.5">
                 <span className="text-sm font-extrabold text-sage-400">Item</span>
