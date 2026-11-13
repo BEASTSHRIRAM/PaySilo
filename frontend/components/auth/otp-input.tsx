@@ -86,7 +86,7 @@ export function OtpInput({ value, onChange, onComplete, disabled, error, autoFoc
 
   return (
     <div>
-      <div key={shakeKey ?? 0} className={cn("flex justify-between gap-2 sm:gap-3", error && "animate-otp-shake")} role="group" aria-label="Verification code">
+      <div key={shakeKey ?? 0} className={cn("flex w-full max-w-full justify-between gap-2 sm:gap-3", error && "animate-otp-shake")} role="group" aria-label="Verification code">
         {digits.map((d, i) => (
           <input
             key={i}
@@ -105,7 +105,7 @@ export function OtpInput({ value, onChange, onComplete, disabled, error, autoFoc
             onPaste={handlePaste}
             onFocus={(e) => e.target.select()}
             className={cn(
-              "h-14 min-w-0 flex-1 rounded-2xl border-2 bg-ink-900/80 text-center font-display text-2xl font-semibold text-sand-100 transition-colors focus-visible:border-sage-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-500/25 disabled:cursor-not-allowed disabled:opacity-50 sm:h-16 sm:text-3xl",
+              "h-14 w-0 min-w-0 flex-1 rounded-2xl border-2 bg-ink-900/80 text-center font-display text-2xl font-semibold text-sand-100 transition-colors focus-visible:border-sage-400 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-sage-500/25 disabled:cursor-not-allowed disabled:opacity-50 sm:h-16 sm:text-3xl",
               error ? "border-coral-500 focus-visible:ring-coral-500/25" : d ? "border-sage-500" : "border-ink-600",
             )}
           />
