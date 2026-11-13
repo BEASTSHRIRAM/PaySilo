@@ -50,7 +50,7 @@ assert.equal(st(f, "escalate"), "waiting");
 
 // Helpers + no timestamps
 assert.equal(parseBedrock("nothing"), null);
-assert.equal(formatElapsed(null), "n/a"); assert.equal(formatElapsed(65000), "1 m 5 s");
+assert.equal(formatElapsed(null), "n/a"); assert.equal(formatElapsed(0), "under 1 s"); assert.equal(formatElapsed(65000), "1 m 5 s");
 assert.equal(deriveFlow([ev("intake", "info", "x")], "RECEIVED").summary.elapsedMs, null);
 assert.equal(deriveFlow([], "RECEIVED").currentId, "intake");
 console.log("agent-flow checks passed");

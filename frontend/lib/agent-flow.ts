@@ -102,7 +102,7 @@ export function deriveFlow(
       detail: parsed ? `${parsed.region}, ${parsed.ms} ms` : undefined,
     });
   } else {
-    branches.push({ id: "bedrock", state: priceDone ? "off" : "upcoming", count: 0, parent: "price" });
+    branches.push({ id: "bedrock", state: priceDone ? "off" : live ? "upcoming" : "skipped", count: 0, parent: "price" });
   }
 
   if (has("escalate") || escalateWaiting) {
@@ -134,7 +134,7 @@ export function deriveFlow(
 
 export function formatElapsed(ms: number | null): string {
   if (ms === null) return "n/a";
-  if (ms < 1000) return `${ms} ms`;
+  if (ms < 1000) return "under 1 s";
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)} s`;
   return `${Math.floor(s / 60)} m ${Math.round(s % 60)} s`;

@@ -7,7 +7,7 @@ import { Check, ChevronDown, Clock, Copy, X, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button";
 import { AGENTS, agentName } from "@/lib/agents";
 import {
-  deriveFlow, formatElapsed, MAIN_ORDER, relativeTime,
+  deriveFlow, formatElapsed, relativeTime,
   type FlowEvent, type FlowNode, type NodeState,
 } from "@/lib/agent-flow";
 import { cn } from "@/lib/utils";
@@ -73,7 +73,8 @@ function nodeLine(node: FlowNode): string {
     if (node.state === "warning") return "Not cross checked";
     if (node.state === "failed") return "Did not match";
   }
-  if (node.id === "escalate" && node.state === "waiting") return "Needs a decision";
+  if (node.id === "escalate") return node.state === "waiting" ? "Needs a decision" : "Lines held";
+  if (node.id === "assess" && node.state === "warning") return "Shortfall found";
   if (node.id === "refused") return "Refused";
   if (node.id === "held") return "Held";
   if (node.state === "failed") return node.id === "execute" ? "Payout failed" : "Stopped";
@@ -119,8 +120,8 @@ function NodeCard({ node, selected, onSelect, onApprove, className }: NodeCardPr
         </span>
         <span className="min-w-0 flex-1">
           <span className="block text-[13px] font-extrabold leading-tight text-sand-100">{info.name}</span>
-          {info.partner && (
-            <span className="mt-1 inline-block max-w-full truncate rounded-full bg-ink-800 px-1.5 py-px align-top text-[9px] font-extrabold uppercase leading-4 tracking-wide text-sage-400">
+          {info.partner && info.partner !== info.name && (
+            <span className="mt-1 inline-block max-w-full rounded-md bg-ink-800 px-1.5 py-0.5 align-top text-[9px] font-extrabold uppercase leading-tight tracking-wide text-sage-400">
               {info.partner}
             </span>
           )}
@@ -176,7 +177,7 @@ export function AgentFlow({ events, status, pendingKind = null, approvalHref, cl
   const groups = useMemo(() => {
     const by: Record<string, FlowEvent[]> = {};
     for (const e of events) (by[e.agent] ??= []).push(e);
-    const order = [...MAIN_ORDER as readonly string[], "bedrock", "escalate", ...Object.keys(by)];
+    const order = ["intake", "risk", "price", "bedrock", "assess", "escalate", "approval", "execute", "fee", "reconcile", "attest", ...Object.keys(by)];
     const seen = new Set<string>();
     return order.filter((id) => by[id] && !seen.has(id) && seen.add(id)).map((id) => ({ id, events: by[id] }));
   }, [events]);
@@ -244,7 +245,7 @@ export function AgentFlow({ events, status, pendingKind = null, approvalHref, cl
   const mask = `linear-gradient(to right, ${edges.left ? "transparent, #000 28px" : "#000, #000"}, ${edges.right ? "#000 calc(100% - 28px), transparent" : "#000, #000"})`;
 
   return (
-    <div className={cn("grid gap-4", className)}>
+    <div className={cn("grid min-w-0 max-w-full grid-cols-1 gap-4 [&>*]:min-w-0", className)}>
       {/* Summary strip */}
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {[
