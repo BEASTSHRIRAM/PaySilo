@@ -1,46 +1,99 @@
-# PaySilo — Multi-Employer Payroll Executor
+# PaySilo: the agentic Multi-Employer Payroll Executor
 
-**Team STATIC · Airwallex Agentic Banking Hackathon · Starter Kit 06 (Multi-Tenant Platforms)**
+**Team STATIC · Airwallex Agentic Banking Hackathon · Problem statement: Multi-Employer Payroll Executor (Starter Kit 06)**
 
 > One platform. Many employers. Zero cross-contamination of funds.
-> Payroll that respects whose money it is.
+> An agentic crew prepares, prices, checks and pays every payroll. A human signs it.
+
+| | |
+|---|---|
+| **Live app** | https://paysilo-six.vercel.app |
+| **Backend** | FastAPI on AWS EC2 (Sydney), HTTPS |
+| **Agent on AWS** | The payroll LangGraph agent on Amazon Bedrock AgentCore Runtime, called on every run |
+| **Demo login** | `demo@paysilo.test` / `SiloDemo2026` |
+
+## Problem statement: Multi-Employer Payroll Executor
+
+A payroll agency pays international contractors on behalf of many client companies. Each client
+funds its own payroll, in its own currency mix, on its own date. The agency has to price fees and
+FX, check that this one client can afford this one batch, pay the right bank accounts, and prove
+afterwards that it did. The failure that matters most is quiet: covering one client's shortfall with
+another client's money.
+
+PaySilo is an **agentic payroll executor** for that agency. Every employer is its own sealed silo
+(its own Airwallex connected account, wallet and ledger namespace; every call carries
+`x-on-behalf-of`), and an agentic workflow runs each payroll from the sheet to the receipt.
+
+> **The model reads, the code decides, the API moves the money, a human signs.**
+
+## What is agentic here
+
+PaySilo is not a chatbot on top of a payroll form. A LangGraph graph of specialised agents carries
+each run, hands off between steps, pauses for a person, and resumes. Agents act on their own
+wherever acting is safe, and stop wherever money or trust is at stake.
+
+| Agent | Kind | What it does on its own |
+|---|---|---|
+| **Intake Agent** | LLM (Claude) | Reads a payroll sheet or email into structured pay lines and matches names to that employer's own contractor directory. |
+| **Risk Gate** | code | Holds a line when the bank account is unverified, or changed recently on a large payment. |
+| **Pricing Agent** | code | Prices salaries and payout fees per currency before any FX. |
+| **Bedrock AgentCore agent** | code, on AWS | Re computes the same pricing plan in an isolated runtime on Amazon Bedrock AgentCore. It must match the backend to the cent or the run is refused. |
+| **Balance & Policy Agent** | code | Checks only this employer's wallet. Pays what fits and holds the rest (all or nothing, or partial by contractor priority). |
+| **Approval Gate** | human | The run pauses. It resumes only with a signed decision over the exact amounts. No agent can approve or pay. |
+| **FX & Payout Agent** | tools | Converts and pays through Airwallex on the employer's behalf, with idempotent request ids. |
+| **Fee, Reconciliation, Attestation** | tools and code | Collects the run fee only if payroll ran, proves the ledger balances, anchors the receipt hash. |
+
+Agentic behaviour around the run:
+
+- **Autopilot for held lines.** When funds arrive and the wallet now covers held lines, the agent
+  creates the continuation run itself and emails the approvers. It never approves it.
+- **Agentic workflows.** A visual builder (React Flow canvas, or JSON, or "Build with Silo") wires
+  triggers, conditions and actions. Each client gets its own schedule, for example Acme on the 3rd
+  and Harborview on the 4th. A workflow can prepare, remind, email and wait for approval. It has no
+  approve, pay, purchase or sign action.
+- **Silo, the chat agent.** Reads the books, explains a run, answers "where is my money", proposes
+  purchases, drafts workflows and starts runs. It has no tool to approve or pay, and it says so.
+- **Funding planner.** Works out the exact gap, the fund by date and the wire details per employer,
+  and sends reminders.
+- **Agentic commerce on Visa.** Benefits, onboarding kits and travel are bought through an Airi
+  mandate that a person authorises, inside a budget that can never touch wage funds.
+- **Morning brief.** One page of what needs a human today.
+
+What stays human, by design: approving a run, verifying a changed bank account (a second person),
+authorising a card purchase, enabling a workflow.
 
 ## The story
 
 Vertex Payroll Services runs payroll for other small companies. Acme
 Manufacturing GmbH loads USD 20,000 and must pay Lena Fischer EUR 3,400 and
 Tomas Rivera EUR 2,600. Borealis Labs AB loads only USD 5,000 but owes
-Ingrid Solberg EUR 6,000 — plus SWIFT fees, priced *before* conversion, the
-USD 149 run fee, and a USD 1,000 reserve floor, it needs about USD 7,642.88.
+Ingrid Solberg EUR 6,000. With SWIFT fees priced *before* conversion, the
+USD 149 run fee and a USD 1,000 reserve floor, it needs about USD 7,642.88.
 Borealis is **short by USD 2,642.88**.
 
-The platform total looks rich — and mid-run, Cobalt Retail LLC receives a
+The platform total looks rich, and mid run Cobalt Retail LLC receives a
 fresh USD 10,000 deposit. A tired accountant, or a badly built AI, quietly
 covers Borealis from Acme or Cobalt. Nobody notices that day. Everybody
 notices one day.
 
 **PaySilo's golden rule is written in code, not in a prompt:** every
-employer's money lives in its own sealed silo (its own Airwallex connected
-account, wallet, and ledger namespace; every API call carries
-`x-on-behalf-of`), and the agent can never move money between silos. When
-Borealis comes up short, only Borealis's payroll is held and escalated to a
-human. Cobalt's deposit changes Cobalt's wallet — not Borealis's.
+employer's money lives in its own sealed silo, and no agent can move money
+between silos. When Borealis comes up short, only Borealis's payroll is held
+and escalated to a human. Cobalt's deposit changes Cobalt's wallet, not
+Borealis's.
 
 When an employer can afford *part* of its batch, PaySilo follows the Kit 6
-rule — **"pay what its own balance supports, then escalate"** — paying the
-**smallest lines first** while still covering the run fee and keeping the
-reserve. Delta Studios BV (USD 5,000) owes Noor van Dijk EUR 2,200 and
-Pieter Jansen EUR 3,600: Noor is paid, Pieter is held and escalated, and the
-run ends **PARTIALLY_PAID** with USD 2,461.12 left in Delta's own wallet.
+rule, **"pay what its own balance supports, then escalate"**: lines are paid
+in contractor priority order (ties: smallest first) while still covering the
+run fee and keeping the reserve. Delta Studios BV (USD 5,000) owes Noor van
+Dijk EUR 2,200 and Pieter Jansen EUR 3,600: Noor is paid, Pieter is held and
+escalated, and the run ends **PARTIALLY_PAID** with USD 2,461.12 left in
+Delta's own wallet.
 
-Once Delta tops up its own wallet, **Pay held lines** pays Pieter in a linked
-continuation run: Noor is never paid twice and the USD 149 run fee is not
-charged a second time (see "Held lines and continuation runs").
-
-> **The model reads, the code decides, the API moves the money.**
-> The only LLM use in PaySilo is intake (reading messy payroll sheets) and
-> plain-language explanation. Pricing, fees, affordability, tenant
-> isolation, idempotency, and routing are deterministic, tested code.
+Once Delta tops up its own wallet, the held line continues in a linked
+continuation run, created automatically or with **Pay held lines**: Noor is
+never paid twice and the USD 149 run fee is not charged a second time (see
+"Held lines and continuation runs").
 
 ## Architecture
 
@@ -50,7 +103,9 @@ flowchart TD
     API["FastAPI<br/>app/api/ (org auth, tenant-scoped routes)"]
     SUP["Deterministic code supervisor<br/>(routing reads policy output, never an LLM)"]
     INTAKE["Intake Agent — Claude (only LLM)<br/>payroll sheet/email → pay lines"]
-    PRICE["Pricing (pure code)<br/>assessPayroll: fees BEFORE FX"]
+    RISK["Risk Gate (pure code)<br/>unverified bank, recent bank change"]
+    PRICE["Pricing Agent (pure code)<br/>assessPayroll: fees BEFORE FX"]
+    BED["Bedrock AgentCore agent (AWS)<br/>same plan re computed, must match"]
     ESC["Escalation / partial payout<br/>LangGraph interrupt"]
     APPR["Approval gate<br/>LangGraph interrupt"]
     EXEC["FX & Payout tools<br/>Airwallex REST, x-on-behalf-of, idempotent request_ids"]
@@ -61,7 +116,8 @@ flowchart TD
     LED[("Double-entry ledger<br/>Postgres / Supabase (SQLite locally)")]
 
     UI --> API --> SUP
-    SUP --> INTAKE --> PRICE
+    SUP --> INTAKE --> RISK --> PRICE
+    PRICE <-->|cross check| BED
     PRICE -->|shortfall| ESC
     PRICE -->|can run| APPR
     APPR -->|approve| EXEC --> FEE --> REC --> ATT
@@ -73,7 +129,7 @@ Run lifecycle per employer:
 `PRICED → RESERVED → APPROVED → SENT → SETTLED`, or
 
 - `PARTIALLY_PAID` — Kit 6 partial payout: the lines its own wallet supports
-  were paid (smallest first), the rest are `HELD` and escalated;
+  were paid (by priority, then smallest first), the rest are `HELD` and escalated;
 - `HELD_SHORTFALL` — not even the smallest line fits; nothing is paid and
   nothing is borrowed;
 - `HELD_BY_HUMAN` / `APPROVAL_REJECTED` / `REFUSED` — no money moved;
@@ -126,7 +182,9 @@ flowchart TD
 | Node | Kind | Job |
 |---|---|---|
 | `intake` | **LLM** | Reads payroll sheets and emails into structured pay lines (Claude). Names are then matched against *this employer's own* contractor directory — a name that is not in the directory gets no bank details and cannot be paid. |
+| `risk` | code | The risk gate: a contractor whose bank account is not verified, or changed in the last 7 days on a large payment, is held before pricing. Rules are in `backend/app/risk.py`. |
 | `price` | code | Prices salaries plus payout fees per currency and method (SWIFT EUR 12.85 per payout) *before* any FX conversion. Unknown currency rate or fee schedule is a refusal, never a guess. |
+| `bedrock` | code on AWS | The Pricing Agent sends the run's facts (amounts, currencies, methods, FX rates, that employer's wallet; no names or bank details) to the PaySilo agent on Amazon Bedrock AgentCore, which runs the `paysilo.plan` LangGraph graph and returns its assessment. Match: recorded in the Agent Timeline. Mismatch: the run is refused. Unreachable: a warning, payroll continues on the backend plan. |
 | `assess` | code | Checks only this employer's wallet against payroll + the USD 149 run fee + the USD 1,000 reserve floor. If the full batch doesn't fit, pays the smallest lines it can (Kit 6 partial payout) and escalates the rest; routes to approval, escalation, or refusal. |
 | `approval` | human interrupt | Pauses the run. It resumes only with a TAP-style signature (our internal approval-integrity mechanism) over the exact run, employer, amounts, the lines to pay and (for a partial payout) the held lines; a missing, tampered or replayed signature rejects the approval and moves no money. |
 | `escalate` | human interrupt | Holds a short payroll and surfaces the exact shortfall and the employer's options. A short payroll can only be held — there is no "approve anyway" path. |
@@ -332,7 +390,8 @@ approvals) — see `backend/tests/` and the intake eval in
 | **Visa VIC (via Airi)** | The Visa commerce integration: employer-funded benefits (courses, equipment) purchased by the agent with a VIC-tokenized credential obtained through Airi (Kit 9), inside a separate benefits budget that can never touch wage funds. Runs SIMULATED against the published Airwallex test card (US$200 per transaction) unless `VIC_MODE=live` with the real `airi-cli` signed in | `backend/app/partners/vic.py`, Benefits screen |
 | **TAP-style request signing** | PaySilo's *internal* approval-integrity mechanism (not a Visa product integration) — signed approvals & payout instructions: Ed25519, RFC 9421-style signatures over method/authority/path + SHA-256 content digest, nonce replay guard, expiry. Keys from `TAP_PRIVATE_KEY`, public keys at `/.well-known/tap-keys`, verification at `POST /tap/verify` | `backend/app/partners/tap*.py`, `backend/app/api/routes/tap.py` |
 | **Metal** | Reconciliation receipt anchoring on Metal L2 testnet (`SettlementRegistry.sol`): hashes only, waits for the transaction receipt before claiming "anchored", hash chain continues across restarts. Offline mock chain until configured — always labelled `mock` | `backend/app/partners/metal.py`, `contracts/` |
-| **AWS Bedrock AgentCore** | Deployment runtime: the same graph wrapped as an AgentCore entrypoint | `backend/app/partners/agentcore.py`, `deploy/agentcore/` |
+| **Amazon Bedrock AgentCore** | The payroll LangGraph agent deployed on AgentCore Runtime (Sydney). Every payroll run calls it to re compute the pricing plan in an isolated runtime; the backend refuses a run when the two plans differ. One warm session is shared, so the call takes about 0.1 s | `backend/app/partners/agentcore.py`, `backend/app/partners/bedrock_planner.py`, `backend/app/agents/cloud_plan.py`, `deploy/agentcore/` |
+| **Brevo** | Transactional email for the whole agentic flow: approval requests, shortfalls, held line reminders, payslips, signup codes. Outbox with delivery status and retries | `backend/app/services/email_templates.py`, `backend/app/services/notify.py` |
 | **LangGraph** | Agent orchestration: per-employer subgraphs, human-in-the-loop interrupts, durable checkpoints (SQLite / Postgres) | `backend/app/agents/` |
 | **Supabase** | Postgres for everything persisted; RLS enabled on every table (incl. LangGraph checkpoints) so the public REST API can read nothing | `backend/app/db/` |
 
@@ -473,6 +532,10 @@ All copy is in `frontend/lib/tour/steps.ts` (no LLM calls). Progress is stored p
 
 ## Honest limits of this build
 
-- **Live Airwallex sandbox: partly verified.** Login, balances and the connected-accounts list work (tested from India); account creation was fixed after the first live run (#22). A full live payroll (FX → payout → fee) is still being verified (#14). Most response fixtures in the tests are documented assumptions (`backend/docs/airwallex-fee-path.md`).
-- **Metal L2** live anchoring and the **Postgres checkpointer** are implemented and unit-tested but not yet exercised against real services; the mock chain is clearly labelled.
-- Run a **single backend worker**: the ledger mirror and simulator are process-local.
+- **Airwallex runs on the sandbox.** Connected accounts, wallets, FX, beneficiaries, transfers and fees run against the Airwallex sandbox with simulated deposits. No real money moves.
+- **Bedrock AgentCore re computes the pricing plan only.** Approval, FX and payouts run on the backend, because a run that waits for a person does not belong in a short lived runtime. The backend plan is always the one that is approved and paid.
+- **Visa VIC through Airi** uses the published test card with a USD 200 per purchase cap, and PaySilo does not check out at a merchant: it creates the mandate, a person authorises it, and the result is reported.
+- **The approval signature** follows Visa TAP's signing scheme (Ed25519, RFC 9421 style). It is PaySilo's own integrity mechanism, not a Visa product integration.
+- **Metal** receipt anchoring runs on a mock chain, clearly labelled, until a funded testnet wallet is configured.
+- **Email** needs Brevo keys and a verified sender. Without them, messages are queued and labelled as not configured.
+- Run a **single backend worker**: paused runs, the Airi login and the warm Bedrock session are process local.
