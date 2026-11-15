@@ -98,7 +98,7 @@ never paid twice and the USD 149 run fee is not charged a second time (see
 ## Architecture
 
 ```mermaid
-flowchart TD
+flowchart LR
     UI["Operator Dashboard + Silo chat<br/>Next.js 14 + Tailwind + shadcn-style UI"]
     API["FastAPI<br/>app/api/ (org auth, tenant-scoped routes)"]
     SUP["Deterministic code supervisor<br/>(routing reads policy output, never an LLM)"]
