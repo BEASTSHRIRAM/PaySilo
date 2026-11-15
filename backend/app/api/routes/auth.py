@@ -266,6 +266,10 @@ def update_me(body: ProfileIn, tenant: Tenant = Depends(current_tenant), db: Ses
 
 @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
 def change_password(body: PasswordIn, request: Request, tenant: Tenant = Depends(current_tenant), db: Session = Depends(get_db)) -> Response:
+    shared = request.app.state.settings.demo_login_email
+    if shared and tenant.user.email.lower() == shared.lower():
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "This is the shared demo login, so its password cannot be changed.")
     if not verify_password(body.current_password, tenant.user.password_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Current password is incorrect.")
     tenant.user.password_hash = hash_password(body.new_password)
@@ -281,7 +285,10 @@ def change_password(body: PasswordIn, request: Request, tenant: Tenant = Depends
 
 @router.get("/demo-credentials", response_model=DemoCredentialsOut)
 def demo_credentials(settings: Settings = Depends(get_settings)) -> DemoCredentialsOut:
-    """Only exposed while the demo organization is seeded (never in live mode)."""
+    """The shared demo login when one is configured; otherwise the seeded demo organization (never in live mode)."""
+    if settings.demo_login_email and settings.demo_login_password:
+        return DemoCredentialsOut(email=settings.demo_login_email, password=settings.demo_login_password,
+                                  organization="Demo organization")
     if not settings.seed_demo or settings.app_env == "live":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo credentials are not available.")
     return DemoCredentialsOut(email=DEMO_EMAIL, password=DEMO_PASSWORD, organization=DEMO_ORG_NAME)

@@ -137,6 +137,12 @@ class Settings(BaseSettings):
     # Signup email verification (6 digit OTP). auto = required only when email delivery is configured, so demo
     # and test setups behave exactly as before. on = always required (fails closed at startup without a mailer).
     email_verification: Literal["auto", "on", "off"] = "auto"
+
+    # Optional shared login for the login page's demo button (for judges and reviewers). When both are
+    # set, GET /auth/demo-credentials returns them, also in live mode. Set them in the server's
+    # environment only, never in the repository. That account cannot change its password from inside the app.
+    demo_login_email: str | None = None
+    demo_login_password: str | None = None
     # Remind approvers when a prepared run still waits for a decision (hours between reminders, max 3).
     approval_reminder_hours: int = 6
     # Tell the person who prepared a run when an approver signs it (off by default: the settled mail follows).
